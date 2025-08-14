@@ -1,0 +1,398 @@
+use bincode::Options;
+use log::{error, info, warn};
+use renet::{ChannelConfig, ClientId, ConnectionConfig, RenetServer, SendType, ServerEvent};
+use renet_netcode::{
+    NETCODE_USER_DATA_BYTES, NetcodeServerTransport, ServerAuthentication, ServerConfig,
+};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs;
+use std::net::{SocketAddr, UdpSocket};
+use std::path::Path;
+use std::time::{Duration, Instant, SystemTime};
+
+#[derive(Debug, Deserialize)]
+pub struct Config {
+    pub server: ServerSettings,
+    pub network: NetworkSettings,
+    pub channels: ChannelSettings,
+    pub logging: LoggingSettings,
+    pub authentication: AuthSettings,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ServerSettings {
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    pub greeting_message: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NetworkSettings {
+    pub max_clients: usize,
+    pub protocol_id: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChannelSettings {
+    pub reliable_channel_id: u8,
+    pub voice_channel_id: u8,
+    pub voice_buffer_size_mb: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LoggingSettings {
+    pub level: String,
+    pub stats_interval_secs: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AuthSettings {
+    pub enabled: bool,
+}
+
+impl Config {
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
+        let contents = fs::read_to_string(path)?;
+        Ok(serde_yaml::from_str(&contents)?)
+    }
+
+    pub fn socket_addr(&self) -> String {
+        format!("{}:{}", self.server.host, self.server.port)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Message {
+    client_id: ClientId,
+    text: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+enum ClientMessage {
+    Text(String),
+    VoiceData(Vec<u8>),
+    Speaking(bool),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+enum ServerMessage {
+    ClientConnected {
+        client_id: ClientId,
+        username: String,
+    },
+    ClientDisconnected {
+        client_id: ClientId,
+    },
+    ClientMessage(Message),
+    InitClient {
+        usernames: HashMap<ClientId, String>,
+        server_name: String,
+        greeting: String,
+    },
+    VoiceData {
+        client_id: ClientId,
+        data: Vec<u8>,
+    },
+    Speaking {
+        client_id: ClientId,
+        is_speaking: bool,
+    },
+}
+
+pub struct ChatServer {
+    config: Config,
+    server: RenetServer,
+    transport: NetcodeServerTransport,
+    usernames: HashMap<ClientId, String>,
+    last_updated: Instant,
+    last_stats: Instant,
+    stats: ServerStats,
+}
+
+#[derive(Default)]
+struct ServerStats {
+    messages_count: u64,
+    voice_packets_count: u64,
+    bytes_sent: u64,
+    bytes_received: u64,
+}
+
+impl ChatServer {
+    pub fn new(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
+        let socket = UdpSocket::bind(config.socket_addr())?;
+        let public_addr = socket.local_addr()?;
+
+        info!("{} starting on {}", config.server.name, public_addr);
+
+        let server_config = ServerConfig {
+            current_time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?,
+            max_clients: config.network.max_clients,
+            protocol_id: config.network.protocol_id,
+            public_addresses: vec![public_addr],
+            authentication: if config.authentication.enabled {
+                ServerAuthentication::Secure {
+                    private_key: [0; 32], // TODO: Load from config
+                }
+            } else {
+                ServerAuthentication::Unsecure
+            },
+        };
+
+        let transport = NetcodeServerTransport::new(server_config, socket)?;
+        let connection_config = Self::create_connection_config(&config.channels);
+        let server = RenetServer::new(connection_config);
+
+        Ok(Self {
+            config,
+            server,
+            transport,
+            usernames: HashMap::new(),
+            last_updated: Instant::now(),
+            last_stats: Instant::now(),
+            stats: ServerStats::default(),
+        })
+    }
+
+    fn create_connection_config(channels: &ChannelSettings) -> ConnectionConfig {
+        let mut config = ConnectionConfig::default();
+
+        let voice_channel = ChannelConfig {
+            channel_id: channels.voice_channel_id,
+            max_memory_usage_bytes: channels.voice_buffer_size_mb * 1024 * 1024,
+            send_type: SendType::Unreliable,
+        };
+
+        config.client_channels_config.push(voice_channel.clone());
+        config.server_channels_config.push(voice_channel);
+
+        config
+    }
+
+    pub fn update(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let now = Instant::now();
+        let duration = now - self.last_updated;
+        self.last_updated = now;
+
+        self.server.update(duration);
+        self.transport.update(duration, &mut self.server)?;
+
+        self.process_events();
+        self.process_reliable_messages();
+        self.process_voice_messages();
+
+        self.transport.send_packets(&mut self.server);
+
+        if now.duration_since(self.last_stats)
+            >= Duration::from_secs(self.config.logging.stats_interval_secs)
+        {
+            self.print_stats();
+            self.last_stats = now;
+        }
+
+        Ok(())
+    }
+
+    fn process_events(&mut self) {
+        while let Some(event) = self.server.get_event() {
+            match event {
+                ServerEvent::ClientConnected { client_id } => {
+                    self.handle_client_connected(client_id);
+                }
+                ServerEvent::ClientDisconnected { client_id, reason } => {
+                    self.handle_client_disconnected(client_id, reason);
+                }
+            }
+        }
+    }
+
+    fn handle_client_connected(&mut self, client_id: ClientId) {
+        let username = self
+            .transport
+            .user_data(client_id)
+            .map(|user_data: [u8; 256]| {
+                <std::string::String as Username>::from_user_data(&user_data)
+            })
+            .unwrap_or_else(|| format!("User{}", client_id));
+
+        info!("✅ {} ({}) connected", username, client_id);
+        self.usernames.insert(client_id, username.clone());
+
+        // Send init message with current users list and greeting to the new client
+        let init_message = ServerMessage::InitClient {
+            usernames: self.usernames.clone(),
+            server_name: self.config.server.name.clone(),
+            greeting: self.config.server.greeting_message.clone(),
+        };
+
+        let encoded = bincode::options()
+            .serialize(&init_message)
+            .expect("Failed to serialize init message");
+
+        self.server
+            .send_message(client_id, self.config.channels.reliable_channel_id, encoded);
+
+        // Notify all OTHER clients about the new connection
+        let connected_msg = ServerMessage::ClientConnected {
+            client_id,
+            username: username.clone(),
+        };
+
+        let encoded = bincode::options()
+            .serialize(&connected_msg)
+            .expect("Failed to serialize connected message");
+
+        self.server.broadcast_message_except(
+            client_id,
+            self.config.channels.reliable_channel_id,
+            encoded,
+        );
+    }
+
+    fn handle_client_disconnected(&mut self, client_id: ClientId, reason: renet::DisconnectReason) {
+        if let Some(username) = self.usernames.remove(&client_id) {
+            info!("❌ {} ({}) disconnected: {}", username, client_id, reason);
+        }
+
+        let message = ServerMessage::ClientDisconnected { client_id };
+        let encoded = bincode::options()
+            .serialize(&message)
+            .expect("Failed to serialize disconnect message");
+
+        self.server
+            .broadcast_message(self.config.channels.reliable_channel_id, encoded);
+    }
+
+    fn process_reliable_messages(&mut self) {
+        let channel_id = self.config.channels.reliable_channel_id;
+
+        for client_id in self.server.clients_id() {
+            while let Some(message) = self.server.receive_message(client_id, channel_id) {
+                self.stats.bytes_received += message.len() as u64;
+
+                if let Ok(msg) = bincode::options().deserialize::<ClientMessage>(&message) {
+                    self.handle_client_message(client_id, msg);
+                }
+            }
+        }
+    }
+
+    fn handle_client_message(&mut self, client_id: ClientId, message: ClientMessage) {
+        match message {
+            ClientMessage::Text(text) => {
+                let username = self.get_username(client_id);
+                info!("💬 [{}]: {}", username, text);
+                self.stats.messages_count += 1;
+
+                let msg = ServerMessage::ClientMessage(Message { client_id, text });
+                let encoded = bincode::options()
+                    .serialize(&msg)
+                    .expect("Failed to serialize text message");
+
+                self.stats.bytes_sent +=
+                    encoded.len() as u64 * self.server.connected_clients() as u64;
+                self.server
+                    .broadcast_message(self.config.channels.reliable_channel_id, encoded);
+            }
+            ClientMessage::Speaking(is_speaking) => {
+                let msg = ServerMessage::Speaking {
+                    client_id,
+                    is_speaking,
+                };
+                let encoded = bincode::options()
+                    .serialize(&msg)
+                    .expect("Failed to serialize speaking message");
+
+                self.server
+                    .broadcast_message(self.config.channels.reliable_channel_id, encoded);
+            }
+            ClientMessage::VoiceData(_) => {
+                warn!("Voice data received on reliable channel from {}", client_id);
+            }
+        }
+    }
+
+    fn process_voice_messages(&mut self) {
+        let channel_id = self.config.channels.voice_channel_id;
+        let clients: Vec<ClientId> = self.server.clients_id();
+
+        for client_id in &clients {
+            while let Some(message) = self.server.receive_message(*client_id, channel_id) {
+                self.stats.bytes_received += message.len() as u64;
+
+                if let Ok(ClientMessage::VoiceData(data)) =
+                    bincode::options().deserialize::<ClientMessage>(&message)
+                {
+                    self.stats.voice_packets_count += 1;
+                    self.forward_voice_data(*client_id, data, &clients);
+                }
+            }
+        }
+    }
+
+    fn forward_voice_data(&mut self, sender: ClientId, data: Vec<u8>, clients: &[ClientId]) {
+        let message = ServerMessage::VoiceData {
+            client_id: sender,
+            data,
+        };
+
+        let encoded = bincode::options()
+            .serialize(&message)
+            .expect("Failed to serialize voice data");
+
+        // Use renet's built-in broadcast_message_except for efficiency
+        self.server.broadcast_message_except(
+            sender,
+            self.config.channels.voice_channel_id,
+            encoded.clone(),
+        );
+
+        // Update stats based on how many clients received the message
+        let recipients = clients.len().saturating_sub(1);
+        self.stats.bytes_sent += encoded.len() as u64 * recipients as u64;
+    }
+
+    fn get_username(&self, client_id: ClientId) -> String {
+        self.usernames
+            .get(&client_id)
+            .cloned()
+            .unwrap_or_else(|| format!("User{}", client_id))
+    }
+
+    fn print_stats(&self) {
+        info!("=== {} Statistics ===", self.config.server.name);
+        info!("Connected clients: {}", self.server.connected_clients());
+        info!("Text messages: {}", self.stats.messages_count);
+        info!("Voice packets: {}", self.stats.voice_packets_count);
+        info!(
+            "Data sent: {:.2} MB",
+            self.stats.bytes_sent as f64 / 1_048_576.0
+        );
+        info!(
+            "Data received: {:.2} MB",
+            self.stats.bytes_received as f64 / 1_048_576.0
+        );
+        info!(
+            "Active users: {:?}",
+            self.usernames.values().collect::<Vec<_>>()
+        );
+    }
+
+    pub fn addresses(&self) -> Vec<SocketAddr> {
+        self.transport.addresses()
+    }
+}
+
+trait Username {
+    fn from_user_data(user_data: &[u8; NETCODE_USER_DATA_BYTES]) -> String;
+}
+
+impl Username for String {
+    fn from_user_data(user_data: &[u8; NETCODE_USER_DATA_BYTES]) -> String {
+        let len = (user_data[0] as usize).min(NETCODE_USER_DATA_BYTES - 1);
+        let data = &user_data[1..=len];
+
+        String::from_utf8_lossy(data).into_owned()
+    }
+}
