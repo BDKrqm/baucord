@@ -411,8 +411,7 @@ impl VoiceChat {
             .unwrap_or_else(|| "Not initialized".to_string());
 
         format!(
-            "📊 Voice Stats:\n\
-                Packets - Sent: {}, Received: {}, Queue: {}\n\
+            "Packets - Sent: {}, Received: {}, Queue: {}\n\
                 Input: {}\n\
                 Output: {}",
             sent, received, incoming, input_info, output_info

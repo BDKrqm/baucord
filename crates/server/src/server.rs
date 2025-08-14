@@ -1,5 +1,5 @@
 use bincode::Options;
-use log::{error, info, warn};
+use log::{info, warn};
 use renet::{ChannelConfig, ClientId, ConnectionConfig, RenetServer, SendType, ServerEvent};
 use renet_netcode::{
     NETCODE_USER_DATA_BYTES, NetcodeServerTransport, ServerAuthentication, ServerConfig,
@@ -341,14 +341,12 @@ impl ChatServer {
             .serialize(&message)
             .expect("Failed to serialize voice data");
 
-        // Use renet's built-in broadcast_message_except for efficiency
         self.server.broadcast_message_except(
             sender,
             self.config.channels.voice_channel_id,
             encoded.clone(),
         );
 
-        // Update stats based on how many clients received the message
         let recipients = clients.len().saturating_sub(1);
         self.stats.bytes_sent += encoded.len() as u64 * recipients as u64;
     }

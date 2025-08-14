@@ -626,3 +626,4 @@ struct UserMenuData {
     settings: Arc<Mutex<Settings>>,
     voice_chat: Arc<Mutex<Option<VoiceChat>>>,
 }
+
