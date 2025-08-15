@@ -1,3 +1,5 @@
+// ui/settings.rs - Fixed version with proper device capabilities display
+
 use crate::settings::Settings;
 use crate::ui::theme::DarkTheme;
 use crate::voice::VoiceChat;
@@ -20,7 +22,7 @@ impl AudioSettingsWindow {
 
     pub fn show_window(&self) {
         let mut wind = window::Window::default()
-            .with_size(500, 700)
+            .with_size(500, 750)
             .with_label("Audio Settings");
         wind.make_resizable(false);
         wind.set_color(DarkTheme::BG_PRIMARY);
@@ -187,29 +189,29 @@ impl AudioSettingsWindow {
         diag_grp.set_margins(10, 10, 10, 10);
         diag_grp.set_spacing(15);
 
-        // Audio Interface Info Section
-        let mut interface_title = frame::Frame::default()
-            .with_label("🔌  Audio Interface")
+        // CONSOLIDATED Device Capabilities Section (replaces Audio Interface)
+        let mut capabilities_title = frame::Frame::default()
+            .with_label("🎛️  Device Capabilities & Configuration")
             .with_align(enums::Align::Left | enums::Align::Inside);
-        interface_title.set_label_color(DarkTheme::TEXT_PRIMARY);
-        interface_title.set_label_size(14);
-        diag_grp.fixed(&interface_title, 25);
+        capabilities_title.set_label_color(DarkTheme::TEXT_PRIMARY);
+        capabilities_title.set_label_size(14);
+        diag_grp.fixed(&capabilities_title, 25);
 
-        let mut interface_display = text::TextDisplay::default();
-        let interface_buffer = text::TextBuffer::default();
-        interface_display.set_buffer(interface_buffer.clone());
-        interface_display.set_text_size(11);
-        interface_display.set_color(DarkTheme::BG_INPUT);
-        interface_display.set_text_color(DarkTheme::TEXT_PRIMARY);
-        interface_display.set_frame(enums::FrameType::BorderBox);
-        diag_grp.fixed(&interface_display, 80);
+        let mut capabilities_display = text::TextDisplay::default();
+        let capabilities_buffer = text::TextBuffer::default();
+        capabilities_display.set_buffer(capabilities_buffer.clone());
+        capabilities_display.set_text_size(10);
+        capabilities_display.set_color(DarkTheme::BG_INPUT);
+        capabilities_display.set_text_color(DarkTheme::TEXT_PRIMARY);
+        capabilities_display.set_frame(enums::FrameType::BorderBox);
+        diag_grp.fixed(&capabilities_display, 150);
 
-        let mut copy_interface_btn = button::Button::default().with_label("📋 Copy Interface Info");
-        copy_interface_btn.set_color(DarkTheme::BG_TERTIARY);
-        copy_interface_btn.set_label_color(DarkTheme::TEXT_PRIMARY);
-        copy_interface_btn.set_frame(enums::FrameType::FlatBox);
-        copy_interface_btn.set_label_size(11);
-        diag_grp.fixed(&copy_interface_btn, 30);
+        let mut copy_capabilities_btn = button::Button::default().with_label("📋 Copy Device Info");
+        copy_capabilities_btn.set_color(DarkTheme::BG_TERTIARY);
+        copy_capabilities_btn.set_label_color(DarkTheme::TEXT_PRIMARY);
+        copy_capabilities_btn.set_frame(enums::FrameType::FlatBox);
+        copy_capabilities_btn.set_label_size(11);
+        diag_grp.fixed(&copy_capabilities_btn, 30);
 
         // Separator
         let mut sep2 = frame::Frame::default();
@@ -232,7 +234,7 @@ impl AudioSettingsWindow {
         stats_display.set_color(DarkTheme::BG_INPUT);
         stats_display.set_text_color(DarkTheme::TEXT_PRIMARY);
         stats_display.set_frame(enums::FrameType::BorderBox);
-        diag_grp.fixed(&stats_display, 120);
+        diag_grp.fixed(&stats_display, 100);
 
         let mut copy_stats_btn = button::Button::default().with_label("📋 Copy Statistics");
         copy_stats_btn.set_color(DarkTheme::BG_TERTIARY);
@@ -264,7 +266,7 @@ impl AudioSettingsWindow {
         debug_verbose.set_label_size(12);
         diag_grp.fixed(&debug_verbose, 25);
 
-        diag_grp.end();
+        diag_grp.end(); // IMPORTANT: End the diagnostics group here
 
         tabs.end();
         tabs.auto_layout();
@@ -316,15 +318,23 @@ impl AudioSettingsWindow {
                     if let Some(vc) = vc_guard.as_ref() {
                         // Get input devices
                         if let Ok(input_devices) = vc.get_input_devices() {
-                            for device in input_devices {
-                                input_choice.add_choice(&device);
+                            for (device_name, is_valid) in input_devices {
+                                if is_valid {
+                                    input_choice.add_choice(&device_name);
+                                } else {
+                                    input_choice.add_choice(&format!("{} ⚠️", device_name));
+                                }
                             }
                         }
 
                         // Get output devices
                         if let Ok(output_devices) = vc.get_output_devices() {
-                            for device in output_devices {
-                                output_choice.add_choice(&device);
+                            for (device_name, is_valid) in output_devices {
+                                if is_valid {
+                                    output_choice.add_choice(&device_name);
+                                } else {
+                                    output_choice.add_choice(&format!("{} ⚠️", device_name));
+                                }
                             }
                         }
                     }
@@ -334,13 +344,11 @@ impl AudioSettingsWindow {
                 let settings = settings.lock().unwrap();
                 if let Some(ref input_dev) = settings.input_device {
                     for i in 0..input_choice.size() {
-                        if input_choice
-                            .text(i)
-                            .map(|t| t == *input_dev)
-                            .unwrap_or(false)
-                        {
-                            input_choice.set_value(i);
-                            break;
+                        if let Some(text) = input_choice.text(i) {
+                            if text == *input_dev || text.starts_with(input_dev) {
+                                input_choice.set_value(i);
+                                break;
+                            }
                         }
                     }
                 } else {
@@ -349,13 +357,11 @@ impl AudioSettingsWindow {
 
                 if let Some(ref output_dev) = settings.output_device {
                     for i in 0..output_choice.size() {
-                        if output_choice
-                            .text(i)
-                            .map(|t| t == *output_dev)
-                            .unwrap_or(false)
-                        {
-                            output_choice.set_value(i);
-                            break;
+                        if let Some(text) = output_choice.text(i) {
+                            if text == *output_dev || text.starts_with(output_dev) {
+                                output_choice.set_value(i);
+                                break;
+                            }
                         }
                     }
                 } else {
@@ -386,11 +392,14 @@ impl AudioSettingsWindow {
         input_choice.set_callback(move |c| {
             let selected = c.choice().unwrap_or_else(|| "System Default".to_string());
 
+            // Remove warning emoji if present
+            let clean_name = selected.replace(" ⚠️", "");
+
             let mut settings = settings_input.lock().unwrap();
-            if selected == "System Default" {
+            if clean_name == "System Default" {
                 settings.input_device = None;
             } else {
-                settings.input_device = Some(selected.clone());
+                settings.input_device = Some(clean_name.clone());
             }
 
             // Try to apply immediately if connected
@@ -417,11 +426,14 @@ impl AudioSettingsWindow {
         output_choice.set_callback(move |c| {
             let selected = c.choice().unwrap_or_else(|| "System Default".to_string());
 
+            // Remove warning emoji if present
+            let clean_name = selected.replace(" ⚠️", "");
+
             let mut settings = settings_output.lock().unwrap();
-            if selected == "System Default" {
+            if clean_name == "System Default" {
                 settings.output_device = None;
             } else {
-                settings.output_device = Some(selected.clone());
+                settings.output_device = Some(clean_name.clone());
             }
 
             // Try to apply immediately if connected
@@ -475,11 +487,12 @@ impl AudioSettingsWindow {
 
             settings_vad.lock().unwrap().vad_threshold = value;
 
-            if let Ok(mut vc_guard) = voice_chat_vad.lock() {
-                if let Some(vc) = vc_guard.as_mut() {
-                    // vc.set_vad_threshold(value);
-                }
-            }
+            // TODO: Implement set_vad_threshold in VoiceChat if needed
+            // if let Ok(mut vc_guard) = voice_chat_vad.lock() {
+            //     if let Some(vc) = vc_guard.as_mut() {
+            //         vc.set_vad_threshold(value);
+            //     }
+            // }
         });
 
         // Mute on start
@@ -494,12 +507,12 @@ impl AudioSettingsWindow {
             settings_verbose.lock().unwrap().verbose_logging = b.is_checked();
         });
 
-        // Copy interface info button
-        let interface_buffer_copy = interface_buffer.clone();
-        copy_interface_btn.set_callback(move |_| {
-            let text = interface_buffer_copy.text();
+        // Copy capabilities button
+        let capabilities_buffer_copy = capabilities_buffer.clone();
+        copy_capabilities_btn.set_callback(move |_| {
+            let text = capabilities_buffer_copy.text();
             app::copy(&text);
-            info!("[Settings] Copied interface info to clipboard");
+            info!("[Settings] Copied device capabilities to clipboard");
         });
 
         // Copy stats button
@@ -548,29 +561,24 @@ impl AudioSettingsWindow {
             wind.hide();
         });
 
-        // Update interface info periodically (slower update)
-        let voice_chat_interface = self.voice_chat.clone();
-        let mut interface_buffer_clone = interface_buffer.clone();
+        // Update device capabilities display periodically
+        let voice_chat_caps = self.voice_chat.clone();
+        let mut capabilities_buffer_clone = capabilities_buffer.clone();
         app::add_timeout3(2.0, move |handle| {
-            let mut interface_text = String::new();
+            let mut caps_text = String::new();
 
-            if let Ok(vc_guard) = voice_chat_interface.lock() {
+            if let Ok(vc_guard) = voice_chat_caps.lock() {
                 if let Some(vc) = vc_guard.as_ref() {
-                    // Get current devices and sample rate info
-                    if let Some(input) = vc.get_current_input_device() {
-                        interface_text.push_str(&format!("Input: {}\n", input));
-                    }
-                    if let Some(output) = vc.get_current_output_device() {
-                        interface_text.push_str(&format!("Output: {}\n", output));
-                    }
-                    // Add sample rate if available
-                    interface_text.push_str("Sample Rate: 48000 Hz\n");
+                    // Use get_device_info which now shows full capabilities
+                    caps_text = vc.get_device_info();
                 } else {
-                    interface_text.push_str("Not connected\n");
+                    caps_text.push_str(
+                        "Not connected - connect to a server to see device capabilities\n",
+                    );
                 }
             }
 
-            interface_buffer_clone.set_text(&interface_text);
+            capabilities_buffer_clone.set_text(&caps_text);
             app::repeat_timeout3(2.0, handle);
         });
 

@@ -307,7 +307,7 @@ impl VADProcessor {
         // Different cooldowns for different transitions
         let required_cooldown = if was_speaking && !now_speaking {
             // Stopping: require longer cooldown to prevent cutting off
-            std::time::Duration::from_millis(300) // Wait longer before stopping
+            std::time::Duration::from_millis(800) // Wait longer before stopping
         } else if !was_speaking && now_speaking {
             // Starting: allow quick start
             std::time::Duration::from_millis(50) // Quick response to start
