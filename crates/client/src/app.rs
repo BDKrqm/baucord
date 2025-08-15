@@ -10,7 +10,7 @@ use crate::settings::Settings;
 use crate::ui::chat::Chat;
 use crate::ui::sidebar::Sidebar;
 use crate::ui::theme::DarkTheme;
-use crate::voice::{VoiceChat, VoicePacket};
+use crate::voice::{AudioPacket, VoiceChat};
 
 #[derive(Clone)]
 pub struct SpeakingState {
@@ -153,10 +153,13 @@ impl App {
 
                         match VoiceChat::new() {
                             Ok(mut vc) => {
-                                if let Err(e) = vc.start() {
+                                // Pass settings to start() method
+                                let settings_ref = settings.lock().unwrap();
+                                if let Err(e) = vc.start(&*settings_ref) {
                                     s_error.send(format!("Voice init failed: {}", e));
                                     return;
                                 }
+                                drop(settings_ref);
                                 *voice_chat.lock().unwrap() = Some(vc);
                             }
                             Err(e) => {
@@ -228,7 +231,8 @@ impl App {
     }
 
     fn setup_network_loop(&mut self, mut sidebar: Sidebar, mut chat: Chat) {
-        let (s, r) = app::channel::<NetworkMessage>();
+        // Use crossbeam for better performance
+        let (s, r) = crossbeam_channel::unbounded::<NetworkMessage>();
 
         let network_client = self.network_client.clone();
         let voice_chat = self.voice_chat.clone();
@@ -237,9 +241,7 @@ impl App {
         let settings = self.settings.clone();
         let our_client_id = self.our_client_id.clone();
 
-        // Network/voice update loop
-        let mut last_ui_update = std::time::Instant::now();
-
+        // Network/voice update loop (runs at 100Hz for low latency)
         app::add_timeout3(0.01, move |handle| {
             if let Ok(mut client_guard) = network_client.lock() {
                 if let Some(client) = client_guard.as_mut() {
@@ -252,10 +254,14 @@ impl App {
                             NetworkMessage::VoiceData { client_id, data } => {
                                 if let Ok(mut vc_guard) = voice_chat.lock() {
                                     if let Some(vc) = vc_guard.as_mut() {
-                                        vc.receive_packet(VoicePacket::AudioData {
-                                            client_id: *client_id,
-                                            opus_data: data.clone(),
-                                        });
+                                        // Create AudioPacket from network data
+                                        let packet = AudioPacket::new(
+                                            0, // Sequence number should be tracked per client
+                                            Instant::now(),
+                                            *client_id as u32, // Use client_id as SSRC
+                                            data.clone(),
+                                        );
+                                        vc.receive_packet(packet);
                                     }
                                 }
                             }
@@ -274,7 +280,8 @@ impl App {
                             }
                             _ => {}
                         }
-                        s_net.send(msg);
+                        // Send to UI thread via crossbeam
+                        let _ = s_net.try_send(msg);
                     }
 
                     // Send outgoing voice packets
@@ -283,14 +290,11 @@ impl App {
                             let packets = vc.get_outgoing_packets();
 
                             for packet in packets {
-                                match packet {
-                                    VoicePacket::AudioData { opus_data, .. } => {
-                                        client.send_voice_data(opus_data);
-                                    }
-                                    VoicePacket::Speaking { is_speaking, .. } => {
-                                        client.send_speaking_status(is_speaking);
-                                    }
-                                }
+                                // Send the opus data from the AudioPacket
+                                client.send_voice_data(packet.opus_data);
+                                
+                                // Speaking status is now handled internally by VAD
+                                // The network layer can check packet.header.vad if needed
                             }
                         }
                     }
@@ -305,8 +309,9 @@ impl App {
         let speaking_indicators2 = self.speaking_indicators.clone();
 
         // Handle messages in main thread
-        app::add_timeout3(0.01, move |handle| {
-            if let Some(msg) = r.recv() {
+        app::add_timeout3(0.016, move |handle| {  // ~60Hz for UI updates
+            // Process all pending messages without blocking
+            while let Ok(msg) = r.try_recv() {
                 match msg {
                     NetworkMessage::InitClient {
                         users,
@@ -381,7 +386,7 @@ impl App {
                 }
             }
 
-            app::repeat_timeout3(0.01, handle);
+            app::repeat_timeout3(0.1, handle);
         });
     }
 }

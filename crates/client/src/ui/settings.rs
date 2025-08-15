@@ -2,6 +2,7 @@
 
 use crate::settings::Settings;
 use crate::ui::theme::DarkTheme;
+use crate::ui::diagnostics::DiagnosticsWindow;
 use crate::voice::VoiceChat;
 use fltk::{prelude::*, *};
 use log::info;
@@ -22,7 +23,7 @@ impl AudioSettingsWindow {
 
     pub fn show_window(&self) {
         let mut wind = window::Window::default()
-            .with_size(500, 750)
+            .with_size(500, 950)
             .with_label("Audio Settings");
         wind.make_resizable(false);
         wind.set_color(DarkTheme::BG_PRIMARY);
@@ -266,7 +267,45 @@ impl AudioSettingsWindow {
         debug_verbose.set_label_size(12);
         diag_grp.fixed(&debug_verbose, 25);
 
-        diag_grp.end(); // IMPORTANT: End the diagnostics group here
+
+        // === Add Terminal Button ===
+        let mut sep4 = frame::Frame::default();
+        sep4.set_frame(enums::FrameType::FlatBox);
+        sep4.set_color(DarkTheme::BG_TERTIARY);
+        diag_grp.fixed(&sep4, 1);
+
+        // Advanced Diagnostics Section
+        let mut advanced_title = frame::Frame::default()
+            .with_label("🖥️  Advanced Diagnostics")
+            .with_align(enums::Align::Left | enums::Align::Inside);
+        advanced_title.set_label_color(DarkTheme::TEXT_PRIMARY);
+        advanced_title.set_label_size(14);
+        diag_grp.fixed(&advanced_title, 25);
+
+        let mut terminal_desc = frame::Frame::default()
+            .with_label(
+                "Open the diagnostics terminal for advanced testing and real-time monitoring",
+            )
+            .with_align(enums::Align::Left | enums::Align::Inside);
+        terminal_desc.set_label_color(DarkTheme::TEXT_MUTED);
+        terminal_desc.set_label_size(11);
+        diag_grp.fixed(&terminal_desc, 20);
+
+        let mut open_terminal_btn =
+            button::Button::default().with_label("🖥️  Open Diagnostics Terminal");
+        open_terminal_btn.set_color(DarkTheme::ACCENT);
+        open_terminal_btn.set_label_color(enums::Color::White);
+        open_terminal_btn.set_frame(enums::FrameType::FlatBox);
+        open_terminal_btn.set_label_size(13);
+        diag_grp.fixed(&open_terminal_btn, 40);
+
+        // Add the callback for the terminal button
+        let voice_chat_terminal = self.voice_chat.clone();
+        open_terminal_btn.set_callback(move |_| {
+            let mut diagnostics_window = DiagnosticsWindow::new(voice_chat_terminal.clone());
+            diagnostics_window.show_window();
+        });
+        diag_grp.end(); 
 
         tabs.end();
         tabs.auto_layout();
@@ -607,4 +646,3 @@ impl AudioSettingsWindow {
         });
     }
 }
-

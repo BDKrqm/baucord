@@ -21,7 +21,6 @@ fn main() {
 
     #[cfg(not(debug_assertions))]
     {
-        // For release builds, log to a file
         use env_logger::Target;
         use std::fs::File;
 
@@ -30,20 +29,15 @@ fn main() {
             .target(Target::Pipe(Box::new(log_file)))
             .init();
     }
-    // Load settings from disk
     let settings = Arc::new(Mutex::new(Settings::load()));
 
-    // Create shared state for network client and voice chat
     let network_client = Arc::new(Mutex::new(None::<NetworkClient>));
     let voice_chat = Arc::new(Mutex::new(None::<VoiceChat>));
 
-    // Create UI with network, voice, and settings references
-    let mut chat_ui = App::new(network_client.clone(), voice_chat.clone(), settings.clone());
+    let mut app = App::new(network_client.clone(), voice_chat.clone(), settings.clone());
 
-    // Run UI (blocking)
-    chat_ui.run();
+    app.run();
 
-    // Save settings on exit
     if let Ok(settings_guard) = settings.lock() {
         settings_guard.save();
     }

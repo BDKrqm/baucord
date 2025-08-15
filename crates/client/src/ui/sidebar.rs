@@ -135,7 +135,7 @@ impl Sidebar {
                 if let Ok(mut vc_guard) = voice_chat.lock() {
                     if let Some(vc) = vc_guard.as_mut() {
                         let muted = b.label() == "Mute";
-                        vc.set_muted(muted);
+                        //vc.set_muted(muted);
                         if muted {
                             b.set_label("Unmute");
                             b.set_color(DarkTheme::DANGER);
