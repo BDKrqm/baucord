@@ -239,9 +239,9 @@ impl App {
         let s_net = s.clone();
         let speaking_indicators = self.speaking_indicators.clone();
         let settings = self.settings.clone();
-        let our_client_id = self.our_client_id.clone();
+        let our_client_id_net = self.our_client_id.clone(); // for the 100Hz network loop
+        let our_client_id_ui = self.our_client_id.clone(); // for the ~60Hz UI loop
 
-        // Network/voice update loop (runs at 100Hz for low latency)
         app::add_timeout3(0.01, move |handle| {
             if let Ok(mut client_guard) = network_client.lock() {
                 if let Some(client) = client_guard.as_mut() {
@@ -251,14 +251,19 @@ impl App {
 
                     for msg in messages {
                         match &msg {
-                            NetworkMessage::VoiceData { client_id, data } => {
+                            NetworkMessage::VoiceData {
+                                client_id,
+                                seq,
+                                timestamp: ts_48k,
+                                data,
+                            } => {
                                 if let Ok(mut vc_guard) = voice_chat.lock() {
                                     if let Some(vc) = vc_guard.as_mut() {
-                                        // Create AudioPacket from network data
-                                        let packet = AudioPacket::new(
-                                            0, // Sequence number should be tracked per client
-                                            Instant::now(),
-                                            *client_id as u32, // Use client_id as SSRC
+                                        // Create AudioPacket from network data with proper types
+                                        let packet = AudioPacket::from_network(
+                                            *seq,    // u32 sequence
+                                            *ts_48k, // u32 48kHz timestamp
+                                            *client_id,
                                             data.clone(),
                                         );
                                         vc.receive_packet(packet);
@@ -284,17 +289,24 @@ impl App {
                         let _ = s_net.try_send(msg);
                     }
 
-                    // Send outgoing voice packets
+                    // Send outgoing voice packets with monotonic timestamps
                     if let Ok(mut vc_guard) = voice_chat.lock() {
                         if let Some(vc) = vc_guard.as_mut() {
                             let packets = vc.get_outgoing_packets();
 
-                            for packet in packets {
-                                // Send the opus data from the AudioPacket
-                                client.send_voice_data(packet.opus_data);
-                                
-                                // Speaking status is now handled internally by VAD
-                                // The network layer can check packet.header.vad if needed
+                            if let Some(our_id) = *our_client_id_net.lock().unwrap() {
+                                for packet in packets {
+                                    // The packet already has a proper monotonic ts_48k from encoder
+                                    // Just pass it through
+                                    client.send_voice_frame_raw(
+                                        our_id,
+                                        packet.header.timestamp,
+                                        &packet.opus_data,
+                                    );
+                                }
+
+                                // Flush once per tick (every 10ms)
+                                client.flush_voice_packet();
                             }
                         }
                     }
@@ -309,7 +321,8 @@ impl App {
         let speaking_indicators2 = self.speaking_indicators.clone();
 
         // Handle messages in main thread
-        app::add_timeout3(0.016, move |handle| {  // ~60Hz for UI updates
+        app::add_timeout3(0.016, move |handle| {
+            // ~60Hz for UI updates
             // Process all pending messages without blocking
             while let Ok(msg) = r.try_recv() {
                 match msg {
@@ -326,7 +339,7 @@ impl App {
                                 .get(&id)
                                 .map_or(false, |name| name == &settings.lock().unwrap().nickname)
                         }) {
-                            *our_client_id.lock().unwrap() = Some(*our_id);
+                            *our_client_id_ui.lock().unwrap() = Some(*our_id);
                         }
 
                         // Add decoders for all existing users

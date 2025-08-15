@@ -13,11 +13,11 @@ pub use output::AudioOutput;
 pub use packet::AudioPacket;
 pub use stats::AudioStats;
 
-use diagnostics::{PipelineDiagnostics, TestMode, AudioFingerprint, Anomaly, AnomalyType};
 use crate::settings::{Settings, UserAudioSettings};
 use cpal::traits::{DeviceTrait, HostTrait};
 use cpal::{Device, SampleFormat, SampleRate, SupportedStreamConfig};
 use crossbeam_channel::{Receiver, Sender, bounded};
+use diagnostics::{Anomaly, AnomalyType, PipelineDiagnostics, ResamplerMetrics, TestMode};
 use log::{error, info, warn};
 use opus::{Application, Bitrate, Channels, Decoder, Encoder};
 use std::collections::HashMap;
@@ -231,17 +231,17 @@ pub struct VoiceChat {
         Sender<(renet::ClientId, Vec<f32>)>,
         Receiver<(renet::ClientId, Vec<f32>)>,
     ),
-    
+
     // Worker threads
     encoder_thread: Option<thread::JoinHandle<()>>,
     decoder_thread: Option<thread::JoinHandle<()>>,
-    
+
     // Settings
     latency_preset: Arc<AtomicUsize>,
     channel_mapping: Arc<Mutex<ChannelMapping>>,
     user_audio_settings: Arc<Mutex<HashMap<renet::ClientId, UserAudioSettings>>>,
     stats: Arc<AudioStats>,
-    
+
     // Diagnostics
     pub diagnostics: Arc<PipelineDiagnostics>,
 
@@ -356,7 +356,8 @@ impl VoiceChat {
         let diagnostics = self.diagnostics.clone();
 
         self.encoder_thread = Some(thread::spawn(move || {
-            let mut seq = 0u16;
+            let mut seq = 0u32; // Changed to u32
+            let mut ts_48k = 0u32; // Monotonic 48kHz timestamp
             let mut scratch = vec![0u8; 256];
 
             while let Ok(samples) = rx.recv() {
@@ -365,10 +366,14 @@ impl VoiceChat {
                 if count % 100 == 0 {
                     info!("✅ Encoder: Processed {} frames", count);
                 }
-                
+
                 // Check frame size BEFORE encoding
                 if samples.len() != FRAME_SIZE {
-                    error!("🚨 CRITICAL: Encoder input size {} != {}", samples.len(), FRAME_SIZE);
+                    error!(
+                        "🚨 CRITICAL: Encoder input size {} != {}",
+                        samples.len(),
+                        FRAME_SIZE
+                    );
                     diagnostics.record_anomaly(Anomaly {
                         stage: "encoder",
                         issue: AnomalyType::FrameSizeMismatch,
@@ -381,7 +386,7 @@ impl VoiceChat {
 
                 // Time the encoding
                 let encode_start = Instant::now();
-                
+
                 // Convert to i16
                 let samples_i16: Vec<i16> = samples
                     .iter()
@@ -396,14 +401,18 @@ impl VoiceChat {
                             w.encode = encode_start.elapsed();
                         });
 
+                        // Create packet with monotonic timestamp
                         let packet = AudioPacket::new(
                             seq,
-                            Instant::now(),
+                            ts_48k,
                             0, // SSRC for local
                             scratch[..size].to_vec(),
                         );
 
+                        // Increment sequence and timestamp for next frame
                         seq = seq.wrapping_add(1);
+                        ts_48k = ts_48k.wrapping_add(480); // 10ms = 480 samples at 48kHz
+
                         stats.packets_sent.fetch_add(1, Ordering::Relaxed);
 
                         // Send to network
@@ -415,7 +424,7 @@ impl VoiceChat {
                         if loopback.load(Ordering::Relaxed) {
                             let loopback_packet = AudioPacket::new(
                                 seq,
-                                Instant::now(),
+                                ts_48k,
                                 999999, // Special SSRC for loopback
                                 scratch[..size].to_vec(),
                             );
@@ -439,72 +448,94 @@ impl VoiceChat {
 
         self.decoder_thread = Some(thread::spawn(move || {
             let mut frame_buffer = vec![0i16; FRAME_SIZE * 2];
-            let mut last_seq: HashMap<u32, u16> = HashMap::new();
+            let mut last_seq: HashMap<u64, u32> = HashMap::new(); // KEY: u64 ssrc (see fix #2)
 
             while let Ok(packet) = rx.recv() {
-                static DECODE_COUNTER: AtomicU64 = AtomicU64::new(0);
-                let count = DECODE_COUNTER.fetch_add(1, Ordering::Relaxed);
-                if count % 100 == 0 {
-                    info!("✅ Decoder: Processed {} packets", count);
-                }
-                
-                let client_id = packet.header.ssrc as u64;
+                let ssrc = packet.header.ssrc; // u64
+                let curr = packet.header.seq; // u32
 
-                // Check for packet loss
-                if let Some(&last) = last_seq.get(&packet.header.ssrc) {
-                    let expected = last.wrapping_add(1);
-                    if packet.header.seq != expected {
-                        let lost = packet.header.seq.wrapping_sub(expected);
-                        stats.packets_lost.fetch_add(lost as u64, Ordering::Relaxed);
-
-                        // PLC: Generate comfort noise for lost packets
-                        let mut decoders_map = decoders.lock().unwrap();
-                        let decoder = decoders_map.entry(client_id).or_insert_with(|| {
-                            Decoder::new(OPUS_SAMPLE_RATE, Channels::Mono).unwrap()
-                        });
-
-                        for _ in 0..lost.min(3) {
-                            // Pass empty slice for PLC
-                            if let Ok(samples) = decoder.decode(&[], &mut frame_buffer, false) {
-                                let samples_f32: Vec<f32> = frame_buffer[..samples]
-                                    .iter()
-                                    .map(|&x| x as f32 / 32768.0)
-                                    .collect();
-
-                                let _ = tx.send((client_id, samples_f32));
-                                stats.plc_frames.fetch_add(1, Ordering::Relaxed);
-                            }
-                        }
-                    }
-                }
-                last_seq.insert(packet.header.ssrc, packet.header.seq);
-
-                // Decode the actual packet
                 let mut decoders_map = decoders.lock().unwrap();
                 let decoder = decoders_map
-                    .entry(client_id)
+                    .entry(ssrc)
                     .or_insert_with(|| Decoder::new(OPUS_SAMPLE_RATE, Channels::Mono).unwrap());
 
-                match decoder.decode(&packet.opus_data, &mut frame_buffer, false) {
-                    Ok(samples) => {
-                        let samples_f32: Vec<f32> = frame_buffer[..samples]
+                let last = *last_seq.get(&ssrc).unwrap_or(&curr.wrapping_sub(1));
+                let expect = last.wrapping_add(1);
+
+                // Wrap-safe classification
+                let ahead = curr.wrapping_sub(expect); // 0 = on time, small = forward gap
+                let behind = expect.wrapping_sub(curr); // small = late
+
+                // ❌ BUG WAS HERE: `behind <= 10` also matched 0 (on-time). Require `behind > 0`.
+                if behind > 0 && behind <= 10 {
+                    // Late packet: we already moved past this time slot (possibly with PLC/FEC) → drop it.
+                    continue;
+                }
+
+                if ahead > 0 && ahead <= 20 {
+                    // We missed `ahead` frames: try FEC for (curr-1) from the current packet…
+                    if let Ok(n) = decoder.decode(&packet.opus_data, &mut frame_buffer, true) {
+                        let s: Vec<f32> = frame_buffer[..n]
                             .iter()
                             .map(|&x| x as f32 / 32768.0)
                             .collect();
+                        let _ = tx.send((ssrc, s));
+                        stats.fec_recoveries.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        // …otherwise PLC one frame
+                        if let Ok(n) = decoder.decode(&[], &mut frame_buffer, false) {
+                            let s: Vec<f32> = frame_buffer[..n]
+                                .iter()
+                                .map(|&x| x as f32 / 32768.0)
+                                .collect();
+                            let _ = tx.send((ssrc, s));
+                            stats.plc_frames.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    // Older missing frames (cap extra PLC at 1)
+                    for _ in 0..ahead.saturating_sub(1).min(1) {
+                        if let Ok(n) = decoder.decode(&[], &mut frame_buffer, false) {
+                            let s: Vec<f32> = frame_buffer[..n]
+                                .iter()
+                                .map(|&x| x as f32 / 32768.0)
+                                .collect();
+                            let _ = tx.send((ssrc, s));
+                            stats.plc_frames.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    stats
+                        .packets_lost
+                        .fetch_add(ahead as u64, Ordering::Relaxed);
+                } else if ahead > 20 {
+                    // Big jump/reset: re-init decoder
+                    *decoder = Decoder::new(OPUS_SAMPLE_RATE, Channels::Mono).unwrap();
+                }
 
-                        if tx.send((client_id, samples_f32)).is_err() {
+                // Decode current frame
+                match decoder.decode(&packet.opus_data, &mut frame_buffer, false) {
+                    Ok(n) => {
+                        let s: Vec<f32> = frame_buffer[..n]
+                            .iter()
+                            .map(|&x| x as f32 / 32768.0)
+                            .collect();
+                        if tx.send((ssrc, s)).is_err() {
                             break;
                         }
                         stats.packets_received.fetch_add(1, Ordering::Relaxed);
+                        last_seq.insert(ssrc, curr); // advance only after accepting current
                     }
                     Err(e) => {
                         error!("Decode error: {}", e);
                         stats.decode_errors.fetch_add(1, Ordering::Relaxed);
-
-                        // Try FEC recovery if available
-                        if let Ok(samples) = decoder.decode(&packet.opus_data, &mut frame_buffer, true) {
-                            stats.fec_recoveries.fetch_add(1, Ordering::Relaxed);
+                        if let Ok(n) = decoder.decode(&[], &mut frame_buffer, false) {
+                            let s: Vec<f32> = frame_buffer[..n]
+                                .iter()
+                                .map(|&x| x as f32 / 32768.0)
+                                .collect();
+                            let _ = tx.send((ssrc, s));
+                            stats.plc_frames.fetch_add(1, Ordering::Relaxed);
                         }
+                        // Do not advance last_seq on error
                     }
                 }
             }
@@ -539,7 +570,8 @@ impl VoiceChat {
     // Public API methods
 
     pub fn set_latency_preset(&mut self, preset: LatencyPreset) {
-        self.latency_preset.store(preset as usize, Ordering::Relaxed);
+        self.latency_preset
+            .store(preset as usize, Ordering::Relaxed);
 
         if let Some(ref mut input) = self.input {
             input.set_latency_preset(preset);
@@ -719,8 +751,12 @@ impl VoiceChat {
         info
     }
 
-    /// Check if currently speaking
+    // Override the is_speaking method to check mute state:
     pub fn is_speaking(&self) -> bool {
+        // Never report speaking when muted
+        if self.is_muted() {
+            return false;
+        }
         self.is_speaking.load(Ordering::Relaxed)
     }
 
@@ -731,17 +767,119 @@ impl VoiceChat {
             self.diagnostics.disable();
         }
     }
-    
+
     pub fn set_diagnostic_test_mode(&self, mode: TestMode) {
         self.diagnostics.set_test_mode(mode);
     }
-    
+
     pub fn get_diagnostic_report(&self) -> String {
         self.diagnostics.get_report()
     }
-    
+
     pub fn run_sanity_test(&self) -> Result<(), String> {
         self.diagnostics.sanity_test_codec()
+    }
+    pub fn diagnostics_enabled(&self) -> bool {
+        self.diagnostics.is_enabled()
+    }
+    pub fn is_loopback_enabled(&self) -> bool {
+        self.loopback_enabled.load(Ordering::Relaxed)
+    }
+
+    pub fn reset_diagnostics(&self) {
+        // Reset ring buffer monitors
+        self.diagnostics
+            .input_ring
+            .samples_pushed
+            .store(0, Ordering::Relaxed);
+        self.diagnostics
+            .input_ring
+            .samples_popped
+            .store(0, Ordering::Relaxed);
+        self.diagnostics
+            .output_ring
+            .samples_pushed
+            .store(0, Ordering::Relaxed);
+        self.diagnostics
+            .output_ring
+            .samples_popped
+            .store(0, Ordering::Relaxed);
+
+        // Reset callback counters
+        self.diagnostics
+            .input_callback_count
+            .store(0, Ordering::Relaxed);
+        self.diagnostics
+            .output_callback_count
+            .store(0, Ordering::Relaxed);
+
+        // Clear anomalies
+        if let Ok(mut anomalies) = self.diagnostics.anomalies.lock() {
+            anomalies.clear();
+        }
+
+        // Reset resampler metrics
+        if let Ok(mut input_resampler) = self.diagnostics.input_resampler.lock() {
+            *input_resampler = ResamplerMetrics::new("input_resampler");
+        }
+        if let Ok(mut output_resampler) = self.diagnostics.output_resampler.lock() {
+            *output_resampler = ResamplerMetrics::new("output_resampler");
+        }
+
+        // Reset stats
+        self.stats.packets_sent.store(0, Ordering::Relaxed);
+        self.stats.packets_received.store(0, Ordering::Relaxed);
+        self.stats.input_overruns.store(0, Ordering::Relaxed);
+        self.stats.output_underruns.store(0, Ordering::Relaxed);
+        self.stats.encode_errors.store(0, Ordering::Relaxed);
+        self.stats.decode_errors.store(0, Ordering::Relaxed);
+
+        info!("📊 Diagnostics reset");
+    }
+
+    pub fn get_ring_buffer_info(&self) -> String {
+        format!(
+            "Input Ring: pushed={} popped={} occupancy={}\n\
+             Output Ring: pushed={} popped={} occupancy={}",
+            self.diagnostics
+                .input_ring
+                .samples_pushed
+                .load(Ordering::Relaxed),
+            self.diagnostics
+                .input_ring
+                .samples_popped
+                .load(Ordering::Relaxed),
+            self.diagnostics.input_ring.get_occupancy(),
+            self.diagnostics
+                .output_ring
+                .samples_pushed
+                .load(Ordering::Relaxed),
+            self.diagnostics
+                .output_ring
+                .samples_popped
+                .load(Ordering::Relaxed),
+            self.diagnostics.output_ring.get_occupancy()
+        )
+    }
+    pub fn set_muted(&mut self, muted: bool) {
+        if let Some(ref mut input) = self.input {
+            input.set_muted(muted);
+        }
+
+        // Force speaking to false immediately when muted
+        if muted {
+            self.is_speaking.store(false, Ordering::Relaxed);
+        }
+
+        info!("🔇 Microphone: {}", if muted { "MUTED" } else { "UNMUTED" });
+    }
+
+    pub fn is_muted(&self) -> bool {
+        if let Some(ref input) = self.input {
+            input.is_muted()
+        } else {
+            false
+        }
     }
 }
 

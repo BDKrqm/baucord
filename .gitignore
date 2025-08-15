@@ -4,3 +4,4 @@ todo.md
 onnxruntime.dll
 baucord.log
 diagnostics*.txt
+.DS_Store

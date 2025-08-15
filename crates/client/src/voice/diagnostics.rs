@@ -1,10 +1,10 @@
 // voice/diagnostics.rs - Enhanced pipeline diagnostics with resampling metrics
 use log::{error, info, warn};
 use std::collections::VecDeque;
+use std::f32::consts::PI;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use std::f32::consts::PI;
 
 // ============================================================================
 // Core Diagnostic Types
@@ -94,19 +94,19 @@ impl AudioFingerprint {
         let rms = (samples.iter().map(|x| x * x).sum::<f32>() / len).sqrt();
         let silent_samples = samples.iter().filter(|&&x| x.abs() < 0.001).count() as u32;
         let peak = samples.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
-        
+
         let mut zero_crossings = 0u32;
         let mut discontinuities = 0u32;
-        
+
         for i in 1..samples.len() {
             // Zero crossing detection
-            if samples[i-1].signum() != samples[i].signum() && samples[i].abs() > 0.001 {
+            if samples[i - 1].signum() != samples[i].signum() && samples[i].abs() > 0.001 {
                 zero_crossings += 1;
             }
-            
+
             // Discontinuity detection - sudden jumps
-            let diff = (samples[i] - samples[i-1]).abs();
-            if diff > 0.5 && samples[i].abs() > 0.01 && samples[i-1].abs() > 0.01 {
+            let diff = (samples[i] - samples[i - 1]).abs();
+            if diff > 0.5 && samples[i].abs() > 0.01 && samples[i - 1].abs() > 0.01 {
                 discontinuities += 1;
             }
         }
@@ -127,7 +127,7 @@ impl AudioFingerprint {
         // Check for discontinuity between buffers
         let expected_diff = 1.0 / sample_rate as f32; // Max expected sample-to-sample difference
         let actual_diff = (self.last_sample - prev.last_sample).abs();
-        
+
         if actual_diff > 0.5 && self.rms > 0.01 && prev.rms > 0.01 {
             Some(Anomaly {
                 stage: "continuity",
@@ -185,7 +185,7 @@ pub struct ResamplerMetrics {
     pub actual_ratio: f64,
     pub drift_ppm: f64,
     pub processing_time_us: u64,
-    
+
     // Add cumulative tracking for proper drift calculation
     pub total_input: u64,
     pub total_output: u64,
@@ -218,16 +218,16 @@ impl ResamplerMetrics {
         self.output_frames = output;
         self.expected_output = expected;
         self.processing_time_us = time_us;
-        
+
         // Update totals
         self.total_input += input as u64;
         self.total_output += output as u64;
-        
+
         // Calculate actual ratio from this batch
         if input > 0 {
             self.actual_ratio = output as f64 / input as f64;
         }
-        
+
         if output < expected {
             self.underruns += 1;
         } else if output > expected {
@@ -241,19 +241,19 @@ impl ResamplerMetrics {
             self.drift_ppm = 0.0;
             return 0.0;
         }
-        
+
         // Calculate long-term average ratio
         let long_term_ratio = self.total_output as f64 / self.total_input as f64;
-        
+
         // Compare to expected ratio
         if self.ratio > 0.0 {
             // Calculate PPM difference from expected
             self.drift_ppm = ((long_term_ratio / self.ratio) - 1.0) * 1_000_000.0;
-            
+
             // Clamp to reasonable range
             self.drift_ppm = self.drift_ppm.clamp(-10000.0, 10000.0);
         }
-        
+
         self.drift_ppm
     }
 }
@@ -344,12 +344,12 @@ impl LatencyWaterfall {
 
 pub struct RingBufferMonitor {
     name: &'static str,
-    samples_pushed: AtomicU64,
-    samples_popped: AtomicU64,
+    pub samples_pushed: AtomicU64,
+    pub samples_popped: AtomicU64,
     last_check: Mutex<Instant>,
     last_pushed: AtomicU64,
     last_popped: AtomicU64,
-    
+
     // New metrics
     peak_occupancy: AtomicUsize,
     min_occupancy: AtomicUsize,
@@ -374,11 +374,13 @@ impl RingBufferMonitor {
     }
 
     pub fn record_push(&self, count: usize) {
-        self.samples_pushed.fetch_add(count as u64, Ordering::Relaxed);
+        self.samples_pushed
+            .fetch_add(count as u64, Ordering::Relaxed);
     }
 
     pub fn record_pop(&self, count: usize) {
-        self.samples_popped.fetch_add(count as u64, Ordering::Relaxed);
+        self.samples_popped
+            .fetch_add(count as u64, Ordering::Relaxed);
     }
 
     pub fn record_underrun(&self) {
@@ -394,18 +396,24 @@ impl RingBufferMonitor {
         let mut peak = self.peak_occupancy.load(Ordering::Relaxed);
         while current > peak {
             match self.peak_occupancy.compare_exchange_weak(
-                peak, current, Ordering::Relaxed, Ordering::Relaxed
+                peak,
+                current,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
             ) {
                 Ok(_) => break,
                 Err(x) => peak = x,
             }
         }
-        
+
         // Update min
         let mut min = self.min_occupancy.load(Ordering::Relaxed);
         while current < min {
             match self.min_occupancy.compare_exchange_weak(
-                min, current, Ordering::Relaxed, Ordering::Relaxed
+                min,
+                current,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
             ) {
                 Ok(_) => break,
                 Err(x) => min = x,
@@ -417,7 +425,7 @@ impl RingBufferMonitor {
         let mut last_check = self.last_check.lock().unwrap();
         let now = Instant::now();
         let elapsed = now.duration_since(*last_check);
-        
+
         if elapsed < Duration::from_secs(1) {
             return None;
         }
@@ -435,7 +443,8 @@ impl RingBufferMonitor {
         *last_check = now;
 
         let rate_diff = (push_rate - pop_rate).abs();
-        if rate_diff > 480.0 { // More than 10ms worth of drift at 48kHz
+        if rate_diff > 480.0 {
+            // More than 10ms worth of drift at 48kHz
             Some(Anomaly {
                 stage: self.name,
                 issue: AnomalyType::RingBufferDrift,
@@ -460,12 +469,15 @@ impl RingBufferMonitor {
         let overruns = self.overrun_events.load(Ordering::Relaxed);
         let peak = self.peak_occupancy.load(Ordering::Relaxed);
         let min = self.min_occupancy.load(Ordering::Relaxed);
-        
+
         format!(
             "{}: occupancy={} (min={}, peak={}), underruns={}, overruns={}",
-            self.name, occupancy, 
+            self.name,
+            occupancy,
             if min == usize::MAX { 0 } else { min },
-            peak, underruns, overruns
+            peak,
+            underruns,
+            overruns
         )
     }
 }
@@ -486,16 +498,12 @@ pub enum TestSignal {
 impl TestSignal {
     pub fn generate(&self, samples: usize, sample_rate: u32) -> Vec<f32> {
         match self {
-            TestSignal::Sine440Hz => {
-                (0..samples)
-                    .map(|i| (i as f32 * 440.0 * 2.0 * PI / sample_rate as f32).sin() * 0.5)
-                    .collect()
-            }
-            TestSignal::Sine1kHz => {
-                (0..samples)
-                    .map(|i| (i as f32 * 1000.0 * 2.0 * PI / sample_rate as f32).sin() * 0.5)
-                    .collect()
-            }
+            TestSignal::Sine440Hz => (0..samples)
+                .map(|i| (i as f32 * 440.0 * 2.0 * PI / sample_rate as f32).sin() * 0.5)
+                .collect(),
+            TestSignal::Sine1kHz => (0..samples)
+                .map(|i| (i as f32 * 1000.0 * 2.0 * PI / sample_rate as f32).sin() * 0.5)
+                .collect(),
             TestSignal::Chirp => {
                 (0..samples)
                     .map(|i| {
@@ -505,21 +513,23 @@ impl TestSignal {
                     })
                     .collect()
             }
-            TestSignal::Impulse => {
-                (0..samples)
-                    .map(|i| if i % (sample_rate as usize / 10) == 0 { 0.5 } else { 0.0 })
-                    .collect()
-            }
+            TestSignal::Impulse => (0..samples)
+                .map(|i| {
+                    if i % (sample_rate as usize / 10) == 0 {
+                        0.5
+                    } else {
+                        0.0
+                    }
+                })
+                .collect(),
             TestSignal::WhiteNoise => {
                 use rand::Rng;
                 let mut rng = rand::thread_rng();
                 (0..samples).map(|_| rng.gen_range(-0.5..0.5)).collect()
             }
-            TestSignal::CountingPattern => {
-                (0..samples)
-                    .map(|i| ((i % 100) as f32 / 100.0 - 0.5))
-                    .collect()
-            }
+            TestSignal::CountingPattern => (0..samples)
+                .map(|i| ((i % 100) as f32 / 100.0 - 0.5))
+                .collect(),
         }
     }
 }
@@ -531,31 +541,31 @@ impl TestSignal {
 pub struct PipelineDiagnostics {
     enabled: Arc<AtomicBool>,
     stages: Arc<Mutex<VecDeque<StageMetrics>>>,
-    anomalies: Arc<Mutex<VecDeque<Anomaly>>>,
+    pub anomalies: Arc<Mutex<VecDeque<Anomaly>>>,
     waterfall: Arc<Mutex<LatencyWaterfall>>,
-    
+
     // Ring buffer monitors
     pub input_ring: Arc<RingBufferMonitor>,
     pub output_ring: Arc<RingBufferMonitor>,
-    
+
     // Resampler metrics
     pub input_resampler: Arc<Mutex<ResamplerMetrics>>,
     pub output_resampler: Arc<Mutex<ResamplerMetrics>>,
-    
+
     // Audio fingerprints for continuity checking
-    last_input_fingerprint: Arc<Mutex<AudioFingerprint>>,
-    last_output_fingerprint: Arc<Mutex<AudioFingerprint>>,
-    
+    pub last_input_fingerprint: Arc<Mutex<AudioFingerprint>>,
+    pub last_output_fingerprint: Arc<Mutex<AudioFingerprint>>,
+
     // Thread timing
-    last_input_callback: Arc<Mutex<Instant>>,
-    last_output_callback: Arc<Mutex<Instant>>,
-    
+    pub last_input_callback: Arc<Mutex<Instant>>,
+    pub last_output_callback: Arc<Mutex<Instant>>,
+
     // Test mode
-    test_mode: Arc<Mutex<TestMode>>,
-    
+    pub test_mode: Arc<Mutex<TestMode>>,
+
     // Callback counters
-    input_callback_count: AtomicU64,
-    output_callback_count: AtomicU64,
+    pub input_callback_count: AtomicU64,
+    pub output_callback_count: AtomicU64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -628,7 +638,7 @@ impl PipelineDiagnostics {
         if anomalies.len() >= 100 {
             anomalies.pop_front();
         }
-        
+
         warn!(
             "🚨 {} - {}: value={:.2} (expected {:.2}-{:.2})",
             anomaly.stage,
@@ -637,7 +647,7 @@ impl PipelineDiagnostics {
             anomaly.expected_range.0,
             anomaly.expected_range.1
         );
-        
+
         anomalies.push_back(anomaly);
     }
 
@@ -674,7 +684,12 @@ impl PipelineDiagnostics {
         }
     }
 
-    pub fn check_audio_continuity(&self, stage: &'static str, samples: &[f32], is_input: bool) -> Vec<Anomaly> {
+    pub fn check_audio_continuity(
+        &self,
+        stage: &'static str,
+        samples: &[f32],
+        is_input: bool,
+    ) -> Vec<Anomaly> {
         let mut anomalies = Vec::new();
         let fp = AudioFingerprint::from_samples(samples);
 
@@ -720,12 +735,20 @@ impl PipelineDiagnostics {
         if !self.is_enabled() {
             return;
         }
-        
+
         let mut waterfall = self.waterfall.lock().unwrap();
         update_fn(&mut waterfall);
     }
 
-   pub fn update_resampler_metrics(&self, is_input: bool, input: usize, output: usize, expected: usize, time_us: u64, expected_ratio: f64) {
+    pub fn update_resampler_metrics(
+        &self,
+        is_input: bool,
+        input: usize,
+        output: usize,
+        expected: usize,
+        time_us: u64,
+        expected_ratio: f64,
+    ) {
         if !self.is_enabled() {
             return;
         }
@@ -737,16 +760,16 @@ impl PipelineDiagnostics {
         };
 
         let mut m = metrics.lock().unwrap();
-        
+
         // Set the expected ratio if not already set
         if m.ratio == 1.0 && expected_ratio != 1.0 {
             m.set_expected_ratio(expected_ratio);
         }
-        
+
         m.update(input, output, expected, time_us);
-        
+
         let drift = m.calculate_drift();
-        
+
         // Only report excessive drift if it's actually excessive and we have enough samples
         if drift.abs() > 100.0 && m.total_input > 10000 {
             self.record_anomaly(Anomaly {
@@ -756,25 +779,25 @@ impl PipelineDiagnostics {
                 expected_range: (-100.0, 100.0),
                 timestamp: Instant::now(),
             });
-        } 
-      }
+        }
+    }
 
     pub fn get_report(&self) -> String {
         let waterfall = self.waterfall.lock().unwrap();
         let anomalies = self.anomalies.lock().unwrap();
         let input_resampler = self.input_resampler.lock().unwrap();
         let output_resampler = self.output_resampler.lock().unwrap();
-        
+
         let mut report = String::new();
-        
+
         // Waterfall
         report.push_str(&waterfall.report());
-        
+
         // Ring buffers
         report.push_str("\n\n📊 Ring Buffers:\n");
         report.push_str(&format!("  Input:  {}\n", self.input_ring.get_stats()));
         report.push_str(&format!("  Output: {}\n", self.output_ring.get_stats()));
-        
+
         // Resamplers
         report.push_str("\n🔄 Resamplers:\n");
         report.push_str(&format!(
@@ -795,7 +818,7 @@ impl PipelineDiagnostics {
             output_resampler.underruns,
             output_resampler.processing_time_us as f32 / 1000.0
         ));
-        
+
         // Callback rates
         let input_callbacks = self.input_callback_count.load(Ordering::Relaxed);
         let output_callbacks = self.output_callback_count.load(Ordering::Relaxed);
@@ -803,7 +826,7 @@ impl PipelineDiagnostics {
             "\n📞 Callbacks: Input={}, Output={}\n",
             input_callbacks, output_callbacks
         ));
-        
+
         // Recent anomalies
         if !anomalies.is_empty() {
             report.push_str("\n⚠️  Recent Anomalies:\n");
@@ -814,27 +837,29 @@ impl PipelineDiagnostics {
                 ));
             }
         }
-        
+
         report
     }
 
     pub fn sanity_test_codec(&self) -> Result<(), String> {
         info!("🧪 Running codec sanity test...");
-        
+
         // Generate test signal
         let test_samples = TestSignal::Sine1kHz.generate(480, 48000);
         let original_fp = AudioFingerprint::from_samples(&test_samples);
-        
-        info!("  Original: RMS={:.3}, Peak={:.3}, ZC={}", 
-            original_fp.rms, original_fp.peak, original_fp.zero_crossings);
-        
+
+        info!(
+            "  Original: RMS={:.3}, Peak={:.3}, ZC={}",
+            original_fp.rms, original_fp.peak, original_fp.zero_crossings
+        );
+
         if original_fp.is_silent() {
             return Err("Test signal is silent!".to_string());
         }
-        
+
         Ok(())
     }
-  }
+}
 
 // ============================================================================
 // Helper function for periodic diagnostic checks
@@ -849,7 +874,7 @@ pub fn run_diagnostic_checks(diagnostics: &PipelineDiagnostics) {
     if let Some(anomaly) = diagnostics.input_ring.check_rate_mismatch() {
         diagnostics.record_anomaly(anomaly);
     }
-    
+
     if let Some(anomaly) = diagnostics.output_ring.check_rate_mismatch() {
         diagnostics.record_anomaly(anomaly);
     }
@@ -858,9 +883,10 @@ pub fn run_diagnostic_checks(diagnostics: &PipelineDiagnostics) {
     static LAST_REPORT: AtomicU64 = AtomicU64::new(0);
     let now = Instant::now().elapsed().as_secs();
     let last = LAST_REPORT.load(Ordering::Relaxed);
-    
+
     if now - last >= 2 {
         LAST_REPORT.store(now, Ordering::Relaxed);
         info!("\n{}", diagnostics.get_report());
     }
 }
+

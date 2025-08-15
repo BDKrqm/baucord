@@ -1,6 +1,6 @@
 // voice/input.rs - RT-safe input with VAD gating
+use super::diagnostics::{AudioFingerprint, PipelineDiagnostics, TestMode};
 use super::{ChannelMapping, DeviceCapabilities, FRAME_SIZE, LatencyPreset, OPUS_SAMPLE_RATE};
-use super::diagnostics::{PipelineDiagnostics, TestMode, AudioFingerprint};
 use crate::voice::diagnostics::{Anomaly, AnomalyType};
 use crate::voice::resampler::{build_sinc_fixed_in, frames_for_10ms};
 use crate::voice::stats::AudioStats;
@@ -10,8 +10,8 @@ use cpal::{BufferSize, Device, SampleFormat, Stream, StreamConfig};
 use crossbeam_channel::Sender;
 use dasp_sample::{FromSample, Sample as DaspSample, ToSample};
 use log::{debug, error, info, warn};
-use rubato::{SincFixedIn, Resampler};
 use rtrb::{Consumer, Producer, RingBuffer};
+use rubato::{Resampler, SincFixedIn};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -50,7 +50,7 @@ impl AudioInput {
         encoder_tx: Sender<Vec<f32>>,
         channel_mapping: Arc<Mutex<ChannelMapping>>,
         stats: Arc<AudioStats>,
-        diagnostics: Option<Arc<PipelineDiagnostics>>
+        diagnostics: Option<Arc<PipelineDiagnostics>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let host = cpal::default_host();
 
@@ -66,10 +66,15 @@ impl AudioInput {
         let capabilities = DeviceCapabilities::from_device(&device, true)?;
 
         // Size ring buffer based on expected sample rate
-        let (sample_rate, _, _) = capabilities.get_best_config(Some(OPUS_SAMPLE_RATE))
+        let (sample_rate, _, _) = capabilities
+            .get_best_config(Some(OPUS_SAMPLE_RATE))
             .ok_or("No suitable input configuration")?;
-        
-        let buffer_ms = if sample_rate != OPUS_SAMPLE_RATE { 100 } else { 50 };
+
+        let buffer_ms = if sample_rate != OPUS_SAMPLE_RATE {
+            100
+        } else {
+            50
+        };
         let ring_size = (sample_rate as usize * buffer_ms) / 1000;
 
         let (ring_producer, ring_consumer) = RingBuffer::new(ring_size);
@@ -90,7 +95,7 @@ impl AudioInput {
             encoder_tx,
             stats,
             is_speaking: Arc::new(AtomicBool::new(false)),
-            diagnostics
+            diagnostics,
         })
     }
 
@@ -229,22 +234,28 @@ impl AudioInput {
             let mut resampler: Option<SincFixedIn<f32>> = None;
             let mut resampler_input_buffer: Vec<Vec<f32>> = Vec::new();
             let mut resampler_accumulator = Vec::with_capacity(2048);
-            
+
             if device_sample_rate != OPUS_SAMPLE_RATE {
-                info!("📊 Creating input resampler: {} Hz -> {} Hz", device_sample_rate, OPUS_SAMPLE_RATE);
-                
+                info!(
+                    "📊 Creating input resampler: {} Hz -> {} Hz",
+                    device_sample_rate, OPUS_SAMPLE_RATE
+                );
+
                 // For input, we want to process reasonable chunks
                 let chunk_size = if device_sample_rate > OPUS_SAMPLE_RATE {
-                    960  // Process ~10ms worth at higher rates
+                    960 // Process ~10ms worth at higher rates
                 } else {
                     frames_for_10ms(device_sample_rate)
                 };
-                
+
                 match build_sinc_fixed_in(device_sample_rate, chunk_size, None) {
                     Ok(r) => {
                         resampler_input_buffer = vec![Vec::with_capacity(r.input_frames_next())];
-                        info!("✅ Input resampler ready: needs {} input, produces up to {} output", 
-                              r.input_frames_next(), r.output_frames_max());
+                        info!(
+                            "✅ Input resampler ready: needs {} input, produces up to {} output",
+                            r.input_frames_next(),
+                            r.output_frames_max()
+                        );
                         resampler = Some(r);
                     }
                     Err(e) => {
@@ -300,7 +311,8 @@ impl AudioInput {
                 // Early VAD check on raw input if no resampling
                 // This saves CPU when silent
                 if resampler.is_none() && vad_enabled.load(Ordering::Relaxed) {
-                    let raw_fingerprint = AudioFingerprint::from_samples(&read_buffer[..samples_read]);
+                    let raw_fingerprint =
+                        AudioFingerprint::from_samples(&read_buffer[..samples_read]);
                     if raw_fingerprint.is_silent() {
                         consecutive_silence_frames += 1;
                         if consecutive_silence_frames > SILENCE_THRESHOLD {
@@ -318,13 +330,14 @@ impl AudioInput {
                 let processed = if let Some(ref mut r) = resampler {
                     // Accumulate samples until we have enough
                     resampler_accumulator.extend_from_slice(&read_buffer[..samples_read]);
-                    
+
                     if resampler_accumulator.len() >= r.input_frames_next() {
                         let input_size = r.input_frames_next();
                         resampler_input_buffer[0].clear();
-                        resampler_input_buffer[0].extend_from_slice(&resampler_accumulator[..input_size]);
+                        resampler_input_buffer[0]
+                            .extend_from_slice(&resampler_accumulator[..input_size]);
                         resampler_accumulator.drain(..input_size);
-                        
+
                         match r.process(&resampler_input_buffer, None) {
                             Ok(output) => {
                                 if !output.is_empty() && !output[0].is_empty() {
@@ -369,7 +382,7 @@ impl AudioInput {
                     // Only send to encoder if speaking
                     if is_speech {
                         consecutive_silence_frames = 0;
-                        
+
                         // Send to encoder thread
                         if encoder_tx
                             .send_timeout(frame, Duration::from_millis(5))
@@ -411,6 +424,9 @@ impl AudioInput {
     pub fn get_speaking_handle(&self) -> Arc<AtomicBool> {
         self.is_speaking.clone()
     }
+    pub fn is_muted(&self) -> bool {
+        self.is_muted.load(Ordering::Relaxed)
+    }
 }
 
 impl Drop for AudioInput {
@@ -421,3 +437,4 @@ impl Drop for AudioInput {
         }
     }
 }
+

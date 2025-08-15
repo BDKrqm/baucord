@@ -1,9 +1,8 @@
-// ui/diagnostics.rs - Standalone diagnostics terminal window
-
 use crate::ui::theme::DarkTheme;
+use fltk::enums::Color;
 use crate::voice::VoiceChat;
 use crate::voice::diagnostics::TestMode;
-use fltk::{prelude::*, *, enums::Color};
+use fltk::{prelude::*, *};
 use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
 use chrono::Local;
@@ -237,39 +236,7 @@ impl DiagnosticsWindow {
             wind.hide();
         });
 
-        // Start periodic diagnostics update
-        let voice_chat_update = self.voice_chat.clone();
-        let mut output_buffer_update = output_buffer.clone();
-        let mut display_update = output_display.clone();
-        let auto_scroll_update = auto_scroll.clone();
         
-        app::add_timeout3(2.0, move |handle| {
-            if let Ok(vc_guard) = voice_chat_update.lock() {
-                if let Some(vc) = vc_guard.as_ref() {
-                    // Only update if diagnostics are enabled
-                    if vc.diagnostics_enabled() {
-                        let report = vc.get_diagnostic_report();
-                        
-                        // Find and update the diagnostics section
-                        let content = output_buffer_update.text();
-                        if let Some(start) = content.rfind("[AUTO-UPDATE]") {
-                            // Remove old auto-update section
-                            output_buffer_update.remove(start as i32, output_buffer_update.length());
-                        }
-                        
-                        output_buffer_update.append(&format!("\n[AUTO-UPDATE {}]\n{}\n", 
-                            Local::now().format("%H:%M:%S"), report));
-                        
-                        if auto_scroll_update.is_checked() {
-                            let length = output_buffer_update.length();
-                            display_update.set_insert_position(length);
-                            display_update.scroll(display_update.count_lines(0, length, true), 0);
-                        }
-                    }
-                }
-            }
-            app::repeat_timeout3(2.0, handle);
-        });
     }
 
     fn append_output(&self, buffer: &mut text::TextBuffer, text: &str) {
@@ -504,8 +471,37 @@ fn process_command(cmd: &str, voice_chat: &Arc<Mutex<Option<VoiceChat>>>) -> Str
             }
         }
         
-        "clear" => {
-            "\x1B[2J\x1B[H".to_string() // ANSI clear screen
+        "debug" => {
+            if let Ok(vc_guard) = voice_chat.lock() {
+                if let Some(vc) = vc_guard.as_ref() {
+                    // Get detailed internal state
+                    let mut result = String::new();
+                    result.push_str("=== DEBUG INFO ===\n");
+                    result.push_str(&format!("Speaking: {}\n", vc.is_speaking()));
+                    result.push_str(&format!("Loopback: {}\n", vc.is_loopback_enabled()));
+                    result.push_str(&format!("\n{}\n", vc.get_stats()));
+                    result.push_str(&format!("\n{}\n", vc.get_diagnostic_report()));
+                    result
+                } else {
+                    "Voice system not initialized".to_string()
+                }
+            } else {
+                "Error: Could not access voice system".to_string()
+            }
+        }
+        
+        "reset" => {
+            if let Ok(mut vc_guard) = voice_chat.lock() {
+                if let Some(vc) = vc_guard.as_mut() {
+                    // Reset all counters and clear buffers
+                    vc.reset_diagnostics();
+                    "✓ Diagnostics reset".to_string()
+                } else {
+                    "Voice system not initialized".to_string()
+                }
+            } else {
+                "Error: Could not access voice system".to_string()
+            }
         }
         
         _ => {
@@ -529,11 +525,4 @@ fn autocomplete_command(partial: &str) -> Option<String> {
         }
     }
     None
-}
-
-// Add this method to VoiceChat
-impl VoiceChat {
-    pub fn diagnostics_enabled(&self) -> bool {
-        self.diagnostics.is_enabled()
-    }
 }
