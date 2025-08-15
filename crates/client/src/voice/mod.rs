@@ -223,7 +223,6 @@ pub struct VoiceChat {
     encoder: Arc<Mutex<Encoder>>,
     decoders: Arc<Mutex<HashMap<renet::ClientId, Decoder>>>,
 
-    // RT-safe channels
     audio_to_encoder: (Sender<Vec<f32>>, Receiver<Vec<f32>>),
     encoder_to_network: (Sender<AudioPacket>, Receiver<AudioPacket>),
     network_to_decoder: (Sender<AudioPacket>, Receiver<AudioPacket>),
@@ -291,8 +290,6 @@ impl VoiceChat {
     }
 
     pub fn start(&mut self, settings: &Settings) -> Result<(), Box<dyn std::error::Error>> {
-        info!("🚀 Starting RT-safe voice chat with rubato resampling");
-
         // Start worker threads
         self.start_encoder_thread();
         self.start_decoder_thread();

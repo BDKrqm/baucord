@@ -1,4 +1,3 @@
-// voice/input.rs - RT-safe input with VAD gating
 use super::diagnostics::{AudioFingerprint, PipelineDiagnostics, TestMode};
 use super::{ChannelMapping, DeviceCapabilities, FRAME_SIZE, LatencyPreset, OPUS_SAMPLE_RATE};
 use crate::voice::diagnostics::{Anomaly, AnomalyType};
@@ -23,7 +22,6 @@ pub struct AudioInput {
     pub(crate) stream: Option<Stream>,
     encoder_tx: crossbeam_channel::Sender<Vec<f32>>,
 
-    // RT-safe ring buffer
     ring_producer: Option<Producer<f32>>,
     ring_consumer: Option<Consumer<f32>>,
     ring_capacity: usize,
@@ -142,8 +140,6 @@ impl AudioInput {
             buffer_size: cpal::BufferSize::Default,
         };
 
-        info!("📊 Using device default buffer size");
-
         let mut ring_producer = self
             .ring_producer
             .take()
@@ -188,7 +184,6 @@ impl AudioInput {
                     write_idx += 1;
                 }
 
-                // Push to ring buffer (RT-safe, non-blocking)
                 let mut written = 0;
                 for &sample in &scratch[..write_idx] {
                     match ring_producer.push(sample) {

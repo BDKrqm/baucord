@@ -1,4 +1,4 @@
-// voice/output.rs - RT-safe output with proper chunk alignment
+// voice/output.rs
 use super::diagnostics::{AudioFingerprint, PipelineDiagnostics, TestMode};
 use super::{ChannelMapping, DeviceCapabilities, LatencyPreset, OPUS_SAMPLE_RATE};
 use crate::settings::UserAudioSettings;
@@ -75,10 +75,11 @@ impl AudioOutput {
             .ok_or("No suitable output configuration")?;
 
         // Use fixed size ring buffer, not adaptive
+
         let ring_size = if sample_rate != OPUS_SAMPLE_RATE {
-            4800 // 100ms at 48kHz for resampling
+            9600
         } else {
-            2400 // 50ms at 48kHz for direct
+            4800
         };
 
         let (ring_producer, ring_consumer) = RingBuffer::new(ring_size);
@@ -130,7 +131,6 @@ impl AudioOutput {
                 self.user_audio_settings.clone(),
                 self.stats.clone(),
                 self.diagnostics.clone(),
-                self.ring_capacity.clone(),
                 self.drift_ppm.clone(),
                 sample_rate, // Pass sample rate for proper chunk calculation
             ));
@@ -281,16 +281,16 @@ impl AudioOutput {
 
                         if got < input_needed / 2 {
                             // Severe underrun - fill with silence
-                            underrun_count += 1;
-                            if underrun_count % 100 == 0 {
-                                warn!("⚠️ Output underrun #{}", underrun_count);
-                            }
+                            //underrun_count += 1;
+                            //if underrun_count % 100 == 0 {
+                            //    warn!("⚠️ Output underrun #{}", underrun_count);
+                            // }
                             stats.output_underruns.fetch_add(1, Ordering::Relaxed);
 
                             // Fill rest with silence
-                            for _ in total_output.len()..samples_needed {
-                                total_output.push(0.0);
-                            }
+                            //for _ in total_output.len()..samples_needed {
+                            //    total_output.push(0.0);
+                            //}
                             break;
                         }
 
@@ -435,12 +435,11 @@ impl AudioOutput {
         user_audio_settings: Arc<Mutex<HashMap<ClientId, UserAudioSettings>>>,
         stats: Arc<AudioStats>,
         diagnostics: Option<Arc<PipelineDiagnostics>>,
-        _ring_capacity_hint: Arc<AtomicUsize>, // not used; rtrb capacity is fixed
         drift_ppm: Arc<Mutex<f64>>,
         device_sample_rate: u32,
     ) -> thread::JoinHandle<()> {
         thread::spawn(move || {
-            // --- Engine is 48k; mix/jitter happen at 48k ---
+            // Engine runs at 48k; we always mix/jitter at 48k
             let mut jitter_buffer = AdaptiveJitterBuffer::new(
                 OPUS_SAMPLE_RATE as usize,
                 if device_sample_rate != OPUS_SAMPLE_RATE {
@@ -451,29 +450,24 @@ impl AudioOutput {
                 user_audio_settings,
             );
 
-            // Real ring capacity & watermarks
+            // Ring info
             let capacity = ring_producer.buffer().capacity();
-            let low_wm = capacity / 4; // 25%
             let high_wm = capacity * 3 / 4; // 75%
             let very_high_wm = capacity * 85 / 100; // 85%
 
-            // 48k-aligned processing (use bigger hop when resampling to reduce SRC pressure downstream)
-            let base_hop = 480usize; // 10 ms @ 48k
-            let process_chunk = if device_sample_rate != OPUS_SAMPLE_RATE {
-                base_hop * 2
-            } else {
-                base_hop
-            };
-
-            // Working buffers
-            let mut accumulator: Vec<f32> = vec![0.0; process_chunk];
+            // Produce exactly one 10ms hop per loop
+            const HOP_48K: usize = 480; // 10 ms @ 48k
+            let mut hop = vec![0.0f32; HOP_48K];
 
             let mut last_diag_flush = Instant::now();
             let mut last_drift_calc = Instant::now();
-            let mut producer_xruns = 0u64; // producer-side overflow events
+            let mut producer_xruns = 0u64;
+
+            // Real-time pacing anchor
+            let mut next_tick = Instant::now();
 
             loop {
-                // 1) Ingest decoded audio quickly (bounded)
+                // 1) Ingest decoded frames quickly (bounded)
                 const MAX_BATCH: usize = 16;
                 let mut batched = 0;
                 while batched < MAX_BATCH {
@@ -487,41 +481,39 @@ impl AudioOutput {
                     }
                 }
 
-                // 2) Backpressure from ring occupancy
+                // 2) If ring is too full, skip this tick (let device drain)
                 let slots = ring_producer.slots();
                 let occ = capacity - slots;
-
                 if occ > very_high_wm {
-                    // Near overflow: back off a touch
                     producer_xruns += 1;
-                    // Do not log here (hot path)
-                    thread::sleep(Duration::from_millis(2));
-                    continue;
-                } else if occ > high_wm {
-                    thread::sleep(Duration::from_micros(400));
+                    stats.producer_overruns.fetch_add(1, Ordering::Relaxed);
+
+                    next_tick += Duration::from_millis(10);
+                    let now = Instant::now();
+                    if next_tick > now {
+                        std::thread::sleep(next_tick - now);
+                    } else {
+                        next_tick = now;
+                    }
                     continue;
                 }
 
-                // 3) Build an exact 48k chunk (no zero-padding logic needed; your API fills silence)
-                jitter_buffer.pull_48k_exact(process_chunk, &mut accumulator[..]);
+                // 3) Build exactly one 10ms @ 48k chunk
+                jitter_buffer.pull_48k_exact(HOP_48K, &mut hop[..]);
 
-                // 4) Push to the ring
+                // 4) Push (no bursts)
                 let mut pushed = 0usize;
-                for &s in &accumulator {
-                    match ring_producer.push(s) {
-                        Ok(()) => {
-                            pushed += 1;
-                        }
-                        Err(_full) => {
-                            // Producer overflow (consumer too slow)
-                            producer_xruns += 1;
-                            stats.producer_overruns.fetch_add(1, Ordering::Relaxed);
-                            break;
-                        }
+                for &s in &hop {
+                    if ring_producer.push(s).is_ok() {
+                        pushed += 1;
+                    } else {
+                        producer_xruns += 1;
+                        stats.producer_overruns.fetch_add(1, Ordering::Relaxed);
+                        break;
                     }
                 }
 
-                // 5) Lightweight diagnostics/counters
+                // 5) Light diagnostics
                 if let Some(ref diag) = diagnostics {
                     diag.output_ring.record_push(pushed);
                     diag.output_ring.update_occupancy(occ);
@@ -531,24 +523,19 @@ impl AudioOutput {
                     .jitter_buffer_occupancy
                     .store(jb_ms as usize, Ordering::Relaxed);
 
-                // 6) Periodic drift estimate (smoothed) — no direct retarget since your buffer has no setters
+                // 6) Measure drift only (don’t nudge the resampler here)
                 if last_drift_calc.elapsed() >= Duration::from_millis(500) {
-                    let measured = jitter_buffer.calculate_drift_ppm(); // ±1000 ppm clamp inside
+                    let measured = jitter_buffer.calculate_drift_ppm(); // clamped inside
                     if let Ok(mut ppm) = drift_ppm.try_lock() {
                         *ppm = 0.9 * *ppm + 0.1 * measured;
                     }
                     last_drift_calc = Instant::now();
                 }
 
-                // 7) Let the jitter buffer apply its own occupancy-based policy
+                // 7) Gentle target adjustment
                 jitter_buffer.adapt();
 
-                // 8) Gentle CPU relief when plenty of space and nothing just arrived
-                if batched == 0 && occ < low_wm {
-                    thread::sleep(Duration::from_micros(200));
-                }
-
-                // 9) Infrequent anomaly publication off hot path
+                // 8) Publish anomalies once/second
                 if let Some(ref diag) = diagnostics {
                     if last_diag_flush.elapsed() >= Duration::from_secs(1) {
                         if producer_xruns > 0 {
@@ -564,6 +551,15 @@ impl AudioOutput {
                         last_diag_flush = Instant::now();
                     }
                 }
+
+                // 9) Pace to real time (one 10ms hop per loop)
+                next_tick += Duration::from_millis(10);
+                let now = Instant::now();
+                if next_tick > now {
+                    std::thread::sleep(next_tick - now);
+                } else {
+                    next_tick = now;
+                } // realign if we fell behind
             }
         })
     }
