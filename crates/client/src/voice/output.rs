@@ -240,6 +240,9 @@ impl AudioOutput {
                 }
 
                 // Apply drift compensation periodically
+                // Drift retune disabled: keep fixed base ratio (48k -> device rate).
+                // This avoids low-level “electric” buzzing on some WASAPI drivers.
+                /*
                 if let Some(ref mut r) = resampler {
                     let now = Instant::now();
                     if now.duration_since(last_drift_update) > Duration::from_millis(100) {
@@ -251,7 +254,7 @@ impl AudioOutput {
                             }
                         }
                     }
-                }
+                }*/
 
                 // Process based on resampler requirements
                 if let Some(ref mut r) = resampler {
@@ -459,6 +462,7 @@ impl AudioOutput {
             const HOP_48K: usize = 480; // 10 ms @ 48k
             let mut hop = vec![0.0f32; HOP_48K];
 
+            let mut next_tick = Instant::now();
             let mut last_diag_flush = Instant::now();
             let mut last_drift_calc = Instant::now();
             let mut producer_xruns = 0u64;
@@ -487,7 +491,17 @@ impl AudioOutput {
                 if occ > very_high_wm {
                     producer_xruns += 1;
                     stats.producer_overruns.fetch_add(1, Ordering::Relaxed);
-
+                    next_tick += Duration::from_millis(10);
+                    let now = Instant::now();
+                    if next_tick > now {
+                        std::thread::sleep(next_tick - now);
+                    } else {
+                        next_tick = now;
+                    }
+                    continue;
+                }
+                if slots < HOP_48K {
+                    // Not enough space for a full 10ms chunk — don’t half-push (that causes periodic buzz).
                     next_tick += Duration::from_millis(10);
                     let now = Instant::now();
                     if next_tick > now {
@@ -498,19 +512,14 @@ impl AudioOutput {
                     continue;
                 }
 
-                // 3) Build exactly one 10ms @ 48k chunk
                 jitter_buffer.pull_48k_exact(HOP_48K, &mut hop[..]);
 
-                // 4) Push (no bursts)
+                // (4) push the whole hop (no partial write fallbacks)
                 let mut pushed = 0usize;
                 for &s in &hop {
-                    if ring_producer.push(s).is_ok() {
-                        pushed += 1;
-                    } else {
-                        producer_xruns += 1;
-                        stats.producer_overruns.fetch_add(1, Ordering::Relaxed);
-                        break;
-                    }
+                    // This is safe because we pre-checked slots >= HOP_48K
+                    ring_producer.push(s).unwrap();
+                    pushed += 1;
                 }
 
                 // 5) Light diagnostics
@@ -559,7 +568,7 @@ impl AudioOutput {
                     std::thread::sleep(next_tick - now);
                 } else {
                     next_tick = now;
-                } // realign if we fell behind
+                }
             }
         })
     }
