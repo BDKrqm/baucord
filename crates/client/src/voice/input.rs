@@ -1,20 +1,19 @@
-use super::diagnostics::{AudioFingerprint, PipelineDiagnostics, TestMode};
+use super::diagnostics::{AudioFingerprint, PipelineDiagnostics};
 use super::{ChannelMapping, DeviceCapabilities, FRAME_SIZE, LatencyPreset, OPUS_SAMPLE_RATE};
-use crate::voice::diagnostics::{Anomaly, AnomalyType};
 use crate::voice::resampler::{build_sinc_fixed_in, frames_for_10ms};
 use crate::voice::stats::AudioStats;
 use crate::voice::vad::{VADConfig, VADProcessor, VADProfile};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{BufferSize, Device, SampleFormat, Stream, StreamConfig};
-use crossbeam_channel::Sender;
+use cpal::{Device, SampleFormat, Stream, StreamConfig};
+use crossbeam_channel::{Sender, TrySendError};
 use dasp_sample::{FromSample, Sample as DaspSample, ToSample};
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
 use rtrb::{Consumer, Producer, RingBuffer};
 use rubato::{Resampler, SincFixedIn};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration};
 
 pub struct AudioInput {
     device: Device,
@@ -89,7 +88,7 @@ impl AudioInput {
             channel_mapping,
             latency_preset: LatencyPreset::Normal,
             is_muted: Arc::new(AtomicBool::new(false)),
-            vad_enabled: Arc::new(AtomicBool::new(true)),
+            vad_enabled: Arc::new(AtomicBool::new(true)), // VAD enabled by default
             encoder_tx,
             stats,
             is_speaking: Arc::new(AtomicBool::new(false)),
@@ -158,6 +157,7 @@ impl AudioInput {
         let stream = self.device.build_input_stream(
             &config,
             move |data: &[T], _: &_| {
+                // Don't process at all if muted
                 if is_muted.load(Ordering::Relaxed) {
                     return;
                 }
@@ -223,6 +223,7 @@ impl AudioInput {
         let diagnostics = self.diagnostics.clone();
         let is_speaking_handle = self.is_speaking.clone();
         let vad_enabled = self.vad_enabled.clone();
+        let is_muted = self.is_muted.clone(); // Add muted state to worker thread
 
         self.worker_thread = Some(thread::spawn(move || {
             // Create resampler if needed
@@ -232,7 +233,7 @@ impl AudioInput {
 
             if device_sample_rate != OPUS_SAMPLE_RATE {
                 info!(
-                    "📊 Creating input resampler: {} Hz -> {} Hz",
+                    "🔊 Creating input resampler: {} Hz -> {} Hz",
                     device_sample_rate, OPUS_SAMPLE_RATE
                 );
 
@@ -267,6 +268,7 @@ impl AudioInput {
                 profile: VADProfile::Aggressive,
             };
             let mut vad = VADProcessor::new(vad_config).unwrap();
+            info!("🎤 VAD initialized with aggressive profile");
 
             // Processing state
             let mut read_buffer = vec![0.0f32; 4096];
@@ -274,7 +276,23 @@ impl AudioInput {
             let mut consecutive_silence_frames = 0;
             const SILENCE_THRESHOLD: usize = 50; // 500ms of silence before we stop processing
 
+            let mut frames_sent = 0u64;
+            let mut frames_dropped = 0u64;
+
             while !should_stop.load(Ordering::Relaxed) {
+                // Skip all processing if muted but drain the ring buffer
+                if is_muted.load(Ordering::Relaxed) {
+                    is_speaking_handle.store(false, Ordering::Relaxed);
+
+                    // Drain ring buffer to prevent overflow
+                    while ring_consumer.pop().is_ok() {
+                        // Just drain, don't process
+                    }
+
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+
                 // Determine read size
                 let target_read = if let Some(ref r) = resampler {
                     r.input_frames_next()
@@ -295,7 +313,7 @@ impl AudioInput {
                 }
 
                 if samples_read == 0 {
-                    thread::sleep(Duration::from_micros(500));
+                    thread::sleep(Duration::from_millis(5)); // Sleep longer when no data
                     continue;
                 }
 
@@ -374,19 +392,50 @@ impl AudioInput {
 
                     is_speaking_handle.store(is_speech, Ordering::Relaxed);
 
-                    // Only send to encoder if speaking
                     if is_speech {
+                        // Reset silence counter when speaking
                         consecutive_silence_frames = 0;
 
-                        // Send to encoder thread
-                        if encoder_tx
-                            .send_timeout(frame, Duration::from_millis(5))
-                            .is_err()
-                        {
-                            stats.producer_overruns.fetch_add(1, Ordering::Relaxed);
+                        // Send to encoder with drop-oldest behavior
+                        match encoder_tx.try_send(frame.clone()) {
+                            Ok(_) => {
+                                frames_sent += 1;
+                            }
+                            Err(TrySendError::Full(_)) => {
+                                // Channel full - this is bad for latency
+                                // Try once more after a tiny yield
+                                thread::yield_now();
+                                if encoder_tx.try_send(frame).is_err() {
+                                    stats.producer_overruns.fetch_add(1, Ordering::Relaxed);
+                                    // Drop the frame to maintain low latency
+                                }
+                            }
+                            Err(TrySendError::Disconnected(_)) => {
+                                // Encoder shut down
+                                return;
+                            }
                         }
                     } else {
+                        // NOT speaking - important: don't accumulate or send anything!
                         consecutive_silence_frames += 1;
+                        frames_dropped += 1;
+
+                        // Immediately update speaking state
+                        if consecutive_silence_frames > 10 {
+                            // 100ms of silence
+                            is_speaking_handle.store(false, Ordering::Relaxed);
+                        }
+
+                        // Log occasionally
+                        if frames_dropped % 1000 == 0 && frames_dropped > 0 {
+                            debug!(
+                                "🔇 VAD: {} frames sent, {} dropped (silence)",
+                                frames_sent, frames_dropped
+                            );
+                        }
+
+                        // DON'T send the frame anywhere - just drop it
+                        // This prevents silence accumulation in the pipeline
                     }
                 }
             }
@@ -399,6 +448,7 @@ impl AudioInput {
 
     pub fn set_muted(&mut self, muted: bool) {
         self.is_muted.store(muted, Ordering::Relaxed);
+        info!("🎤 Input muted: {}", muted);
     }
 
     pub fn set_vad_enabled(&mut self, enabled: bool) {
@@ -419,6 +469,7 @@ impl AudioInput {
     pub fn get_speaking_handle(&self) -> Arc<AtomicBool> {
         self.is_speaking.clone()
     }
+
     pub fn is_muted(&self) -> bool {
         self.is_muted.load(Ordering::Relaxed)
     }
@@ -432,4 +483,3 @@ impl Drop for AudioInput {
         }
     }
 }
-

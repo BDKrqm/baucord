@@ -190,7 +190,22 @@ impl ChatServer {
 
     fn create_connection_config(channels: &ChannelSettings) -> ConnectionConfig {
         let mut config = ConnectionConfig::default();
+        config.client_channels_config.clear();
+        config.server_channels_config.clear();
 
+        // ADD THIS - RELIABLE CHANNEL CONFIG WITH RESEND TIME
+        let reliable_channel = ChannelConfig {
+            channel_id: channels.reliable_channel_id,
+            max_memory_usage_bytes: 1 * 1024 * 1024, // 1MB for chat/control
+            send_type: SendType::ReliableOrdered {
+                resend_time: Duration::from_millis(200), // Resend after 200ms
+            },
+        };
+
+        config.client_channels_config.push(reliable_channel.clone());
+        config.server_channels_config.push(reliable_channel);
+
+        // EXISTING VOICE CHANNEL
         let voice_channel = ChannelConfig {
             channel_id: channels.voice_channel_id,
             max_memory_usage_bytes: channels.voice_buffer_size_mb * 1024 * 1024,

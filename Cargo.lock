@@ -1310,11 +1310,9 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 [[package]]
 name = "opus"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6526409b274a7e98e55ff59d96aafd38e6cd34d46b7dbbc32ce126dffcd75e8e"
+source = "git+https://github.com/SpaceManiac/opus-rs#834381efeaa864d06925e849992341926d358879"
 dependencies = [
  "audiopus_sys",
- "libc",
 ]
 
 [[package]]

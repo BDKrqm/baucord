@@ -12,7 +12,7 @@ renet = "1.1.0"
 renet_netcode = "1.1.0"
 log = "0.4"
 env_logger = "0.11"
-opus = "0.3"                
+opus = { git = "https://github.com/SpaceManiac/opus-rs" }
 cpal = "0.15"               
 voice_activity_detector = { version = "0.2", features = ["load-dynamic"], optional = true }
 earshot = { version = "0.1", optional = true }

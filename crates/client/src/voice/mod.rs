@@ -1,4 +1,4 @@
-// voice/mod.rs - Core module with rubato integration
+// voice/mod.rs - Updated with incoming packet channel and fixes
 pub mod diagnostics;
 mod input;
 mod jitter_buffer;
@@ -231,9 +231,13 @@ pub struct VoiceChat {
         Receiver<(renet::ClientId, Vec<f32>)>,
     ),
 
+    // NEW: Channel for incoming packets from external sources
+    incoming_packets: (Sender<AudioPacket>, Receiver<AudioPacket>),
+
     // Worker threads
     encoder_thread: Option<thread::JoinHandle<()>>,
     decoder_thread: Option<thread::JoinHandle<()>>,
+    packet_router_thread: Option<thread::JoinHandle<()>>,
 
     // Settings
     latency_preset: Arc<AtomicUsize>,
@@ -259,12 +263,14 @@ impl VoiceChat {
         encoder.set_vbr(true)?;
         encoder.set_inband_fec(true)?;
         encoder.set_packet_loss_perc(5)?;
+        encoder.set_dtx(true)?;
 
         // Create bounded channels - NO SLEEPS in audio path!
         let audio_to_encoder = bounded(32);
         let encoder_to_network = bounded(64);
         let network_to_decoder = bounded(64);
         let decoder_to_audio = bounded(32);
+        let incoming_packets = bounded(128); // NEW: Channel for incoming packets
 
         Ok(Self {
             input: None,
@@ -275,8 +281,10 @@ impl VoiceChat {
             encoder_to_network,
             network_to_decoder,
             decoder_to_audio,
+            incoming_packets,
             encoder_thread: None,
             decoder_thread: None,
+            packet_router_thread: None,
             latency_preset: Arc::new(AtomicUsize::new(LatencyPreset::Normal as usize)),
             channel_mapping: Arc::new(Mutex::new(ChannelMapping::default())),
             user_audio_settings: Arc::new(Mutex::new(HashMap::new())),
@@ -293,6 +301,7 @@ impl VoiceChat {
         // Start worker threads
         self.start_encoder_thread();
         self.start_decoder_thread();
+        self.start_packet_router_thread(); // NEW: Router for incoming packets
 
         // Start audio I/O
         self.start_input(settings)?;
@@ -315,6 +324,11 @@ impl VoiceChat {
 
         let preset = LatencyPreset::from_usize(self.latency_preset.load(Ordering::Relaxed));
         input.set_latency_preset(preset);
+
+        // Apply initial settings
+        if settings.mute_on_start {
+            input.set_muted(true);
+        }
 
         input.start()?;
 
@@ -353,15 +367,18 @@ impl VoiceChat {
         let diagnostics = self.diagnostics.clone();
 
         self.encoder_thread = Some(thread::spawn(move || {
-            let mut seq = 0u32; // Changed to u32
-            let mut ts_48k = 0u32; // Monotonic 48kHz timestamp
+            let mut seq = 0u32;
+            let mut ts_48k = 0u32;
             let mut scratch = vec![0u8; 256];
+            let mut silence_frames = 0u32;
+
+            info!("🎤 Encoder thread started");
 
             while let Ok(samples) = rx.recv() {
                 static ENCODE_COUNTER: AtomicU64 = AtomicU64::new(0);
                 let count = ENCODE_COUNTER.fetch_add(1, Ordering::Relaxed);
-                if count % 100 == 0 {
-                    info!("✅ Encoder: Processed {} frames", count);
+                if count % 500 == 0 && count > 0 {
+                    info!("✅ Encoder: Processed {} frames (non-silent)", count);
                 }
 
                 // Check frame size BEFORE encoding
@@ -379,6 +396,20 @@ impl VoiceChat {
                         timestamp: Instant::now(),
                     });
                     continue;
+                }
+
+                // Check if frame is silent (additional check)
+                let is_silent = samples.iter().all(|&x| x.abs() < 0.001);
+                
+                if is_silent {
+                    silence_frames += 1;
+                    // Don't encode or send silent frames at all
+                    continue;
+                } else {
+                    if silence_frames > 50 {
+                        info!("🎤 Breaking silence after {} frames", silence_frames);
+                    }
+                    silence_frames = 0;
                 }
 
                 // Time the encoding
@@ -399,10 +430,11 @@ impl VoiceChat {
                         });
 
                         // Create packet with monotonic timestamp
+                        // Don't set client ID here - it will be set by voice thread
                         let packet = AudioPacket::new(
                             seq,
                             ts_48k,
-                            0, // SSRC for local
+                            0, // Will be set to actual client ID in voice thread
                             scratch[..size].to_vec(),
                         );
 
@@ -445,11 +477,11 @@ impl VoiceChat {
 
         self.decoder_thread = Some(thread::spawn(move || {
             let mut frame_buffer = vec![0i16; FRAME_SIZE * 2];
-            let mut last_seq: HashMap<u64, u32> = HashMap::new(); // KEY: u64 ssrc (see fix #2)
+            let mut last_seq: HashMap<u64, u32> = HashMap::new();
 
             while let Ok(packet) = rx.recv() {
-                let ssrc = packet.header.ssrc; // u64
-                let curr = packet.header.seq; // u32
+                let ssrc = packet.header.ssrc;
+                let curr = packet.header.seq;
 
                 let mut decoders_map = decoders.lock().unwrap();
                 let decoder = decoders_map
@@ -460,17 +492,16 @@ impl VoiceChat {
                 let expect = last.wrapping_add(1);
 
                 // Wrap-safe classification
-                let ahead = curr.wrapping_sub(expect); // 0 = on time, small = forward gap
-                let behind = expect.wrapping_sub(curr); // small = late
+                let ahead = curr.wrapping_sub(expect);
+                let behind = expect.wrapping_sub(curr);
 
-                // ❌ BUG WAS HERE: `behind <= 10` also matched 0 (on-time). Require `behind > 0`.
                 if behind > 0 && behind <= 10 {
-                    // Late packet: we already moved past this time slot (possibly with PLC/FEC) → drop it.
+                    // Late packet: drop it
                     continue;
                 }
 
                 if ahead > 0 && ahead <= 20 {
-                    // We missed `ahead` frames: try FEC for (curr-1) from the current packet…
+                    // We missed frames: try FEC or PLC
                     if let Ok(n) = decoder.decode(&packet.opus_data, &mut frame_buffer, true) {
                         let s: Vec<f32> = frame_buffer[..n]
                             .iter()
@@ -479,7 +510,7 @@ impl VoiceChat {
                         let _ = tx.send((ssrc, s));
                         stats.fec_recoveries.fetch_add(1, Ordering::Relaxed);
                     } else {
-                        // …otherwise PLC one frame
+                        // PLC
                         if let Ok(n) = decoder.decode(&[], &mut frame_buffer, false) {
                             let s: Vec<f32> = frame_buffer[..n]
                                 .iter()
@@ -489,7 +520,8 @@ impl VoiceChat {
                             stats.plc_frames.fetch_add(1, Ordering::Relaxed);
                         }
                     }
-                    // Older missing frames (cap extra PLC at 1)
+                    
+                    // Additional PLC for older missing frames
                     for _ in 0..ahead.saturating_sub(1).min(1) {
                         if let Ok(n) = decoder.decode(&[], &mut frame_buffer, false) {
                             let s: Vec<f32> = frame_buffer[..n]
@@ -500,9 +532,7 @@ impl VoiceChat {
                             stats.plc_frames.fetch_add(1, Ordering::Relaxed);
                         }
                     }
-                    stats
-                        .packets_lost
-                        .fetch_add(ahead as u64, Ordering::Relaxed);
+                    stats.packets_lost.fetch_add(ahead as u64, Ordering::Relaxed);
                 } else if ahead > 20 {
                     // Big jump/reset: re-init decoder
                     *decoder = Decoder::new(OPUS_SAMPLE_RATE, Channels::Mono).unwrap();
@@ -519,7 +549,7 @@ impl VoiceChat {
                             break;
                         }
                         stats.packets_received.fetch_add(1, Ordering::Relaxed);
-                        last_seq.insert(ssrc, curr); // advance only after accepting current
+                        last_seq.insert(ssrc, curr);
                     }
                     Err(e) => {
                         error!("Decode error: {}", e);
@@ -532,8 +562,22 @@ impl VoiceChat {
                             let _ = tx.send((ssrc, s));
                             stats.plc_frames.fetch_add(1, Ordering::Relaxed);
                         }
-                        // Do not advance last_seq on error
                     }
+                }
+            }
+        }));
+    }
+
+    // NEW: Router thread to forward incoming packets to decoder
+    fn start_packet_router_thread(&mut self) {
+        let incoming_rx = self.incoming_packets.1.clone();
+        let decoder_tx = self.network_to_decoder.0.clone();
+
+        self.packet_router_thread = Some(thread::spawn(move || {
+            while let Ok(packet) = incoming_rx.recv() {
+                // Simply forward to decoder thread
+                if decoder_tx.send(packet).is_err() {
+                    break;
                 }
             }
         }));
@@ -582,8 +626,9 @@ impl VoiceChat {
         *self.channel_mapping.lock().unwrap() = mapping;
     }
 
+    // NEW: Public method to receive packets from network
     pub fn receive_packet(&mut self, packet: AudioPacket) {
-        let _ = self.network_to_decoder.0.try_send(packet);
+        let _ = self.incoming_packets.0.try_send(packet);
     }
 
     pub fn get_outgoing_packets(&mut self) -> Vec<AudioPacket> {
@@ -592,6 +637,11 @@ impl VoiceChat {
             packets.push(packet);
         }
         packets
+    }
+
+    // NEW: Get a sender for incoming packets (for use by the App)
+    pub fn get_incoming_sender(&self) -> Sender<AudioPacket> {
+        self.incoming_packets.0.clone()
     }
 
     pub fn get_stats(&self) -> String {
@@ -776,9 +826,11 @@ impl VoiceChat {
     pub fn run_sanity_test(&self) -> Result<(), String> {
         self.diagnostics.sanity_test_codec()
     }
+
     pub fn diagnostics_enabled(&self) -> bool {
         self.diagnostics.is_enabled()
     }
+
     pub fn is_loopback_enabled(&self) -> bool {
         self.loopback_enabled.load(Ordering::Relaxed)
     }
@@ -858,6 +910,7 @@ impl VoiceChat {
             self.diagnostics.output_ring.get_occupancy()
         )
     }
+
     pub fn set_muted(&mut self, muted: bool) {
         if let Some(ref mut input) = self.input {
             input.set_muted(muted);

@@ -8,11 +8,13 @@ use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant, SystemTime};
 
 const PROTOCOL_ID: u64 = 27;
+
+const VOICE_PACKET_BATCH_THRESHOLD: usize = 2;
 const RELIABLE_CHANNEL: u8 = 2;
 const VOICE_CHANNEL: u8 = 3;
 const VOICE_PROTOCOL_VERSION: u8 = 1;
-const VOICE_MTU_BUDGET: usize = 1000; // Reduced from 1200
-const MAX_FRAMES_PER_PACKET: usize = 2;
+const VOICE_MTU_BUDGET: usize = 800; // Reduced from 1000
+const MAX_FRAMES_PER_PACKET: usize = 2; // Already 2, keep it
 
 #[derive(Debug, Clone)]
 pub enum NetworkMessage {
@@ -186,16 +188,44 @@ pub struct NetworkClient {
     // Reordering buffer for received packets
     reorder_buffer: HashMap<(u64, u32), Vec<u8>>, // (client_id, seq) -> packet
     expected_seqs: HashMap<u64, u32>,             // client_id -> next expected seq
+    last_speaking_sent: bool,
+    last_speaking_instant: Instant,
+    speaking_cache: HashMap<ClientId, (bool, Instant)>,
 }
 
 impl NetworkClient {
     pub fn connect(server_addr: SocketAddr, username: String) -> Result<Self, String> {
         let mut connection_config = ConnectionConfig::default();
 
+        // MUST CLEAR THE DEFAULT CHANNELS (0, 1, 2)
+        connection_config.client_channels_config.clear();
+        connection_config.server_channels_config.clear();
+
+        // Now add YOUR channels (2 and 3) without conflict
         connection_config
             .client_channels_config
             .push(ChannelConfig {
-                channel_id: VOICE_CHANNEL,
+                channel_id: RELIABLE_CHANNEL, // 2 - now won't conflict
+                max_memory_usage_bytes: 1 * 1024 * 1024,
+                send_type: SendType::ReliableOrdered {
+                    resend_time: Duration::from_millis(200),
+                },
+            });
+
+        connection_config
+            .server_channels_config
+            .push(ChannelConfig {
+                channel_id: RELIABLE_CHANNEL, // 2
+                max_memory_usage_bytes: 1 * 1024 * 1024,
+                send_type: SendType::ReliableOrdered {
+                    resend_time: Duration::from_millis(200),
+                },
+            });
+
+        connection_config
+            .client_channels_config
+            .push(ChannelConfig {
+                channel_id: VOICE_CHANNEL, // 3
                 max_memory_usage_bytes: 5 * 1024 * 1024,
                 send_type: SendType::Unreliable,
             });
@@ -203,13 +233,12 @@ impl NetworkClient {
         connection_config
             .server_channels_config
             .push(ChannelConfig {
-                channel_id: VOICE_CHANNEL,
+                channel_id: VOICE_CHANNEL, // 3
                 max_memory_usage_bytes: 5 * 1024 * 1024,
                 send_type: SendType::Unreliable,
             });
 
         let client = RenetClient::new(connection_config);
-
         let socket =
             UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("Failed to bind socket: {}", e))?;
 
@@ -239,6 +268,11 @@ impl NetworkClient {
             voice_ts_48k: 0,
             reorder_buffer: HashMap::new(),
             expected_seqs: HashMap::new(),
+            last_speaking_sent: false,
+last_speaking_instant: Instant::now()
+    .checked_sub(Duration::from_secs(5))
+    .unwrap(),
+speaking_cache: HashMap::new(),
         })
     }
 
@@ -446,7 +480,7 @@ impl NetworkClient {
     pub fn send_voice_frame_raw(
         &mut self,
         our_client_id: ClientId,
-        _ts_48k_ignored: u32, // Ignore caller's timestamp, use our monotonic counter
+        _ts_48k_ignored: u32,
         opus_frame: &[u8],
     ) {
         // Start a new packet if needed
@@ -469,10 +503,10 @@ impl NetworkClient {
 
         // Increment counters for next frame
         self.voice_next_seq = self.voice_next_seq.wrapping_add(1);
-        self.voice_ts_48k = self.voice_ts_48k.wrapping_add(480); // 10ms at 48kHz
+        self.voice_ts_48k = self.voice_ts_48k.wrapping_add(480);
 
-        // Flush if we hit the limit
-        if self.voice_bundler.frames as usize >= MAX_FRAMES_PER_PACKET {
+        // FLUSH AT THRESHOLD (not just at max)
+        if self.voice_bundler.frames >= VOICE_PACKET_BATCH_THRESHOLD as u8 {
             self.flush_voice_packet();
         }
     }
@@ -493,12 +527,28 @@ impl NetworkClient {
         self.client.send_message(RELIABLE_CHANNEL, message);
     }
 
-    pub fn send_speaking_status(&mut self, is_speaking: bool) {
+   pub fn send_speaking_status(&mut self, is_speaking: bool) {
+    use std::time::{Duration, Instant};
+    const SPEAKING_THROTTLE_MS: u64 = 50;
+
+    let now = Instant::now();
+    let due = now
+        .duration_since(self.last_speaking_instant)
+        >= Duration::from_millis(SPEAKING_THROTTLE_MS);
+    let edge = is_speaking != self.last_speaking_sent;
+
+    // Send only on edge or when the throttle window elapsed
+    if edge || due {
         let message = bincode::options()
             .serialize(&ClientMessage::Speaking(is_speaking))
             .expect("Failed to serialize speaking status");
         self.client.send_message(RELIABLE_CHANNEL, message);
+
+        self.last_speaking_sent = is_speaking;
+        self.last_speaking_instant = now;
     }
+}
+ 
 
     pub fn poll_messages(&mut self) -> Vec<NetworkMessage> {
         self.message_queue.drain(..).collect()
