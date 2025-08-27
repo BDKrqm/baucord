@@ -14,8 +14,9 @@ channels:
   voice_buffer_size_mb: 5
 
 logging:
-  level: "info"  # Options: trace, debug, info, warn, error
+  level: "info" # Options: trace, debug, info, warn, error
   stats_interval_secs: 30
 
 authentication:
   enabled: false
+

@@ -1,4 +1,7 @@
+// ui/mod.rs
 pub mod chat;
+pub mod diagnostics;
+pub mod messages;
 pub mod settings;
 pub mod sidebar;
 pub mod theme;
