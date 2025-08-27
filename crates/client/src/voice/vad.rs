@@ -1,9 +1,9 @@
-// vad.rs - Modular Voice Activity Detection interface
+// voice/vad.rs - Modular Voice Activity Detection interface (updated for new architecture)
 
-use crate::voice::VoicePacket;
 use log::info;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// Generic VAD trait for easy swapping between implementations
 pub trait VoiceActivityDetector: Send + Sync {
@@ -35,7 +35,7 @@ pub struct VADConfig {
 
 #[derive(Debug, Clone)]
 pub enum VADProfile {
-    Quality, // Least aggressive
+    Quality,        // Least aggressive
     LowBitRate,
     Aggressive,
     VeryAggressive, // Most aggressive
@@ -44,9 +44,9 @@ pub enum VADProfile {
 impl Default for VADConfig {
     fn default() -> Self {
         Self {
-            sample_rate: 16000,
-            chunk_size: 512,
-            threshold: 0.5,
+            sample_rate: 48000,  // Changed to 48kHz default for Opus
+            chunk_size: 480,     // 10ms at 48kHz
+            threshold: 0.15,     // Lower threshold for better sensitivity
             profile: VADProfile::Aggressive,
         }
     }
@@ -86,8 +86,6 @@ impl VoiceActivityDetector for EarshotVAD {
 
     fn process(&mut self, samples: &[i16]) -> f32 {
         // Earshot expects specific frame sizes
-        // For 10ms frames at 48kHz (480 samples), we need to handle this specially
-
         let result = match self.config.sample_rate {
             8000 => {
                 // 10ms = 80 samples, 20ms = 160 samples
@@ -138,7 +136,6 @@ impl VoiceActivityDetector for EarshotVAD {
     }
 
     fn chunk_size(&self) -> usize {
-        // Return the actual chunk size from config (could be 10ms or 20ms)
         self.config.chunk_size
     }
 }
@@ -212,30 +209,33 @@ pub fn create_vad(
 }
 
 // ============================================================================
-// Optimized VAD Processor for Low Latency
+// Simplified VAD Processor for RT-safe operation
 // ============================================================================
 
 pub struct VADProcessor {
     vad: Box<dyn VoiceActivityDetector>,
     buffer: Vec<i16>,
-    is_speaking: Arc<Mutex<bool>>,
-    cooldown: Arc<Mutex<std::time::Instant>>,
+    is_speaking: Arc<AtomicBool>,
+    last_transition: Instant,
     threshold: f32,
-    // For low latency, we might want faster response
-    cooldown_ms: u64,
-    outgoing_tx: Option<mpsc::Sender<VoicePacket>>,
+    
+    // Hysteresis parameters for smoother transitions
+    start_threshold: f32,
+    stop_threshold: f32,
+    start_cooldown_ms: u64,
+    stop_cooldown_ms: u64,
 }
 
 impl VADProcessor {
     pub fn new(config: VADConfig) -> Result<Self, Box<dyn std::error::Error>> {
         let threshold = config.threshold;
-        let chunk_size = config.chunk_size; // Use the actual configured chunk size
+        let chunk_size = config.chunk_size;
 
-        // For low latency, use shorter cooldown
-        let cooldown_ms = if chunk_size <= 480 {
-            150 // Faster response for 10ms frames
+        // For low latency, use shorter cooldowns
+        let (start_cooldown_ms, stop_cooldown_ms) = if chunk_size <= 480 {
+            (50, 800)   // Quick to start, slow to stop for 10ms frames
         } else {
-            300 // Standard for 20ms frames
+            (100, 1000) // Standard for 20ms frames
         };
 
         let vad = create_vad(config)?;
@@ -243,16 +243,18 @@ impl VADProcessor {
         Ok(Self {
             vad,
             buffer: Vec::with_capacity(chunk_size * 2),
-            is_speaking: Arc::new(Mutex::new(false)),
-            cooldown: Arc::new(Mutex::new(std::time::Instant::now())),
+            is_speaking: Arc::new(AtomicBool::new(false)),
+            last_transition: Instant::now(),
             threshold,
-            cooldown_ms,
-            outgoing_tx: None,
+            start_threshold: threshold,
+            stop_threshold: threshold * 0.5, // Lower threshold to stop
+            start_cooldown_ms,
+            stop_cooldown_ms,
         })
     }
 
+    /// Process audio samples and return voice activity status
     pub fn process_audio(&mut self, samples: &[i16]) -> bool {
-        // For low latency, process immediately if we have a full chunk
         let chunk_size = self.vad.chunk_size();
 
         // Direct processing for exact chunk size (common case)
@@ -264,7 +266,6 @@ impl VADProcessor {
         // Buffer handling for mismatched sizes
         self.buffer.extend_from_slice(samples);
 
-        let mut any_speech = false;
         let mut speech_confidence = 0.0f32;
         let mut chunks_processed = 0;
 
@@ -274,8 +275,6 @@ impl VADProcessor {
             let probability = self.vad.process(&chunk);
             speech_confidence += probability;
             chunks_processed += 1;
-
-            any_speech = any_speech || (probability > self.threshold);
         }
 
         if chunks_processed > 0 {
@@ -283,69 +282,126 @@ impl VADProcessor {
             return self.update_speaking_state(speech_confidence);
         }
 
-        *self.is_speaking.lock().unwrap()
+        self.is_speaking.load(Ordering::Relaxed)
     }
 
-    pub fn set_sender(&mut self, tx: mpsc::Sender<VoicePacket>) {
-        self.outgoing_tx = Some(tx);
+    /// Process f32 audio samples (convenience method)
+    pub fn process_audio_f32(&mut self, samples: &[f32]) -> bool {
+        // Convert f32 to i16
+        let samples_i16: Vec<i16> = samples
+            .iter()
+            .map(|&x| (x.clamp(-1.0, 1.0) * 32767.0) as i16)
+            .collect();
+        
+        self.process_audio(&samples_i16)
     }
 
     fn update_speaking_state(&mut self, confidence: f32) -> bool {
-        let was_speaking = *self.is_speaking.lock().unwrap();
-        let mut cooldown = self.cooldown.lock().unwrap();
-        let now = std::time::Instant::now();
+        let was_speaking = self.is_speaking.load(Ordering::Relaxed);
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_transition);
 
-        let start_threshold = self.threshold;
-        let stop_threshold = self.threshold * 0.5; // Lower stop threshold (was 0.7)
-
-        let now_speaking = if was_speaking {
-            confidence > stop_threshold
+        // Determine if we should be speaking based on thresholds
+        let should_speak = if was_speaking {
+            // Currently speaking - use lower threshold to continue
+            confidence > self.stop_threshold
         } else {
-            confidence > start_threshold
+            // Currently silent - use higher threshold to start
+            confidence > self.start_threshold
         };
 
-        // Different cooldowns for different transitions
-        let required_cooldown = if was_speaking && !now_speaking {
+        // Apply cooldown to prevent rapid transitions
+        let required_cooldown = if was_speaking && !should_speak {
             // Stopping: require longer cooldown to prevent cutting off
-            std::time::Duration::from_millis(300) // Wait longer before stopping
-        } else if !was_speaking && now_speaking {
+            Duration::from_millis(self.stop_cooldown_ms)
+        } else if !was_speaking && should_speak {
             // Starting: allow quick start
-            std::time::Duration::from_millis(50) // Quick response to start
+            Duration::from_millis(self.start_cooldown_ms)
         } else {
-            std::time::Duration::from_millis(0) // No change, no cooldown
+            // No change
+            Duration::from_millis(0)
         };
 
-        if now.duration_since(*cooldown) > required_cooldown {
-            if was_speaking != now_speaking {
-                *self.is_speaking.lock().unwrap() = now_speaking;
-                *cooldown = now;
+        // Only transition if cooldown period has passed
+        if should_speak != was_speaking && elapsed > required_cooldown {
+            self.is_speaking.store(should_speak, Ordering::Relaxed);
+            self.last_transition = now;
 
-                // Send the speaking state change event
-                if let Some(ref tx) = self.outgoing_tx {
-                    let _ = tx.send(VoicePacket::Speaking {
-                        client_id: 0,
-                        is_speaking: now_speaking,
-                    });
-                }
-
-                if now_speaking {
-                    info!("🎤 VAD: Speaking (confidence: {:.2})", confidence);
-                } else {
-                    info!("🔇 VAD: Silent");
-                }
+            if should_speak {
+                info!("🎤 VAD: Speaking started (confidence: {:.2})", confidence);
+            } else {
+                info!("🔇 VAD: Speaking stopped");
             }
         }
 
-        *self.is_speaking.lock().unwrap()
+        self.is_speaking.load(Ordering::Relaxed)
     }
 
     pub fn is_speaking(&self) -> bool {
-        *self.is_speaking.lock().unwrap()
+        self.is_speaking.load(Ordering::Relaxed)
     }
 
     pub fn reset(&mut self) {
         self.vad.reset();
         self.buffer.clear();
-        *self.is_speaking.lock().unwrap() = false;
+        self.is_speaking.store(false, Ordering::Relaxed);
+        self.last_transition = Instant::now();
+    }
+
+    /// Get a clone of the speaking state for sharing across threads
+    pub fn get_speaking_handle(&self) -> Arc<AtomicBool> {
+        self.is_speaking.clone()
+    }
+}
+
+// ============================================================================
+// Tests (point 15)
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_vad_hysteresis() {
+        let config = VADConfig {
+            sample_rate: 48000,
+            chunk_size: 480,
+            threshold: 0.5,
+            profile: VADProfile::Aggressive,
+        };
+        
+        let mut processor = VADProcessor::new(config).unwrap();
+        
+        // Generate test samples (silence)
+        let silence = vec![0i16; 480];
+        assert!(!processor.process_audio(&silence));
+        
+        // Generate test samples (noise)
+        let noise: Vec<i16> = (0..480)
+            .map(|i| ((i as f32 * 0.1).sin() * 1000.0) as i16)
+            .collect();
+        
+        // Process multiple times to test state transitions
+        for _ in 0..10 {
+            processor.process_audio(&noise);
+        }
+    }
+
+    #[test]
+    fn test_buffer_accumulation() {
+        let config = VADConfig::default();
+        let mut processor = VADProcessor::new(config).unwrap();
+        
+        // Send partial frames
+        let partial = vec![0i16; 100];
+        processor.process_audio(&partial);
+        processor.process_audio(&partial);
+        processor.process_audio(&partial);
+        processor.process_audio(&partial);
+        processor.process_audio(&partial); // Total: 500 samples
+        
+        // Should have processed one full frame of 480 samples
+        assert_eq!(processor.buffer.len(), 20); // 500 - 480
     }
 }
