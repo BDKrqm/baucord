@@ -1,5 +1,4 @@
 use bincode::Options;
-use log::info;
 use renet::{ChannelConfig, ClientId, ConnectionConfig, RenetClient, SendType};
 use renet_netcode::{ClientAuthentication, NETCODE_USER_DATA_BYTES, NetcodeClientTransport};
 use serde::{Deserialize, Serialize};
@@ -206,7 +205,7 @@ impl NetworkClient {
             .client_channels_config
             .push(ChannelConfig {
                 channel_id: RELIABLE_CHANNEL, // 2 - now won't conflict
-                max_memory_usage_bytes: 1 * 1024 * 1024,
+                max_memory_usage_bytes: 1024 * 1024,
                 send_type: SendType::ReliableOrdered {
                     resend_time: Duration::from_millis(200),
                 },
@@ -216,7 +215,7 @@ impl NetworkClient {
             .server_channels_config
             .push(ChannelConfig {
                 channel_id: RELIABLE_CHANNEL, // 2
-                max_memory_usage_bytes: 1 * 1024 * 1024,
+                max_memory_usage_bytes: 1024 * 1024,
                 send_type: SendType::ReliableOrdered {
                     resend_time: Duration::from_millis(200),
                 },
@@ -513,11 +512,10 @@ speaking_cache: HashMap::new(),
 
     /// Flush the current voice bundle
     pub fn flush_voice_packet(&mut self) {
-        if let Some(pkt) = self.voice_bundler.finish_into_vec() {
-            if pkt.len() <= VOICE_MTU_BUDGET {
+        if let Some(pkt) = self.voice_bundler.finish_into_vec()
+            && pkt.len() <= VOICE_MTU_BUDGET {
                 self.client.send_message(VOICE_CHANNEL, pkt);
             }
-        }
     }
 
     pub fn send_message(&mut self, text: String) {

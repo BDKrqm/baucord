@@ -1,5 +1,4 @@
 // voice/packet.rs - Standardized packet structure with 48kHz timestamps
-use std::time::Instant;
 
 #[derive(Debug, Clone)]
 pub struct PacketHeader {
@@ -34,7 +33,7 @@ impl AudioPacket {
             header: PacketHeader {
                 seq,
                 timestamp: ts_48k,
-                ssrc: ssrc,
+                ssrc,
                 vad: true,
             },
             opus_data,

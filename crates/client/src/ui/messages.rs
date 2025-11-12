@@ -1,7 +1,6 @@
 // ui/messages.rs
 use renet::ClientId;
 use std::collections::HashMap;
-use crate::settings::UserAudioSettings;
 
 #[derive(Debug, Clone)]
 pub enum UiMessage {

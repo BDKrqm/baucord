@@ -1,16 +1,16 @@
 // voice/output.rs
-use super::diagnostics::{AudioFingerprint, PipelineDiagnostics, TestMode};
+use super::diagnostics::PipelineDiagnostics;
 use super::{ChannelMapping, DeviceCapabilities, LatencyPreset, OPUS_SAMPLE_RATE};
 use crate::settings::UserAudioSettings;
 use crate::voice::diagnostics::{Anomaly, AnomalyType};
 use crate::voice::jitter_buffer::AdaptiveJitterBuffer;
-use crate::voice::resampler::{ResamplerOut, build_output_resampler, frames_for_10ms};
+use crate::voice::resampler::{ResamplerOut, build_output_resampler};
 use crate::voice::stats::AudioStats;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{BufferSize, Device, SampleFormat, Stream, StreamConfig};
+use cpal::{Device, SampleFormat, Stream};
 use crossbeam_channel::Receiver;
 use dasp_sample::{FromSample, Sample as DaspSample, ToSample};
-use log::{debug, error, info, warn};
+use log::{error, info};
 use renet::ClientId;
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::collections::HashMap;
@@ -186,7 +186,7 @@ impl AudioOutput {
         let mut resampler_input = vec![Vec::with_capacity(4096)];
         let mut resampler_output = vec![Vec::with_capacity(8192)];
         let mut initialized = false;
-        let mut underrun_count = 0u64;
+        let underrun_count = 0u64;
         let mut last_drift_update = Instant::now();
 
         let stream = self.device.build_output_stream(
@@ -242,15 +242,13 @@ impl AudioOutput {
                 // Apply drift compensation periodically
                 if let Some(ref mut r) = resampler {
                     let now = Instant::now();
-                    if now.duration_since(last_drift_update) > Duration::from_millis(100) {
-                        if let Ok(ppm) = drift_ppm.try_lock() {
-                            if ppm.abs() > 1.0 {
+                    if now.duration_since(last_drift_update) > Duration::from_millis(100)
+                        && let Ok(ppm) = drift_ppm.try_lock()
+                            && ppm.abs() > 1.0 {
                                 let base_ratio = sample_rate as f64 / 48000.0;
                                 let _ = r.nudge_ratio(base_ratio, *ppm * 0.1); // Apply 10% of drift
                                 last_drift_update = now;
                             }
-                        }
-                    }
                 }
 
                 // Process based on resampler requirements
@@ -536,8 +534,8 @@ impl AudioOutput {
                 jitter_buffer.adapt();
 
                 // 8) Publish anomalies once/second
-                if let Some(ref diag) = diagnostics {
-                    if last_diag_flush.elapsed() >= Duration::from_secs(1) {
+                if let Some(ref diag) = diagnostics
+                    && last_diag_flush.elapsed() >= Duration::from_secs(1) {
                         if producer_xruns > 0 {
                             diag.record_anomaly(Anomaly {
                                 stage: "producer",
@@ -550,7 +548,6 @@ impl AudioOutput {
                         }
                         last_diag_flush = Instant::now();
                     }
-                }
 
                 // 9) Pace to real time (one 10ms hop per loop)
                 next_tick += Duration::from_millis(10);

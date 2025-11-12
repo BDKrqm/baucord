@@ -21,7 +21,7 @@ impl DiagnosticsWindow {
         main_col.set_spacing(10);
 
         // Title bar
-        let mut title_row = group::Flex::default().row();
+        let title_row = group::Flex::default().row();
         main_col.fixed(&title_row, 40);
 
         let mut title = frame::Frame::default()
@@ -103,7 +103,7 @@ impl DiagnosticsWindow {
         main_col.end();
         wind.end();
         wind.show();
-        let s = sender.clone();
+        let s = sender;
 close_btn.set_callback(move |_| {
     s.send(UiMessage::DiagnosticsWindowClosed);
     wind.hide();
@@ -135,7 +135,7 @@ close_btn.set_callback(move |_| {
         let mut output_buffer_cmd = output_buffer.clone();
         let mut display_clone = output_display.clone();
         let auto_scroll_check = auto_scroll.clone();
-        let s = sender.clone();
+        let s = sender;
 
         command_input.handle(move |input, event| match event {
             enums::Event::KeyDown => match app::event_key() {
@@ -229,7 +229,7 @@ close_btn.set_callback(move |_| {
     }
 
     fn process_command(cmd: &str, sender: &app::Sender<UiMessage>) -> String {
-        let parts: Vec<&str> = cmd.trim().split_whitespace().collect();
+        let parts: Vec<&str> = cmd.split_whitespace().collect();
         if parts.is_empty() {
             return String::new();
         }

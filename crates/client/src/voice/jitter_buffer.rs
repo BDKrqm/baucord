@@ -4,7 +4,6 @@ use renet::ClientId;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use log::{debug, warn};
 
 pub struct AdaptiveJitterBuffer {
     sample_rate: usize,
@@ -41,11 +40,10 @@ impl AdaptiveJitterBuffer {
     pub fn push_frame(&mut self, client_id: ClientId, samples: Vec<f32>) {
         // Check if user is muted
         let settings = self.user_audio_settings.lock().unwrap();
-        if let Some(user_settings) = settings.get(&client_id) {
-            if user_settings.is_muted {
+        if let Some(user_settings) = settings.get(&client_id)
+            && user_settings.is_muted {
                 return;
             }
-        }
         drop(settings);
 
         let buffer = self.buffers.entry(client_id).or_default();
@@ -53,7 +51,7 @@ impl AdaptiveJitterBuffer {
         buffer.extend(samples);
 
         // Limit maximum buffer size
-        let max_samples = (self.max_ms as usize * self.sample_rate) / 1000;
+        let max_samples = (self.max_ms * self.sample_rate) / 1000;
         while buffer.len() > max_samples {
             buffer.pop_front();
         }
@@ -69,7 +67,7 @@ impl AdaptiveJitterBuffer {
         }
 
         let settings = self.user_audio_settings.lock().unwrap();
-        let target_samples = (self.target_ms.load(Ordering::Relaxed) as usize * self.sample_rate) / 1000;
+        let target_samples = (self.target_ms.load(Ordering::Relaxed) * self.sample_rate) / 1000;
 
         let mut active_streams = 0;
         let mut mixed = vec![0.0f32; n];

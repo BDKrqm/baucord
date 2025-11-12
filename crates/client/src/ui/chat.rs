@@ -23,8 +23,8 @@ impl Chat {
         
         // Chat display with styled text
         let mut chat_display = text::TextDisplay::default();
-        let mut chat_buffer = text::TextBuffer::default();
-        let mut style_buffer = text::TextBuffer::default();
+        let chat_buffer = text::TextBuffer::default();
+        let style_buffer = text::TextBuffer::default();
         
         chat_display.set_buffer(chat_buffer.clone());
         chat_display.wrap_mode(text::WrapMode::AtBounds, 0);
@@ -95,7 +95,7 @@ impl Chat {
         chat_col.end();
         
         // Set up callbacks
-        let s = sender.clone();
+        let s = sender;
         let mut input_clone = message_input.clone();
         let mut count_clone = char_count.clone();
         
@@ -131,7 +131,7 @@ impl Chat {
         });
         
         // Send button
-        let s = sender.clone();
+        let s = sender;
         send_btn.set_callback(move |_| {
             let text = input_clone.value();
             if !text.trim().is_empty() && text.len() <= 400 {

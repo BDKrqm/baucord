@@ -714,7 +714,7 @@ impl VoiceChat {
         info!("🎤 Input device change requested: {:?}", device_name);
 
         // Stop current input if running
-        if let Some(mut input) = self.input.take() {
+        if let Some(input) = self.input.take() {
             drop(input);
         }
 
@@ -746,7 +746,7 @@ impl VoiceChat {
         info!("🔊 Output device change requested: {:?}", device_name);
 
         // Stop current output if running
-        if let Some(mut output) = self.output.take() {
+        if let Some(output) = self.output.take() {
             drop(output);
         }
 

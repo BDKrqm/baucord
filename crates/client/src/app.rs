@@ -1,5 +1,5 @@
 // app.rs - Complete channel-based architecture with fixes
-use crossbeam_channel::{Receiver, Sender, TryRecvError, TrySendError, bounded};
+use crossbeam_channel::{Receiver, Sender, TryRecvError, bounded};
 use fltk::{prelude::*, *};
 use log::{debug, info, warn};
 use std::collections::{HashMap, VecDeque};
@@ -296,8 +296,8 @@ fn start_network_thread(
                                     voice_packet_buffer.push_back(packet);
 
                                     // FLUSH AT THRESHOLD (2 frames)
-                                    if voice_packet_buffer.len() >= VOICE_PACKET_BATCH_THRESHOLD {
-                                        if let Some(ref mut c) = client {
+                                    if voice_packet_buffer.len() >= VOICE_PACKET_BATCH_THRESHOLD
+                                        && let Some(ref mut c) = client {
                                             let mut sent_now = 0usize;
                                             while sent_now < VOICE_PACKET_BATCH_THRESHOLD {
                                                 if let Some(p) = voice_packet_buffer.pop_front() {
@@ -327,7 +327,6 @@ fn start_network_thread(
                                                 c.flush_voice_packet();
                                             }
                                         }
-                                    }
                                 }
                                 NetworkControl::SendSpeakingStatus(speaking) => {
                                     if let Some(ref mut c) = client {
@@ -349,8 +348,7 @@ fn start_network_thread(
 
                 if !voice_packet_buffer.is_empty()
                     && frames_sent_this_tick < VOICE_MAX_FRAMES_PER_TICK
-                {
-                    if let Some(ref mut c) = client {
+                    && let Some(ref mut c) = client {
                         // Send up to remaining budget in order (FIFO)
                         let can_send = (VOICE_MAX_FRAMES_PER_TICK - frames_sent_this_tick)
                             .min(voice_packet_buffer.len());
@@ -379,7 +377,6 @@ fn start_network_thread(
                             c.flush_voice_packet();
                         }
                     }
-                }
 
                 // Poll network client if connected
                 if let Some(ref mut c) = client {
@@ -502,8 +499,8 @@ fn start_network_thread(
                             // TODO: Add VAD control to VoiceChat
                         }
                         VoiceControl::SetInputDevice(device) => {
-                            if let Some(ref mut vc) = voice_chat {
-                                if let Err(e) = vc.set_input_device(device.as_deref()) {
+                            if let Some(ref mut vc) = voice_chat
+                                && let Err(e) = vc.set_input_device(device.as_deref()) {
                                     response_tx
                                         .send(VoiceResponse::Error(format!(
                                             "Failed to set input: {}",
@@ -511,11 +508,10 @@ fn start_network_thread(
                                         )))
                                         .ok();
                                 }
-                            }
                         }
                         VoiceControl::SetOutputDevice(device) => {
-                            if let Some(ref mut vc) = voice_chat {
-                                if let Err(e) = vc.set_output_device(device.as_deref()) {
+                            if let Some(ref mut vc) = voice_chat
+                                && let Err(e) = vc.set_output_device(device.as_deref()) {
                                     response_tx
                                         .send(VoiceResponse::Error(format!(
                                             "Failed to set output: {}",
@@ -523,7 +519,6 @@ fn start_network_thread(
                                         )))
                                         .ok();
                                 }
-                            }
                         }
                         VoiceControl::GetDeviceList => {
                             if let Some(ref vc) = voice_chat {
@@ -1170,7 +1165,7 @@ fn start_network_thread(
             .settings
             .user_audio_settings
             .entry(username.clone())
-            .or_insert_with(UserAudioSettings::default);
+            .or_default();
         settings.is_muted = muted;
 
         if let Some(user) = self.users.get_mut(&client_id) {
@@ -1195,7 +1190,7 @@ fn start_network_thread(
             .settings
             .user_audio_settings
             .entry(username.clone())
-            .or_insert_with(UserAudioSettings::default);
+            .or_default();
         settings.volume = volume;
 
         if let Some(user) = self.users.get_mut(&client_id) {
@@ -1352,7 +1347,7 @@ fn start_network_thread(
         wind.show();
 
         // Connect button callback
-        let sender = self.sender.clone();
+        let sender = self.sender;
         connect_btn.set_callback(move |_| {
             let nickname = nick_input.value();
             let server = addr_input.value();
@@ -1378,7 +1373,7 @@ fn start_network_thread(
         main_row.set_color(DarkTheme::BG_PRIMARY);
 
         // Create sidebar
-        let mut sidebar = Sidebar::new(self.sender.clone());
+        let mut sidebar = Sidebar::new(self.sender);
         let sidebar_group = sidebar.create_ui();
         main_row.fixed(&sidebar_group, 250);
 
@@ -1386,7 +1381,7 @@ fn start_network_thread(
         sidebar.set_mute_state(self.is_muted);
 
         // Create chat
-        let mut chat = Chat::new(self.sender.clone());
+        let mut chat = Chat::new(self.sender);
         let chat_group = chat.create_ui();
         main_row.add(&chat_group);
 
@@ -1402,7 +1397,7 @@ fn start_network_thread(
     fn show_settings_window(&mut self) {
         use crate::ui::settings::AudioSettingsWindow;
 
-        let sender = self.sender.clone();
+        let sender = self.sender;
         let settings = self.settings.clone();
 
         AudioSettingsWindow::show(sender, settings);
@@ -1411,7 +1406,7 @@ fn start_network_thread(
     fn show_diagnostics_window(&mut self) {
         use crate::ui::diagnostics::DiagnosticsWindow;
 
-        let sender = self.sender.clone();
+        let sender = self.sender;
         DiagnosticsWindow::show(sender);
     }
 
@@ -1422,7 +1417,7 @@ fn start_network_thread(
         }
 
         // Auto-clear error after 5 seconds
-        let sender = self.sender.clone();
+        let sender = self.sender;
         app::add_timeout3(5.0, move |_| {
             sender.send(UiMessage::ClearError);
         });

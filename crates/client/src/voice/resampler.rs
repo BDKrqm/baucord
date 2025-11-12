@@ -1,10 +1,9 @@
 // voice/resampler.rs - High-quality resampling with rubato
-use log::{debug, info, warn};
+use log::{info, warn};
 use rubato::{
     FastFixedOut, Resampler, SincFixedIn, SincFixedOut, 
     SincInterpolationParameters, SincInterpolationType, WindowFunction
 };
-use std::sync::Arc;
 
 // ============================================================================
 // Core Configuration
@@ -46,7 +45,7 @@ impl ResamplerParams {
     fn to_sinc_params(&self) -> SincInterpolationParameters {
         SincInterpolationParameters {
             sinc_len: self.sinc_len,
-            f_cutoff: self.f_cutoff as f32,
+            f_cutoff: self.f_cutoff,
             interpolation: match self.interpolation {
                 SincInterpolationType::Cubic => SincInterpolationType::Cubic,
                 SincInterpolationType::Quadratic => SincInterpolationType::Quadratic,
@@ -285,7 +284,7 @@ pub fn build_output_resampler(
 
 /// Calculate the ideal frame size for a given duration at a sample rate
 pub fn frames_for_duration_ms(rate: u32, ms: u32) -> usize {
-    ((rate as usize * ms as usize) + 999) / 1000
+    (rate as usize * ms as usize).div_ceil(1000)
 }
 
 /// Get 10ms frame size for a given sample rate

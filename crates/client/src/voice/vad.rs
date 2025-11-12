@@ -2,7 +2,7 @@
 
 use log::info;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Generic VAD trait for easy swapping between implementations

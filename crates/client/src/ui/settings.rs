@@ -300,7 +300,7 @@ impl AudioSettingsWindow {
         main_col.end();
         wind.end();
         wind.show();
-        let s_close = sender.clone();
+        let s_close = sender;
         wind.set_callback(move |w| {
             if app::event() == enums::Event::Close {
                 s_close.send(UiMessage::SettingsWindowClosed);
@@ -308,7 +308,7 @@ impl AudioSettingsWindow {
             }
         });
         // Close button
-let s = sender.clone();
+let s = sender;
 close_btn.set_callback(move |_| {
     s.send(UiMessage::SettingsWindowClosed);
     wind.hide();
@@ -346,7 +346,7 @@ close_btn.set_callback(move |_| {
         // === Callbacks using message passing ===
 
         // Refresh devices
-        let s = sender.clone();
+        let s = sender;
         let mut status = device_status.clone();
         refresh_btn.set_callback(move |_| {
             s.send(UiMessage::RefreshDevices);
@@ -355,7 +355,7 @@ close_btn.set_callback(move |_| {
         });
 
         // Input device selection
-        let s = sender.clone();
+        let s = sender;
         input_choice.set_callback(move |c| {
             let selected = c.choice().unwrap_or_else(|| "System Default".to_string());
             let clean_name = selected.replace(" ⚠️", "");
@@ -370,7 +370,7 @@ close_btn.set_callback(move |_| {
         });
 
         // Output device selection
-        let s = sender.clone();
+        let s = sender;
         output_choice.set_callback(move |c| {
             let selected = c.choice().unwrap_or_else(|| "System Default".to_string());
             let clean_name = selected.replace(" ⚠️", "");
@@ -385,14 +385,14 @@ close_btn.set_callback(move |_| {
         });
 
         // Loopback toggle
-        let s = sender.clone();
+        let s = sender;
         loopback_btn.set_callback(move |b| {
             s.send(UiMessage::SetLoopback(b.is_checked()));
             settings_tracker.loopback_enabled = b.is_checked();
         });
 
         // VAD slider
-        let s = sender.clone();
+        let s = sender;
         vad_slider.set_callback(move |slider| {
             let value = slider.value() as f32;
             vad_value.set_label(&Self::format_vad_label(slider.value()));
@@ -425,17 +425,17 @@ close_btn.set_callback(move |_| {
         });
 
         // Open diagnostics terminal
-        let s = sender.clone();
+        let s = sender;
         open_terminal_btn.set_callback(move |_| {
             s.send(UiMessage::OpenDiagnostics);
         });
 
         // Reset button
-        let s = sender.clone();
+        let s = sender;
         let mut slider = vad_slider.clone();
-        let mut loopback = loopback_btn.clone();
-        let mut mute = mute_on_start.clone();
-        let mut verbose = debug_verbose.clone();
+        let loopback = loopback_btn.clone();
+        let mute = mute_on_start.clone();
+        let verbose = debug_verbose.clone();
         let mut input = input_choice.clone();
         let mut output = output_choice.clone();
         reset_btn.set_callback(move |_| {
@@ -451,7 +451,7 @@ close_btn.set_callback(move |_| {
         });
 
         // Save button
-        let s = sender.clone();
+        let s = sender;
         save_btn.set_callback(move |_| {
             // Collect all current settings and send save message
             s.send(UiMessage::SaveSettings);
@@ -461,7 +461,7 @@ close_btn.set_callback(move |_| {
         
 
         // Update displays periodically
-        let s = sender.clone();
+        let s = sender;
         app::add_timeout3(0.5, move |handle| {
             s.send(UiMessage::UpdateStats);
             app::repeat_timeout3(0.5, handle);

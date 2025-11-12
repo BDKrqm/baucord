@@ -1,5 +1,5 @@
 // voice/diagnostics.rs - Enhanced pipeline diagnostics with resampling metrics
-use log::{error, info, warn};
+use log::{info, warn};
 use std::collections::VecDeque;
 use std::f32::consts::PI;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -723,7 +723,7 @@ impl PipelineDiagnostics {
         };
 
         let mut last = last_fp.lock().unwrap();
-        if let Some(anomaly) = fp.check_continuity(&*last, 48000) {
+        if let Some(anomaly) = fp.check_continuity(&last, 48000) {
             anomalies.push(anomaly);
         }
         *last = fp;
