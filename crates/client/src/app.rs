@@ -53,8 +53,6 @@ enum VoiceControl {
     SetOurClientId(renet::ClientId), // Set our client ID for voice packets
     GetDeviceList,
     GetStats,
-    GetDiagnostics,
-    RunDiagnosticCommand(String),
     AddClient(renet::ClientId),
     RemoveClient(renet::ClientId),
     SetUserAudio(renet::ClientId, UserAudioSettings),
@@ -70,7 +68,6 @@ enum VoiceResponse {
         output: Vec<(String, bool)>,
     },
     Stats(String),
-    Diagnostics(String),
     DeviceInfo(String),
     Error(String),
 }
@@ -103,9 +100,8 @@ pub struct App {
     chat: Option<Chat>,
     error_frame: Option<frame::Frame>,
 
-    // Track if settings/diagnostics windows are open
+    // Track if settings
     settings_window_open: bool,
-    diagnostics_window_open: bool,
 
     // Thread handles
     network_thread: Option<thread::JoinHandle<()>>,
@@ -169,7 +165,6 @@ impl App {
             chat: None,
             error_frame: None,
             settings_window_open: false,
-            diagnostics_window_open: false,
             network_thread: Some(network_thread),
             voice_thread: Some(voice_thread),
             bridge_thread: None,
@@ -534,35 +529,8 @@ fn start_network_thread(
                                 response_tx.send(VoiceResponse::Stats(vc.get_stats())).ok();
                             }
                         }
-                        VoiceControl::GetDiagnostics => {
-                            if let Some(ref vc) = voice_chat {
-                                response_tx
-                                    .send(VoiceResponse::Diagnostics(vc.get_diagnostic_report()))
-                                    .ok();
-                            }
-                        }
-                        VoiceControl::RunDiagnosticCommand(cmd) => {
-                            if let Some(ref mut vc) = voice_chat {
-                                let result = match cmd.as_str() {
-                                    "status" => {
-                                        format!("Connected: {}, Muted: {}", true, vc.is_muted())
-                                    }
-                                    "stats" => vc.get_stats(),
-                                    "devices" => vc.get_device_info(),
-                                    "diag on" => {
-                                        vc.enable_diagnostics(true);
-                                        "Diagnostics enabled".to_string()
-                                    }
-                                    "diag off" => {
-                                        vc.enable_diagnostics(false);
-                                        "Diagnostics disabled".to_string()
-                                    }
-                                    "diag report" => vc.get_diagnostic_report(),
-                                    _ => format!("Unknown command: {}", cmd),
-                                };
-                                response_tx.send(VoiceResponse::Diagnostics(result)).ok();
-                            }
-                        }
+                     
+                       
                         VoiceControl::AddClient(client_id) => {
                             if let Some(ref mut vc) = voice_chat {
                                 vc.add_client(client_id);
@@ -792,19 +760,11 @@ fn start_network_thread(
                     output.len()
                 );
             }
-            Stats(stats) => {
-                // Don't log stats here - it's too spammy
-                // Could update a stats display if we had one
-            }
-            Diagnostics(diag) => {
-                self.sender.send(UiMessage::UpdateDiagnostics(diag));
-            }
-            DeviceInfo(info) => {
-                self.sender.send(UiMessage::UpdateDiagnostics(info));
-            }
             Error(err) => {
                 self.sender.send(UiMessage::ShowError(err));
             }
+            Stats(_) => {},
+            DeviceInfo(_) => {},
         }
     }
 
@@ -897,17 +857,8 @@ fn start_network_thread(
                     self.show_settings_window();
                 }
             }
-            OpenDiagnostics => {
-                if !self.diagnostics_window_open {
-                    self.diagnostics_window_open = true;
-                    self.show_diagnostics_window();
-                }
-            }
-            RunDiagnosticCommand(cmd) => {
-                self.voice_tx
-                    .send(VoiceControl::RunDiagnosticCommand(cmd))
-                    .ok();
-            }
+ 
+
             SaveSettings => {
                 self.settings.save();
                 info!("Settings saved");
@@ -948,10 +899,7 @@ fn start_network_thread(
                     }
                 }
             }
-            UpdateDiagnostics(text) => {
-                // This would be sent to diagnostics window if open
-                // Don't log here as it's too frequent
-            }
+
             ShowError(error) => {
                 self.show_error(&error);
             }
@@ -963,9 +911,7 @@ fn start_network_thread(
             SettingsWindowClosed => {
                 self.settings_window_open = false;
             }
-            DiagnosticsWindowClosed => {
-                self.diagnostics_window_open = false;
-            }
+   
             Shutdown => {
                 self.shutdown();
                 self.app.quit();
@@ -1296,7 +1242,7 @@ fn start_network_thread(
         col.fixed(&title, 50);
 
         let mut subtitle = frame::Frame::default()
-            .with_label("Voice & Text Chat")
+            .with_label("We have discord at home")
             .with_align(enums::Align::Center);
         subtitle.set_label_size(12);
         subtitle.set_label_color(DarkTheme::TEXT_SECONDARY);
@@ -1401,13 +1347,6 @@ fn start_network_thread(
         let settings = self.settings.clone();
 
         AudioSettingsWindow::show(sender, settings);
-    }
-
-    fn show_diagnostics_window(&mut self) {
-        use crate::ui::diagnostics::DiagnosticsWindow;
-
-        let sender = self.sender;
-        DiagnosticsWindow::show(sender);
     }
 
     fn show_error(&mut self, error: &str) {

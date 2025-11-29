@@ -1,7 +1,7 @@
-use super::diagnostics::{AudioFingerprint, PipelineDiagnostics};
 use super::{ChannelMapping, DeviceCapabilities, FRAME_SIZE, LatencyPreset, OPUS_SAMPLE_RATE};
 use crate::voice::resampler::{build_sinc_fixed_in, frames_for_10ms};
 use crate::voice::stats::AudioStats;
+use crate::voice::fingerprint::AudioFingerprint;
 use crate::voice::vad::{VADConfig, VADProcessor, VADProfile};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
@@ -38,7 +38,6 @@ pub struct AudioInput {
     // Stats
     stats: Arc<AudioStats>,
     is_speaking: Arc<AtomicBool>,
-    diagnostics: Option<Arc<PipelineDiagnostics>>,
 }
 
 impl AudioInput {
@@ -47,7 +46,6 @@ impl AudioInput {
         encoder_tx: Sender<Vec<f32>>,
         channel_mapping: Arc<Mutex<ChannelMapping>>,
         stats: Arc<AudioStats>,
-        diagnostics: Option<Arc<PipelineDiagnostics>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let host = cpal::default_host();
 
@@ -92,7 +90,6 @@ impl AudioInput {
             encoder_tx,
             stats,
             is_speaking: Arc::new(AtomicBool::new(false)),
-            diagnostics,
         })
     }
 
@@ -148,7 +145,6 @@ impl AudioInput {
         let is_muted = self.is_muted.clone();
         let stats = self.stats.clone();
         let stats_err = self.stats.clone();
-        let diagnostics = self.diagnostics.clone();
 
         // Pre-allocate scratch buffer
         let mut scratch = vec![0.0f32; 8192];
@@ -184,10 +180,9 @@ impl AudioInput {
                     write_idx += 1;
                 }
 
-                let mut written = 0;
                 for &sample in &scratch[..write_idx] {
                     match ring_producer.push(sample) {
-                        Ok(()) => written += 1,
+                        Ok(()) => (),
                         Err(_) => {
                             stats.input_overruns.fetch_add(1, Ordering::Relaxed);
                             break;
@@ -195,9 +190,7 @@ impl AudioInput {
                     }
                 }
 
-                if let Some(ref diag) = diagnostics {
-                    diag.input_ring.record_push(written);
-                }
+             
 
                 stats.input_callbacks.fetch_add(1, Ordering::Relaxed);
             },
@@ -220,7 +213,6 @@ impl AudioInput {
         let should_stop = self.should_stop.clone();
         let stats = self.stats.clone();
         let encoder_tx = self.encoder_tx.clone();
-        let diagnostics = self.diagnostics.clone();
         let is_speaking_handle = self.is_speaking.clone();
         let vad_enabled = self.vad_enabled.clone();
         let is_muted = self.is_muted.clone(); // Add muted state to worker thread
@@ -317,9 +309,7 @@ impl AudioInput {
                     continue;
                 }
 
-                if let Some(ref diag) = diagnostics {
-                    diag.input_ring.record_pop(samples_read);
-                }
+        
 
                 // Early VAD check on raw input if no resampling
                 // This saves CPU when silent

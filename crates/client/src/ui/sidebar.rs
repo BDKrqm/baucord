@@ -352,4 +352,3 @@ fn show_volume_dialog(sender: app::Sender<UiMessage>, client_id: ClientId, usern
         app::wait();
     }
 }
-

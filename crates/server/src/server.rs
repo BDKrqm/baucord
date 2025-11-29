@@ -196,7 +196,7 @@ impl ChatServer {
         // ADD THIS - RELIABLE CHANNEL CONFIG WITH RESEND TIME
         let reliable_channel = ChannelConfig {
             channel_id: channels.reliable_channel_id,
-            max_memory_usage_bytes: 1 * 1024 * 1024, // 1MB for chat/control
+            max_memory_usage_bytes: 1024 * 1024, // 1MB for chat/control
             send_type: SendType::ReliableOrdered {
                 resend_time: Duration::from_millis(200), // Resend after 200ms
             },

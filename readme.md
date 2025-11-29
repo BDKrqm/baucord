@@ -1,14 +1,10 @@
 ## Description
 
-A lightweight voice and text chat application built with Rust, featuring a native GUI and low-latency voice communication.
-
-> This was 99% vibe coded in a single night. Use at your own risk.
+A lightweight voice and text chat application built with Rust, using `fltk` for the UI `renet` for network communication.
 
 ## Features
 
 - **Voice Chat** with Voice Activity Detection (VAD)
-- **Text Chat** with styled messages and timestamps
-- **Native GUI** using FLTK with dark theme
 - **Per-user audio controls** (mute/volume adjustment via right-click)
 - **Ultra lightweight** - ~3.5MB RAM usage
 - **Low latency** - 10ms audio frames for responsive voice chat
@@ -55,15 +51,3 @@ Enter your nickname and server address (e.g., `127.0.0.1:5000`) to connect.
 - Audio settings via the ⚙ Settings button
 - Configuration for VAD sensitivity, audio loopback, and default mute state
 - Settings persist between sessions (stored in `~/.config/baucord/`, or `%APPDATA%/Roaming` in windows)
-
-
-
----
-License: Apache 2.0
-```
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-```

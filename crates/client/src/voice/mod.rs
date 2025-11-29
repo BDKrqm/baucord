@@ -1,6 +1,6 @@
 // voice/mod.rs - Updated with incoming packet channel and fixes
-pub mod diagnostics;
 mod input;
+mod fingerprint;
 mod jitter_buffer;
 mod output;
 mod packet;
@@ -17,7 +17,6 @@ use crate::settings::{Settings, UserAudioSettings};
 use cpal::traits::{DeviceTrait, HostTrait};
 use cpal::{Device, SampleFormat, SampleRate, SupportedStreamConfig};
 use crossbeam_channel::{Receiver, Sender, bounded};
-use diagnostics::{Anomaly, AnomalyType, PipelineDiagnostics, ResamplerMetrics, TestMode};
 use log::{error, info, warn};
 use opus::{Application, Bitrate, Channels, Decoder, Encoder};
 use std::collections::HashMap;
@@ -245,9 +244,6 @@ pub struct VoiceChat {
     user_audio_settings: Arc<Mutex<HashMap<renet::ClientId, UserAudioSettings>>>,
     stats: Arc<AudioStats>,
 
-    // Diagnostics
-    pub diagnostics: Arc<PipelineDiagnostics>,
-
     // Device monitoring
     device_monitor_thread: Option<thread::JoinHandle<()>>,
     should_monitor: Arc<AtomicBool>,
@@ -293,7 +289,6 @@ impl VoiceChat {
             should_monitor: Arc::new(AtomicBool::new(false)),
             loopback_enabled: Arc::new(AtomicBool::new(false)),
             is_speaking: Arc::new(AtomicBool::new(false)),
-            diagnostics: Arc::new(PipelineDiagnostics::new()),
         })
     }
 
@@ -319,7 +314,6 @@ impl VoiceChat {
             self.audio_to_encoder.0.clone(),
             self.channel_mapping.clone(),
             self.stats.clone(),
-            Some(self.diagnostics.clone()),
         )?;
 
         let preset = LatencyPreset::from_usize(self.latency_preset.load(Ordering::Relaxed));
@@ -346,7 +340,6 @@ impl VoiceChat {
             self.channel_mapping.clone(),
             self.user_audio_settings.clone(),
             self.stats.clone(),
-            Some(self.diagnostics.clone()),
         )?;
 
         let preset = LatencyPreset::from_usize(self.latency_preset.load(Ordering::Relaxed));
@@ -364,7 +357,6 @@ impl VoiceChat {
         let stats = self.stats.clone();
         let loopback = self.loopback_enabled.clone();
         let decoder_tx = self.network_to_decoder.0.clone();
-        let diagnostics = self.diagnostics.clone();
 
         self.encoder_thread = Some(thread::spawn(move || {
             let mut seq = 0u32;
@@ -388,13 +380,7 @@ impl VoiceChat {
                         samples.len(),
                         FRAME_SIZE
                     );
-                    diagnostics.record_anomaly(Anomaly {
-                        stage: "encoder",
-                        issue: AnomalyType::FrameSizeMismatch,
-                        value: samples.len() as f64,
-                        expected_range: (FRAME_SIZE as f64, FRAME_SIZE as f64),
-                        timestamp: Instant::now(),
-                    });
+                    
                     continue;
                 }
 
@@ -424,11 +410,6 @@ impl VoiceChat {
                 // Encode with Opus
                 match encoder.lock().unwrap().encode(&samples_i16, &mut scratch) {
                     Ok(size) => {
-                        // Update waterfall timing
-                        diagnostics.update_waterfall(|w| {
-                            w.encode = encode_start.elapsed();
-                        });
-
                         // Create packet with monotonic timestamp
                         // Don't set client ID here - it will be set by voice thread
                         let packet = AudioPacket::new(
@@ -724,7 +705,6 @@ impl VoiceChat {
             self.audio_to_encoder.0.clone(),
             self.channel_mapping.clone(),
             self.stats.clone(),
-            Some(self.diagnostics.clone()),
         )?;
 
         // Apply current latency preset
@@ -757,7 +737,6 @@ impl VoiceChat {
             self.channel_mapping.clone(),
             self.user_audio_settings.clone(),
             self.stats.clone(),
-            Some(self.diagnostics.clone()),
         )?;
 
         // Apply current latency preset
@@ -807,108 +786,9 @@ impl VoiceChat {
         self.is_speaking.load(Ordering::Relaxed)
     }
 
-    pub fn enable_diagnostics(&self, enabled: bool) {
-        if enabled {
-            self.diagnostics.enable();
-        } else {
-            self.diagnostics.disable();
-        }
-    }
-
-    pub fn set_diagnostic_test_mode(&self, mode: TestMode) {
-        self.diagnostics.set_test_mode(mode);
-    }
-
-    pub fn get_diagnostic_report(&self) -> String {
-        self.diagnostics.get_report()
-    }
-
-    pub fn run_sanity_test(&self) -> Result<(), String> {
-        self.diagnostics.sanity_test_codec()
-    }
-
-    pub fn diagnostics_enabled(&self) -> bool {
-        self.diagnostics.is_enabled()
-    }
 
     pub fn is_loopback_enabled(&self) -> bool {
         self.loopback_enabled.load(Ordering::Relaxed)
-    }
-
-    pub fn reset_diagnostics(&self) {
-        // Reset ring buffer monitors
-        self.diagnostics
-            .input_ring
-            .samples_pushed
-            .store(0, Ordering::Relaxed);
-        self.diagnostics
-            .input_ring
-            .samples_popped
-            .store(0, Ordering::Relaxed);
-        self.diagnostics
-            .output_ring
-            .samples_pushed
-            .store(0, Ordering::Relaxed);
-        self.diagnostics
-            .output_ring
-            .samples_popped
-            .store(0, Ordering::Relaxed);
-
-        // Reset callback counters
-        self.diagnostics
-            .input_callback_count
-            .store(0, Ordering::Relaxed);
-        self.diagnostics
-            .output_callback_count
-            .store(0, Ordering::Relaxed);
-
-        // Clear anomalies
-        if let Ok(mut anomalies) = self.diagnostics.anomalies.lock() {
-            anomalies.clear();
-        }
-
-        // Reset resampler metrics
-        if let Ok(mut input_resampler) = self.diagnostics.input_resampler.lock() {
-            *input_resampler = ResamplerMetrics::new("input_resampler");
-        }
-        if let Ok(mut output_resampler) = self.diagnostics.output_resampler.lock() {
-            *output_resampler = ResamplerMetrics::new("output_resampler");
-        }
-
-        // Reset stats
-        self.stats.packets_sent.store(0, Ordering::Relaxed);
-        self.stats.packets_received.store(0, Ordering::Relaxed);
-        self.stats.input_overruns.store(0, Ordering::Relaxed);
-        self.stats.output_underruns.store(0, Ordering::Relaxed);
-        self.stats.encode_errors.store(0, Ordering::Relaxed);
-        self.stats.decode_errors.store(0, Ordering::Relaxed);
-
-        info!("📊 Diagnostics reset");
-    }
-
-    pub fn get_ring_buffer_info(&self) -> String {
-        format!(
-            "Input Ring: pushed={} popped={} occupancy={}\n\
-             Output Ring: pushed={} popped={} occupancy={}",
-            self.diagnostics
-                .input_ring
-                .samples_pushed
-                .load(Ordering::Relaxed),
-            self.diagnostics
-                .input_ring
-                .samples_popped
-                .load(Ordering::Relaxed),
-            self.diagnostics.input_ring.get_occupancy(),
-            self.diagnostics
-                .output_ring
-                .samples_pushed
-                .load(Ordering::Relaxed),
-            self.diagnostics
-                .output_ring
-                .samples_popped
-                .load(Ordering::Relaxed),
-            self.diagnostics.output_ring.get_occupancy()
-        )
     }
 
     pub fn set_muted(&mut self, muted: bool) {

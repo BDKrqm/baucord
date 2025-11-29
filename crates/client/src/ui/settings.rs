@@ -11,7 +11,7 @@ impl AudioSettingsWindow {
     pub fn show(sender: app::Sender<UiMessage>, current_settings: Settings) {
         let mut wind = window::Window::default()
             .with_size(500, 950)
-            .with_label("Audio Settings");
+            .with_label("Settings");
         wind.make_resizable(false);
         wind.set_color(DarkTheme::BG_PRIMARY);
 
@@ -22,7 +22,7 @@ impl AudioSettingsWindow {
 
         // Title
         let mut title = frame::Frame::default()
-            .with_label("⚙  Audio & Settings")
+            .with_label("Settings")
             .with_align(enums::Align::Center);
         title.set_label_size(20);
         title.set_label_color(DarkTheme::TEXT_PRIMARY);
@@ -157,122 +157,6 @@ impl AudioSettingsWindow {
         audio_grp.fixed(&mute_on_start, 25);
 
         audio_grp.end();
-
-        // === Diagnostics Tab ===
-        let mut diag_grp = group::Flex::default()
-            .with_label("  Diagnostics  \t")
-            .column();
-        diag_grp.set_margins(10, 10, 10, 10);
-        diag_grp.set_spacing(15);
-
-        // Device Capabilities Section
-        let mut capabilities_title = frame::Frame::default()
-            .with_label("🎛️  Device Capabilities & Configuration")
-            .with_align(enums::Align::Left | enums::Align::Inside);
-        capabilities_title.set_label_color(DarkTheme::TEXT_PRIMARY);
-        capabilities_title.set_label_size(14);
-        diag_grp.fixed(&capabilities_title, 25);
-
-        let mut capabilities_display = text::TextDisplay::default();
-        let capabilities_buffer = text::TextBuffer::default();
-        capabilities_display.set_buffer(capabilities_buffer.clone());
-        capabilities_display.set_text_size(10);
-        capabilities_display.set_color(DarkTheme::BG_INPUT);
-        capabilities_display.set_text_color(DarkTheme::TEXT_PRIMARY);
-        capabilities_display.set_frame(enums::FrameType::BorderBox);
-        diag_grp.fixed(&capabilities_display, 150);
-
-        let mut copy_capabilities_btn = button::Button::default().with_label("📋 Copy Device Info");
-        copy_capabilities_btn.set_color(DarkTheme::BG_TERTIARY);
-        copy_capabilities_btn.set_label_color(DarkTheme::TEXT_PRIMARY);
-        copy_capabilities_btn.set_frame(enums::FrameType::FlatBox);
-        copy_capabilities_btn.set_label_size(11);
-        diag_grp.fixed(&copy_capabilities_btn, 30);
-
-        // Separator
-        let mut sep2 = frame::Frame::default();
-        sep2.set_frame(enums::FrameType::FlatBox);
-        sep2.set_color(DarkTheme::BG_TERTIARY);
-        diag_grp.fixed(&sep2, 1);
-
-        // Live Statistics Section
-        let mut stats_title = frame::Frame::default()
-            .with_label("📊  Live Statistics")
-            .with_align(enums::Align::Left | enums::Align::Inside);
-        stats_title.set_label_color(DarkTheme::TEXT_PRIMARY);
-        stats_title.set_label_size(14);
-        diag_grp.fixed(&stats_title, 25);
-
-        let mut stats_display = text::TextDisplay::default();
-        let stats_buffer = text::TextBuffer::default();
-        stats_display.set_buffer(stats_buffer.clone());
-        stats_display.set_text_size(11);
-        stats_display.set_color(DarkTheme::BG_INPUT);
-        stats_display.set_text_color(DarkTheme::TEXT_PRIMARY);
-        stats_display.set_frame(enums::FrameType::BorderBox);
-        diag_grp.fixed(&stats_display, 100);
-
-        let mut copy_stats_btn = button::Button::default().with_label("📋 Copy Statistics");
-        copy_stats_btn.set_color(DarkTheme::BG_TERTIARY);
-        copy_stats_btn.set_label_color(DarkTheme::TEXT_PRIMARY);
-        copy_stats_btn.set_frame(enums::FrameType::FlatBox);
-        copy_stats_btn.set_label_size(11);
-        diag_grp.fixed(&copy_stats_btn, 30);
-
-        // Separator
-        let mut sep3 = frame::Frame::default();
-        sep3.set_frame(enums::FrameType::FlatBox);
-        sep3.set_color(DarkTheme::BG_TERTIARY);
-        diag_grp.fixed(&sep3, 1);
-
-        // Debug Options Section
-        let mut debug_title = frame::Frame::default()
-            .with_label("🐛  Debug Options")
-            .with_align(enums::Align::Left | enums::Align::Inside);
-        debug_title.set_label_color(DarkTheme::TEXT_PRIMARY);
-        debug_title.set_label_size(14);
-        diag_grp.fixed(&debug_title, 25);
-
-        let mut debug_verbose = button::CheckButton::default()
-            .with_label("Enable verbose logging (for troubleshooting)");
-        debug_verbose.set_checked(current_settings.verbose_logging);
-        debug_verbose.set_color(DarkTheme::BG_PRIMARY);
-        debug_verbose.set_label_color(DarkTheme::TEXT_PRIMARY);
-        debug_verbose.set_selection_color(DarkTheme::ACCENT);
-        debug_verbose.set_label_size(12);
-        diag_grp.fixed(&debug_verbose, 25);
-
-        // Advanced Diagnostics Section
-        let mut sep4 = frame::Frame::default();
-        sep4.set_frame(enums::FrameType::FlatBox);
-        sep4.set_color(DarkTheme::BG_TERTIARY);
-        diag_grp.fixed(&sep4, 1);
-
-        let mut advanced_title = frame::Frame::default()
-            .with_label("🖥️  Advanced Diagnostics")
-            .with_align(enums::Align::Left | enums::Align::Inside);
-        advanced_title.set_label_color(DarkTheme::TEXT_PRIMARY);
-        advanced_title.set_label_size(14);
-        diag_grp.fixed(&advanced_title, 25);
-
-        let mut terminal_desc = frame::Frame::default()
-            .with_label(
-                "Open the diagnostics terminal for advanced testing and real-time monitoring",
-            )
-            .with_align(enums::Align::Left | enums::Align::Inside);
-        terminal_desc.set_label_color(DarkTheme::TEXT_MUTED);
-        terminal_desc.set_label_size(11);
-        diag_grp.fixed(&terminal_desc, 20);
-
-        let mut open_terminal_btn =
-            button::Button::default().with_label("🖥️  Open Diagnostics Terminal");
-        open_terminal_btn.set_color(DarkTheme::ACCENT);
-        open_terminal_btn.set_label_color(enums::Color::White);
-        open_terminal_btn.set_frame(enums::FrameType::FlatBox);
-        open_terminal_btn.set_label_size(13);
-        diag_grp.fixed(&open_terminal_btn, 40);
-
-        diag_grp.end();
         tabs.end();
         tabs.auto_layout();
 
@@ -405,37 +289,11 @@ close_btn.set_callback(move |_| {
             settings_tracker.mute_on_start = b.is_checked();
         });
 
-        // Verbose logging
-        debug_verbose.set_callback(move |b| {
-            settings_tracker.verbose_logging = b.is_checked();
-        });
-
-        // Copy capabilities
-        let buffer = capabilities_buffer.clone();
-        copy_capabilities_btn.set_callback(move |_| {
-            app::copy(&buffer.text());
-            info!("Copied device capabilities to clipboard");
-        });
-
-        // Copy stats
-        let buffer = stats_buffer.clone();
-        copy_stats_btn.set_callback(move |_| {
-            app::copy(&buffer.text());
-            info!("Copied statistics to clipboard");
-        });
-
-        // Open diagnostics terminal
-        let s = sender;
-        open_terminal_btn.set_callback(move |_| {
-            s.send(UiMessage::OpenDiagnostics);
-        });
-
         // Reset button
         let s = sender;
         let mut slider = vad_slider.clone();
         let loopback = loopback_btn.clone();
         let mute = mute_on_start.clone();
-        let verbose = debug_verbose.clone();
         let mut input = input_choice.clone();
         let mut output = output_choice.clone();
         reset_btn.set_callback(move |_| {
@@ -444,7 +302,6 @@ close_btn.set_callback(move |_| {
             slider.do_callback();
             loopback.set_checked(defaults.loopback_enabled);
             mute.set_checked(defaults.mute_on_start);
-            verbose.set_checked(defaults.verbose_logging);
             input.set_value(0);
             output.set_value(0);
             s.send(UiMessage::ResetSettings);

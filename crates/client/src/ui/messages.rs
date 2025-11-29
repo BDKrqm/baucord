@@ -68,13 +68,7 @@ pub enum UiMessage {
     RefreshDevices,
     SetInputDevice(Option<String>),
     SetOutputDevice(Option<String>),
-    DevicesRefreshed,
-    
-    // Diagnostics
-    OpenDiagnostics,
-    RunDiagnosticCommand(String),
-    UpdateDiagnostics(String),
-    DiagnosticsWindowClosed,  // Track window closure
+    DevicesRefreshed, 
     
     // UI updates
     UpdateUserList,

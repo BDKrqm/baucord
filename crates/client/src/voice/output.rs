@@ -1,8 +1,6 @@
 // voice/output.rs
-use super::diagnostics::PipelineDiagnostics;
 use super::{ChannelMapping, DeviceCapabilities, LatencyPreset, OPUS_SAMPLE_RATE};
 use crate::settings::UserAudioSettings;
-use crate::voice::diagnostics::{Anomaly, AnomalyType};
 use crate::voice::jitter_buffer::AdaptiveJitterBuffer;
 use crate::voice::resampler::{ResamplerOut, build_output_resampler};
 use crate::voice::stats::AudioStats;
@@ -41,7 +39,6 @@ pub struct AudioOutput {
 
     // Stats
     stats: Arc<AudioStats>,
-    diagnostics: Option<Arc<PipelineDiagnostics>>,
 
     // Drift tracking
     drift_ppm: Arc<Mutex<f64>>,
@@ -54,7 +51,6 @@ impl AudioOutput {
         channel_mapping: Arc<Mutex<ChannelMapping>>,
         user_audio_settings: Arc<Mutex<HashMap<ClientId, UserAudioSettings>>>,
         stats: Arc<AudioStats>,
-        diagnostics: Option<Arc<PipelineDiagnostics>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let host = cpal::default_host();
 
@@ -105,7 +101,6 @@ impl AudioOutput {
             user_audio_settings,
             stats,
             decoder_rx: Some(decoder_rx),
-            diagnostics,
             drift_ppm: Arc::new(Mutex::new(0.0)),
         })
     }
@@ -130,7 +125,6 @@ impl AudioOutput {
                 decoder_rx,
                 self.user_audio_settings.clone(),
                 self.stats.clone(),
-                self.diagnostics.clone(),
                 self.drift_ppm.clone(),
                 sample_rate, // Pass sample rate for proper chunk calculation
             ));
@@ -176,7 +170,6 @@ impl AudioOutput {
         let channel_mapping = self.channel_mapping.clone();
         let stats = self.stats.clone();
         let stats_err = self.stats.clone();
-        let diagnostics = self.diagnostics.clone();
         let drift_ppm = self.drift_ppm.clone();
 
         // State for the callback
@@ -306,21 +299,7 @@ impl AudioOutput {
                                 // Track resampler performance (only occasionally to reduce spam)
                                 static DIAG_COUNTER: AtomicU64 = AtomicU64::new(0);
                                 let count = DIAG_COUNTER.fetch_add(1, Ordering::Relaxed);
-                                if count % 100 == 0 {
-                                    // Only update every 100th callback
-                                    if let Some(ref diag) = diagnostics {
-                                        let resample_time =
-                                            resample_start.elapsed().as_micros() as u64;
-                                        diag.update_resampler_metrics(
-                                            false, // output resampler
-                                            input_needed,
-                                            expected_output,
-                                            expected_output,
-                                            resample_time,
-                                            sample_rate as f64 / 48000.0, // Pass the expected ratio
-                                        );
-                                    }
-                                }
+                                
 
                                 // Take only what we need
                                 let produced = expected_output.min(resampler_output[0].len());
@@ -412,10 +391,7 @@ impl AudioOutput {
 
                 stats.output_callbacks.fetch_add(1, Ordering::Relaxed);
 
-                // Also update diagnostics callback counter
-                if let Some(ref diag) = diagnostics {
-                    diag.output_callback_count.fetch_add(1, Ordering::Relaxed);
-                }
+     
             },
             move |err| {
                 error!("Output stream error: {}", err);
@@ -432,7 +408,6 @@ impl AudioOutput {
         decoder_rx: Receiver<(ClientId, Vec<f32>)>,
         user_audio_settings: Arc<Mutex<HashMap<ClientId, UserAudioSettings>>>,
         stats: Arc<AudioStats>,
-        diagnostics: Option<Arc<PipelineDiagnostics>>,
         drift_ppm: Arc<Mutex<f64>>,
         device_sample_rate: u32,
     ) -> thread::JoinHandle<()> {
@@ -465,7 +440,6 @@ impl AudioOutput {
             let mut next_tick = Instant::now();
 
             loop {
-                // 1) Ingest decoded frames quickly (bounded)
                 const MAX_BATCH: usize = 16;
                 let mut batched = 0;
                 while batched < MAX_BATCH {
@@ -479,7 +453,6 @@ impl AudioOutput {
                     }
                 }
 
-                // 2) If ring is too full, skip this tick (let device drain)
                 let slots = ring_producer.slots();
                 let occ = capacity - slots;
                 if occ > very_high_wm {
@@ -496,10 +469,8 @@ impl AudioOutput {
                     continue;
                 }
 
-                // 3) Build exactly one 10ms @ 48k chunk
                 jitter_buffer.pull_48k_exact(HOP_48K, &mut hop[..]);
 
-                // 4) Push (no bursts)
                 let mut pushed = 0usize;
                 for &s in &hop {
                     if ring_producer.push(s).is_ok() {
@@ -511,11 +482,7 @@ impl AudioOutput {
                     }
                 }
 
-                // 5) Light diagnostics
-                if let Some(ref diag) = diagnostics {
-                    diag.output_ring.record_push(pushed);
-                    diag.output_ring.update_occupancy(occ);
-                }
+    
                 let jb_ms = jitter_buffer.get_occupancy_ms();
                 stats
                     .jitter_buffer_occupancy
@@ -530,26 +497,8 @@ impl AudioOutput {
                     last_drift_calc = Instant::now();
                 }
 
-                // 7) Gentle target adjustment
                 jitter_buffer.adapt();
 
-                // 8) Publish anomalies once/second
-                if let Some(ref diag) = diagnostics
-                    && last_diag_flush.elapsed() >= Duration::from_secs(1) {
-                        if producer_xruns > 0 {
-                            diag.record_anomaly(Anomaly {
-                                stage: "producer",
-                                issue: AnomalyType::BufferOverflow,
-                                value: producer_xruns as f64,
-                                expected_range: (0.0, 0.0),
-                                timestamp: Instant::now(),
-                            });
-                            producer_xruns = 0;
-                        }
-                        last_diag_flush = Instant::now();
-                    }
-
-                // 9) Pace to real time (one 10ms hop per loop)
                 next_tick += Duration::from_millis(10);
                 let now = Instant::now();
                 if next_tick > now {
