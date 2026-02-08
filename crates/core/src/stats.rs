@@ -47,9 +47,13 @@ pub struct AudioStats {
     /// Output (playback) RMS level, stored as f32 bits (0.0–1.0).
     pub output_level: AtomicU32,
     /// Post-denoise input level, stored as f32 bits (0.0–1.0).
-    /// This is the signal level the VAD actually sees — after noise suppression.
-    /// Use this for the VAD threshold visualization, not the raw capture level.
+    /// This is the signal level after noise suppression but before AGC/gain —
+    /// use this for the VAD threshold visualization, not the raw capture level.
     pub denoised_level: AtomicU32,
+    /// Post-pipeline input level, stored as f32 bits (0.0–1.0).
+    /// This is what the VAD and encoder actually see — after denoise, AGC,
+    /// gain, and clamp. Useful for debugging "why isn't VAD triggering" issues.
+    pub pipeline_level: AtomicU32,
 
     // ── Pipeline state ──────────────────────────────────────────────────
     pub vad_active: AtomicBool,
@@ -81,6 +85,7 @@ impl AudioStats {
             last_decode_us: AtomicU64::new(0),
             output_level: AtomicU32::new(0.0_f32.to_bits()),
             denoised_level: AtomicU32::new(0.0_f32.to_bits()),
+            pipeline_level: AtomicU32::new(0.0_f32.to_bits()),
             vad_active: AtomicBool::new(false),
             denoise_active: AtomicBool::new(true),
             dtx_active: AtomicBool::new(false),
@@ -91,7 +96,8 @@ impl AudioStats {
     /// Record an encoded packet's size and update the running average.
     pub fn record_packet_sent(&self, opus_bytes: usize) {
         self.packets_sent.fetch_add(1, Ordering::Relaxed);
-        self.bytes_sent.fetch_add(opus_bytes as u64, Ordering::Relaxed);
+        self.bytes_sent
+            .fetch_add(opus_bytes as u64, Ordering::Relaxed);
         self.last_packet_size.store(opus_bytes, Ordering::Relaxed);
 
         // EMA: avg = 0.9 * avg + 0.1 * new
@@ -101,13 +107,15 @@ impl AudioStats {
         } else {
             prev * 0.9 + opus_bytes as f32 * 0.1
         };
-        self.avg_packet_size.store(new_avg.to_bits(), Ordering::Relaxed);
+        self.avg_packet_size
+            .store(new_avg.to_bits(), Ordering::Relaxed);
     }
 
     /// Record a received packet's size.
     pub fn record_packet_received(&self, opus_bytes: usize) {
         self.packets_received.fetch_add(1, Ordering::Relaxed);
-        self.bytes_received.fetch_add(opus_bytes as u64, Ordering::Relaxed);
+        self.bytes_received
+            .fetch_add(opus_bytes as u64, Ordering::Relaxed);
     }
 
     /// Estimated send bandwidth in kbps.
@@ -121,7 +129,7 @@ impl AudioStats {
         }
         // (payload + header_overhead) * packets_per_sec * 8 bits / 1000
         let packets_per_sec = 100.0; // 10ms frames
-        let header_overhead = 12.0;  // minimal RTP-like header
+        let header_overhead = 12.0; // minimal RTP-like header
         (avg + header_overhead) * packets_per_sec * 8.0 / 1000.0
     }
 
@@ -153,7 +161,10 @@ impl AudioStats {
              BW ↑{:.1}kbps ↓{:.1}kbps | Pkt {}B (avg {:.0}B) | \
              Enc {}µs Dec {}µs | Errors: enc {} dec {}",
             elapsed,
-            sent, received, lost, loss_rate,
+            sent,
+            received,
+            lost,
+            loss_rate,
             self.fec_recoveries.load(Ordering::Relaxed),
             self.plc_frames.load(Ordering::Relaxed),
             self.input_overruns.load(Ordering::Relaxed),

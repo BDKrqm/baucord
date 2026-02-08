@@ -1,4 +1,4 @@
-//! Audio input: capture → gain → resample → denoise → VAD gate → send to encoder.
+//! Audio input: capture → resample → denoise → AGC → gain → clamp → VAD → encode.
 //!
 //! Device compatibility strategy:
 //! - Use cpal's `default_input_config()` — accept whatever the OS/driver gives us
@@ -52,11 +52,11 @@ pub struct AudioInput {
     vad_enabled: Arc<AtomicBool>,
     vad_threshold: Arc<AtomicU32>, // f32 bits
     noise_suppression: Arc<AtomicBool>,
-    /// Master input gain (f32 bits). Applied before denoise/VAD.
+    /// Master input gain (f32 bits). Applied after denoise/AGC, before VAD.
     input_gain: Arc<AtomicU32>,
 
     // Observable state
-    input_level: Arc<AtomicU32>, // f32 bits, 0.0–1.0
+    input_level: Arc<AtomicU32>, // f32 bits, 0.0–1.0 — raw mic capture level (no gain)
     is_speaking: Arc<AtomicBool>,
 
     // Stats
@@ -172,7 +172,6 @@ impl AudioInput {
         let stats = self.stats.clone();
         let stats_err = self.stats.clone();
         let input_level = self.input_level.clone();
-        let input_gain = self.input_gain.clone();
         let ch = channels as usize;
 
         let stream = self.device.build_input_stream(
@@ -183,20 +182,20 @@ impl AudioInput {
                     return;
                 }
 
-                let gain = f32::from_bits(input_gain.load(Ordering::Relaxed));
-
-                // Downmix to mono: average all channels per frame, apply gain
+                // Downmix to mono: average all channels per frame.
+                // No gain here — gain is applied in the worker after denoise/AGC.
                 let mut rms_acc = 0.0f32;
                 let mut count = 0usize;
 
                 for frame in data.chunks(ch) {
                     let sum: f32 = frame.iter().map(|s| s.to_sample::<f32>()).sum();
-                    let mono = (sum / ch as f32) * gain;
+                    // Soft clamp: protect resampler and denoiser from digital clipping
+                    let mono = (sum / ch as f32).clamp(-0.98, 0.98);
 
                     rms_acc += mono * mono;
                     count += 1;
 
-                    if ring_producer.push(mono.clamp(-1.0, 1.0)).is_err() {
+                    if ring_producer.push(mono).is_err() {
                         stats.input_overruns.fetch_add(1, Ordering::Relaxed);
                         break;
                     }
@@ -236,6 +235,7 @@ impl AudioInput {
         let initial_threshold = self.initial_vad_threshold;
         let loopback_tx = self.loopback_tx.clone();
         let loopback_enabled = self.loopback_enabled.clone();
+        let input_gain = self.input_gain.clone();
 
         self.worker_thread = Some(thread::spawn(move || {
             // ── Resampler (if device rate ≠ 48 kHz) ─────────────────────
@@ -356,14 +356,15 @@ impl AudioInput {
                 while accumulator.len() >= FRAME_SIZE {
                     let mut frame: Vec<f32> = accumulator.drain(..FRAME_SIZE).collect();
 
-                    // ── Denoise (before VAD so it reduces false triggers) ─
+                    // ── Denoise (before AGC so RNNoise sees natural levels) ─
                     let denoise_on = noise_suppression.load(Ordering::Relaxed);
                     if denoise_on {
                         denoiser.process_frame(&mut frame);
                     }
                     stats.denoise_active.store(denoise_on, Ordering::Relaxed);
 
-                    // ── Post-denoise level (this is what VAD actually sees) ─
+                    // ── Post-denoise level (what the denoiser produced, before
+                    //    AGC/gain — use for VAD threshold visualization) ─────
                     {
                         let rms: f32 =
                             (frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32).sqrt();
@@ -372,8 +373,34 @@ impl AudioInput {
                             .denoised_level
                             .store(scaled.to_bits(), Ordering::Relaxed);
                     }
+
+                    // ── AGC (normalizes clean signal to target RMS) ─────────
                     agc.process_frame(&mut frame);
-                    // ── Loopback tap (post-denoise: hear what others hear) ─
+
+                    // ── Input gain (user preference on clean, normalized audio)
+                    let gain = f32::from_bits(input_gain.load(Ordering::Relaxed));
+                    if (gain - 1.0).abs() > f32::EPSILON {
+                        for s in frame.iter_mut() {
+                            *s *= gain;
+                        }
+                    }
+
+                    // ── Hard clamp (protect earshot VAD from overflow) ───────
+                    for s in frame.iter_mut() {
+                        *s = s.clamp(-0.95, 0.95);
+                    }
+
+                    // ── Pipeline output level (what VAD/encoder actually see) ─
+                    {
+                        let rms: f32 =
+                            (frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32).sqrt();
+                        let scaled = (rms * 3.0).clamp(0.0, 1.0);
+                        stats
+                            .pipeline_level
+                            .store(scaled.to_bits(), Ordering::Relaxed);
+                    }
+
+                    // ── Loopback tap (post-pipeline: hear what others hear) ──
                     if loopback_enabled.load(Ordering::Relaxed) {
                         if let Some(ref tx) = loopback_tx {
                             let _ = tx.try_send((LOOPBACK_SSRC, frame.clone()));

@@ -9,12 +9,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 1. Configure ─────────────────────────────────────────────────────
     let config = VoiceChatConfig {
-        input_device: None,       // system default
-        output_device: None,      // system default
+        input_device: None,  // system default
+        output_device: None, // system default
+        input_gain: 0.0,
+        output_gain: 0.0,
         mute_on_start: false,
         vad_enabled: true,
-        vad_threshold: 0.15,      // balanced default
-        noise_suppression: true,  // RNNoise enabled
+        vad_threshold: 0.15,     // balanced default
+        noise_suppression: true, // RNNoise enabled
     };
 
     // ── 2. Create and start ──────────────────────────────────────────────
@@ -24,10 +26,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── 3. Register peers as they join ───────────────────────────────────
     let peer_id: u64 = 12345;
     vc.add_peer(peer_id);
-    vc.set_peer_settings(peer_id, PeerAudioSettings {
-        volume: 1.0,
-        is_muted: false,
-    });
+    vc.set_peer_settings(
+        peer_id,
+        PeerAudioSettings {
+            volume: 1.0,
+            is_muted: false,
+        },
+    );
 
     // ── 4. Network loop (your transport layer) ──────────────────────────
     loop {
@@ -42,9 +47,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // vc.receive_packet(AudioPacket::new(seq, timestamp, sender_id, opus_bytes));
 
         // ── 5. UI state ─────────────────────────────────────────────────
-        let _speaking = vc.is_speaking();     // for speaking indicator
-        let _level = vc.input_level();        // for VU meter (0.0–1.0)
-        let _stats = vc.stats_summary();      // for debug overlay
+        let _speaking = vc.is_speaking(); // for speaking indicator
+        let _level = vc.input_level(); // for VU meter (0.0–1.0)
+        let _stats = vc.stats_summary(); // for debug overlay
 
         // ── 6. Runtime adjustments (from UI) ────────────────────────────
         // vc.set_vad_threshold(0.20);         // user moved slider
