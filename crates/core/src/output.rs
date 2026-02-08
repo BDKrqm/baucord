@@ -1,0 +1,343 @@
+//! Audio output: jitter buffer → resample → gain → playback.
+//!
+//! Uses cpal's `default_output_config()` for maximum device compatibility,
+//! then resamples from 48 kHz to whatever the device wants.
+
+use crate::config::PeerAudioSettings;
+use crate::jitter_buffer::AdaptiveJitterBuffer;
+use crate::resampler::build_output_resampler;
+use crate::stats::AudioStats;
+use crate::OPUS_SAMPLE_RATE;
+
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{Device, SampleFormat, Stream, SupportedStreamConfig};
+use crossbeam_channel::Receiver;
+use dasp_sample::{FromSample, Sample as DaspSample, ToSample};
+use log::{error, info};
+use rtrb::{Consumer, Producer, RingBuffer};
+use rubato::{Resampler, SincFixedOut};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
+
+pub struct AudioOutput {
+    device: Device,
+    device_config: SupportedStreamConfig,
+    stream: Option<Stream>,
+    decoder_rx: Option<Receiver<(u64, Vec<f32>)>>,
+
+    ring_producer: Option<Producer<f32>>,
+    ring_consumer: Option<Consumer<f32>>,
+    ring_capacity: usize,
+
+    // Worker
+    worker_thread: Option<thread::JoinHandle<()>>,
+    should_stop: Arc<AtomicBool>,
+
+    // Settings
+    peer_settings: Arc<Mutex<HashMap<u64, PeerAudioSettings>>>,
+    /// Master output gain (f32 bits). Applied after mixing.
+    output_gain: Arc<AtomicU32>,
+
+    // Stats
+    stats: Arc<AudioStats>,
+}
+
+impl AudioOutput {
+    pub fn new(
+        device_name: Option<&str>,
+        decoder_rx: Receiver<(u64, Vec<f32>)>,
+        peer_settings: Arc<Mutex<HashMap<u64, PeerAudioSettings>>>,
+        stats: Arc<AudioStats>,
+        output_gain: f32,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let host = cpal::default_host();
+
+        let device = if let Some(name) = device_name {
+            host.output_devices()?
+                .find(|d| d.name().ok().as_deref() == Some(name))
+                .ok_or_else(|| format!("Output device '{}' not found", name))?
+        } else {
+            host.default_output_device()
+                .ok_or("No default output device available")?
+        };
+
+        let device_config = device
+            .default_output_config()
+            .map_err(|e| format!("Failed to get default output config: {}", e))?;
+
+        let sample_rate = device_config.sample_rate().0;
+
+        info!(
+            "🔊 Output device: {} @ {}Hz, {}ch, {:?}",
+            device.name().unwrap_or_else(|_| "Unknown".into()),
+            sample_rate,
+            device_config.channels(),
+            device_config.sample_format(),
+        );
+
+        // Ring buffer: 200ms at device rate, mono
+        let ring_size = ((sample_rate as usize) * 200) / 1000;
+        let ring_size = ring_size.max(9600);
+        let (ring_producer, ring_consumer) = RingBuffer::new(ring_size);
+
+        Ok(Self {
+            device,
+            device_config,
+            stream: None,
+            ring_producer: Some(ring_producer),
+            ring_consumer: Some(ring_consumer),
+            ring_capacity: ring_size,
+            worker_thread: None,
+            should_stop: Arc::new(AtomicBool::new(false)),
+            peer_settings,
+            output_gain: Arc::new(AtomicU32::new(output_gain.to_bits())),
+            stats,
+            decoder_rx: Some(decoder_rx),
+        })
+    }
+
+    pub fn output_gain_handle(&self) -> Arc<AtomicU32> {
+        self.output_gain.clone()
+    }
+
+    pub fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let sample_rate = self.device_config.sample_rate().0;
+        let channels = self.device_config.channels();
+        let format = self.device_config.sample_format();
+
+        // Start producer worker BEFORE the stream so it's ready when callbacks arrive
+        if let (Some(ring_producer), Some(decoder_rx)) =
+            (self.ring_producer.take(), self.decoder_rx.take())
+        {
+            let handle = Self::spawn_worker(
+                ring_producer,
+                decoder_rx,
+                self.peer_settings.clone(),
+                self.stats.clone(),
+                self.should_stop.clone(),
+                self.ring_capacity,
+                sample_rate,
+                self.output_gain.clone(),
+            );
+            self.worker_thread = Some(handle);
+        }
+
+        let stream = match format {
+            SampleFormat::I16 => self.build_stream::<i16>(sample_rate, channels)?,
+            SampleFormat::U16 => self.build_stream::<u16>(sample_rate, channels)?,
+            SampleFormat::F32 => self.build_stream::<f32>(sample_rate, channels)?,
+            _ => return Err(format!("Unsupported format: {:?}", format).into()),
+        };
+
+        stream.play()?;
+        self.stream = Some(stream);
+        Ok(())
+    }
+
+    fn build_stream<T>(
+        &mut self,
+        sample_rate: u32,
+        channels: u16,
+    ) -> Result<Stream, Box<dyn std::error::Error>>
+    where
+        T: DaspSample + FromSample<f32> + ToSample<f32> + Send + 'static + cpal::SizedSample,
+    {
+        let config = cpal::StreamConfig {
+            channels,
+            sample_rate: cpal::SampleRate(sample_rate),
+            buffer_size: cpal::BufferSize::Default,
+        };
+
+        let mut ring_consumer = self
+            .ring_consumer
+            .take()
+            .ok_or("Ring consumer already taken")?;
+        let stats = self.stats.clone();
+        let stats_err = self.stats.clone();
+        let ch = channels as usize;
+
+        let stream = self.device.build_output_stream(
+            &config,
+            move |data: &mut [T], _: &_| {
+                let mono_needed = data.len() / ch;
+                let mut rms_acc = 0.0f32;
+
+                for frame_idx in 0..mono_needed {
+                    let sample = match ring_consumer.pop() {
+                        Ok(s) => s.clamp(-0.99, 0.99),
+                        Err(_) => {
+                            stats.output_underruns.fetch_add(1, Ordering::Relaxed);
+                            0.0
+                        }
+                    };
+
+                    rms_acc += sample * sample;
+
+                    // Duplicate mono to all output channels
+                    let base = frame_idx * ch;
+                    for c in 0..ch {
+                        if base + c < data.len() {
+                            data[base + c] = T::from_sample(sample);
+                        }
+                    }
+                }
+
+                // Output level for VU meter
+                if mono_needed > 0 {
+                    let rms = (rms_acc / mono_needed as f32).sqrt();
+                    let scaled = (rms * 3.0).clamp(0.0, 1.0);
+                    stats
+                        .output_level
+                        .store(scaled.to_bits(), Ordering::Relaxed);
+                }
+            },
+            move |err| {
+                error!("Output stream error: {}", err);
+                stats_err.output_underruns.fetch_add(1, Ordering::Relaxed);
+            },
+            None,
+        )?;
+
+        Ok(stream)
+    }
+
+    fn spawn_worker(
+        mut ring_producer: Producer<f32>,
+        decoder_rx: Receiver<(u64, Vec<f32>)>,
+        peer_settings: Arc<Mutex<HashMap<u64, PeerAudioSettings>>>,
+        stats: Arc<AudioStats>,
+        should_stop: Arc<AtomicBool>,
+        ring_capacity: usize,
+        device_sample_rate: u32,
+        output_gain: Arc<AtomicU32>,
+    ) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            let mut jitter_buffer =
+                AdaptiveJitterBuffer::new(OPUS_SAMPLE_RATE as usize, 20, peer_settings);
+
+            // Build output resampler EAGERLY (not in the audio callback)
+            let needs_resample = device_sample_rate != OPUS_SAMPLE_RATE;
+            let mut resampler: Option<SincFixedOut<f32>> = None;
+            let mut resampler_input: Vec<Vec<f32>> = Vec::new();
+            let mut resampler_output: Vec<Vec<f32>> = Vec::new();
+
+            if needs_resample {
+                let chunk = crate::resampler::frames_for_ms(device_sample_rate, 10);
+                match build_output_resampler(device_sample_rate, chunk) {
+                    Ok(r) => {
+                        resampler_input = vec![Vec::with_capacity(r.input_frames_next() + 64)];
+                        resampler_output = vec![vec![0.0f32; chunk * 2]];
+                        resampler = Some(r);
+                    }
+                    Err(e) => error!("Failed to create output resampler: {}", e),
+                }
+            }
+
+            let high_wm = ring_capacity * 85 / 100;
+            const HOP: usize = 480;
+            let mut hop_buf = vec![0.0f32; HOP];
+            let mut next_tick = Instant::now();
+
+            info!(
+                "🔊 Output worker started (device {}Hz, resample={})",
+                device_sample_rate, needs_resample
+            );
+
+            while !should_stop.load(Ordering::Relaxed) {
+                // Drain decoded audio into jitter buffer (batch up to 16)
+                for _ in 0..16 {
+                    match decoder_rx.try_recv() {
+                        Ok((peer_id, samples)) => {
+                            jitter_buffer.push_decoded_audio(peer_id, samples);
+                        }
+                        Err(_) => break,
+                    }
+                }
+
+                // Back-pressure: skip if ring is nearly full
+                let occupancy = ring_capacity - ring_producer.slots();
+                if occupancy > high_wm {
+                    next_tick += Duration::from_millis(10);
+                    let now = Instant::now();
+                    if next_tick > now {
+                        thread::sleep(next_tick - now);
+                    } else {
+                        next_tick = now;
+                    }
+                    continue;
+                }
+
+                // Pull 10 ms from jitter buffer (at 48 kHz)
+                jitter_buffer.pull_mixed(HOP, &mut hop_buf);
+
+                // Apply master output gain
+                let gain = f32::from_bits(output_gain.load(Ordering::Relaxed));
+                if (gain - 1.0).abs() > f32::EPSILON {
+                    for s in hop_buf.iter_mut() {
+                        *s = (*s * gain).clamp(-0.99, 0.99);
+                    }
+                }
+
+                // Resample 48 kHz → device rate, then push to ring
+                if let Some(ref mut r) = resampler {
+                    let needed = r.input_frames_next();
+                    resampler_input[0].clear();
+                    if hop_buf.len() >= needed {
+                        resampler_input[0].extend_from_slice(&hop_buf[..needed]);
+                    } else {
+                        resampler_input[0].extend_from_slice(&hop_buf);
+                        resampler_input[0].resize(needed, 0.0);
+                    }
+
+                    let expected = r.output_frames_next();
+                    resampler_output[0].resize(expected, 0.0);
+
+                    match r.process_into_buffer(&resampler_input, &mut resampler_output, None) {
+                        Ok((_in_len, _out_len)) => {
+                            for &s in &resampler_output[0][..expected] {
+                                if ring_producer.push(s).is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        Err(e) => error!("Output resampler error: {}", e),
+                    }
+                } else {
+                    for &s in &hop_buf {
+                        if ring_producer.push(s).is_err() {
+                            break;
+                        }
+                    }
+                }
+
+                stats
+                    .jitter_buffer_occupancy_ms
+                    .store(jitter_buffer.occupancy_ms() as usize, Ordering::Relaxed);
+                jitter_buffer.adapt();
+
+                // Pace at 10 ms intervals
+                next_tick += Duration::from_millis(10);
+                let now = Instant::now();
+                if next_tick > now {
+                    thread::sleep(next_tick - now);
+                } else {
+                    next_tick = now;
+                }
+            }
+
+            info!("🔊 Output worker stopped");
+        })
+    }
+}
+
+impl Drop for AudioOutput {
+    fn drop(&mut self) {
+        self.should_stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.worker_thread.take() {
+            let _ = thread.join();
+        }
+    }
+}

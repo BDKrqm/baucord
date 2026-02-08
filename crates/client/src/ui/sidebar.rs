@@ -13,6 +13,7 @@ pub struct Sidebar {
     // UI elements
     group: group::Flex,
     user_count_label: frame::Frame,
+    user_list_scroll: group::Scroll,
     user_list_pack: group::Pack,
     connection_status: frame::Frame,
     mute_btn: button::Button,
@@ -38,13 +39,16 @@ impl Sidebar {
         let mut user_list_scroll = group::Scroll::default();
         user_list_scroll.set_type(group::ScrollType::Vertical);
         user_list_scroll.set_color(DarkTheme::BG_SECONDARY);
+        user_list_scroll.set_frame(enums::FrameType::FlatBox);
 
-        let mut user_list_pack = group::Pack::default().with_size(230, 0).with_pos(0, 0);
+        // Pack inside scroll - don't set fixed size, let it grow
+        let mut user_list_pack = group::Pack::default();
         user_list_pack.set_type(group::PackType::Vertical);
         user_list_pack.set_spacing(5);
         user_list_pack.end();
 
         user_list_scroll.end();
+        user_list_scroll.resizable(&user_list_pack);
 
         // Spacer
         sidebar.add(&frame::Frame::default());
@@ -99,6 +103,7 @@ impl Sidebar {
             sender,
             group: sidebar,
             user_count_label,
+            user_list_scroll,
             user_list_pack,
             connection_status,
             mute_btn,
@@ -117,25 +122,69 @@ impl Sidebar {
         self.user_count_label
             .set_label(&format!("Users: {}", users.len()));
 
+        // Sort users: put ourselves first, then alphabetically
+        let mut sorted_users: Vec<_> = users.iter().collect();
+        sorted_users.sort_by(|(id_a, state_a), (id_b, state_b)| {
+            let is_us_a = Some(**id_a) == our_id;
+            let is_us_b = Some(**id_b) == our_id;
+
+            match (is_us_a, is_us_b) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => state_a.username.cmp(&state_b.username),
+            }
+        });
+
+        // Calculate total height needed
+        let item_height = 35;
+        let spacing = 5;
+        let total_height = sorted_users.len() as i32 * (item_height + spacing);
+
+        // Get scroll area dimensions
+        let scroll_w = self.user_list_scroll.w() - 20; // Account for scrollbar
+        let scroll_w = if scroll_w > 0 { scroll_w } else { 210 };
+
+        // Resize pack to fit content
+        self.user_list_pack.resize(
+            self.user_list_scroll.x() + 5,
+            self.user_list_scroll.y() + 5,
+            scroll_w,
+            total_height.max(10),
+        );
+
         // Add user items
-        for (client_id, state) in users {
+        for (client_id, state) in sorted_users {
             let is_us = Some(*client_id) == our_id;
-            self.create_user_item(*client_id, state, is_us);
+            self.create_user_item(*client_id, state, is_us, scroll_w);
         }
 
+        // Force redraw
         self.user_list_pack.redraw();
+        self.user_list_scroll.redraw();
+        self.group.redraw();
     }
 
-    fn create_user_item(&mut self, client_id: ClientId, state: &UserState, is_us: bool) {
-        let mut user_item = group::Flex::default().with_size(220, 30);
+    fn create_user_item(
+        &mut self,
+        client_id: ClientId,
+        state: &UserState,
+        is_us: bool,
+        width: i32,
+    ) {
+        let item_height = 30;
+
+        let mut user_item = group::Flex::default().with_size(width, item_height);
         user_item.set_type(group::FlexType::Row);
-        user_item.set_margins(5, 5, 5, 5);
+        user_item.set_margins(5, 2, 5, 2);
+        user_item.set_frame(enums::FrameType::FlatBox);
 
         // Visual indicators for muted/volume adjusted users
         if state.audio_settings.is_muted {
             user_item.set_color(enums::Color::from_rgb(50, 30, 30));
         } else if (state.audio_settings.volume - 1.0).abs() > 0.01 {
             user_item.set_color(enums::Color::from_rgb(40, 40, 50));
+        } else {
+            user_item.set_color(DarkTheme::BG_SECONDARY);
         }
 
         // Speaking indicator
@@ -147,10 +196,10 @@ impl Sidebar {
         } else if state.is_speaking {
             indicator.set_label("●");
         } else {
-            indicator.set_label("◯");
+            indicator.set_label("○");
         }
 
-        indicator.set_label_size(16);
+        indicator.set_label_size(14);
         indicator.set_label_font(Font::Helvetica);
         if state.is_speaking && !state.audio_settings.is_muted {
             indicator.set_label_color(DarkTheme::SPEAKING);
@@ -159,7 +208,9 @@ impl Sidebar {
         }
 
         // Username label
-        let display_name = if (state.audio_settings.volume - 1.0).abs() > 0.01 {
+        let display_name = if is_us {
+            format!("{} (you)", state.username)
+        } else if (state.audio_settings.volume - 1.0).abs() > 0.01 {
             format!(
                 "{} ({}%)",
                 state.username,
@@ -190,7 +241,6 @@ impl Sidebar {
             user_item.handle(move |_, ev| {
                 if ev == enums::Event::Push && app::event_button() == 3 {
                     // Right click - show context menu
-                    // Show both mute & unmute so we don't depend on a captured is_muted
                     let menu = menu::MenuItem::new(&[
                         "Mute User",
                         "Unmute User",
@@ -319,7 +369,7 @@ fn show_volume_dialog(sender: app::Sender<UiMessage>, client_id: ClientId, usern
     // Slider callback
     let volume_label_clone = volume_label.clone();
     slider.set_callback(move |s| {
-        let percent = s.value() * 100.0;
+        let percent = (s.value() * 100.0) as i32;
         volume_label_clone
             .borrow_mut()
             .set_label(&format!("Volume: {}%", percent));

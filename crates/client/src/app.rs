@@ -1,11 +1,15 @@
-// app.rs - Complete channel-based architecture with fixes
-use crossbeam_channel::{Receiver, Sender, TryRecvError, bounded};
+// app.rs — Complete rewrite: 2 threads (network + voice), no bridge.
+//
+// The voice thread owns VoiceChat and talks directly to the network thread.
+// Speaking state is driven by vc.is_speaking(), not inferred from packet flow.
+
+use crossbeam_channel::{Receiver, Sender, TryRecvError, bounded, select};
 use fltk::{prelude::*, *};
-use log::{debug, info, warn};
-use std::collections::{HashMap, VecDeque};
+use log::{error, info, warn};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,11 +19,9 @@ use crate::ui::chat::Chat;
 use crate::ui::messages::UiMessage;
 use crate::ui::sidebar::Sidebar;
 use crate::ui::theme::DarkTheme;
-use crate::voice::{AudioPacket, VoiceChat};
+use voice_chat_core::{AudioPacket, PeerAudioSettings, VoiceChat, VoiceChatConfig};
 
-pub const VOICE_PACKET_BATCH_THRESHOLD: usize = 2;
-pub const VOICE_MAX_FRAMES_PER_TICK: usize = 4; // Max 40ms per tick
-pub const VOICE_MAX_BYTES_PER_TICK: usize = 4000; // Max 4KB per tick
+// ── Public types ────────────────────────────────────────────────────────
 
 #[derive(Clone)]
 pub struct UserState {
@@ -29,8 +31,9 @@ pub struct UserState {
     pub audio_settings: UserAudioSettings,
 }
 
-// Network control messages
-#[derive(Debug, Clone)]
+// ── Internal channel messages ───────────────────────────────────────────
+
+#[derive(Debug)]
 enum NetworkControl {
     Connect { addr: SocketAddr, nickname: String },
     Disconnect,
@@ -40,75 +43,92 @@ enum NetworkControl {
     Shutdown,
 }
 
-// Voice control messages
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum VoiceControl {
-    Start(Settings),
+    Start {
+        settings: Settings,
+        our_client_id: u64,
+    },
     Stop,
     SetMuted(bool),
     SetLoopback(bool),
+    SetVadThreshold(f32),
     SetVadEnabled(bool),
+    SetNoiseSuppression(bool),
+    SetInputGain(f32),
+    SetOutputGain(f32),
     SetInputDevice(Option<String>),
     SetOutputDevice(Option<String>),
-    SetOurClientId(renet::ClientId), // Set our client ID for voice packets
-    GetDeviceList,
-    GetStats,
-    AddClient(renet::ClientId),
-    RemoveClient(renet::ClientId),
-    SetUserAudio(renet::ClientId, UserAudioSettings),
+    AddPeer(u64),
+    RemovePeer(u64),
+    SetPeerAudio(u64, PeerAudioSettings),
     IncomingVoicePacket(AudioPacket),
     Shutdown,
 }
 
-// Voice responses
 #[derive(Debug, Clone)]
-enum VoiceResponse {
-    DeviceList {
-        input: Vec<(String, bool)>,
-        output: Vec<(String, bool)>,
-    },
-    Stats(String),
-    DeviceInfo(String),
+enum VoiceEvent {
+    Started,
     Error(String),
+    SpeakingChanged(bool),
 }
+
+// ── Conversion helper ──────────────────────────────────────────────────
+
+fn to_peer_settings(s: &UserAudioSettings) -> PeerAudioSettings {
+    PeerAudioSettings {
+        volume: s.volume,
+        is_muted: s.is_muted,
+    }
+}
+
+fn settings_to_config(s: &Settings) -> VoiceChatConfig {
+    VoiceChatConfig {
+        input_device: s.input_device.clone(),
+        output_device: s.output_device.clone(),
+        mute_on_start: s.mute_on_start,
+        vad_enabled: true,
+        vad_threshold: s.vad_threshold,
+        noise_suppression: s.noise_suppression,
+        input_gain: s.input_gain,
+        output_gain: s.output_gain,
+    }
+}
+
+// ── App ────────────────────────────────────────────────────────────────
 
 pub struct App {
     app: app::App,
     sender: app::Sender<UiMessage>,
     receiver: app::Receiver<UiMessage>,
 
-    // Channels for network thread
+    // Thread channels
     network_tx: Sender<NetworkControl>,
     network_rx: Receiver<NetworkMessage>,
-
-    // Channels for voice system
     voice_tx: Sender<VoiceControl>,
-    voice_response_rx: Receiver<VoiceResponse>,
-    voice_packet_rx: Receiver<AudioPacket>,
+    voice_event_rx: Receiver<VoiceEvent>,
 
-    // Application state (UI thread owns this)
+    // State
     users: HashMap<renet::ClientId, UserState>,
     our_client_id: Option<renet::ClientId>,
     connected: bool,
     settings: Settings,
-    is_muted: bool, // Track current mute state
+    is_muted: bool,
 
-    // UI components
+    // UI
     connection_window: Option<window::Window>,
     main_window: Option<window::Window>,
     sidebar: Option<Sidebar>,
     chat: Option<Chat>,
     error_frame: Option<frame::Frame>,
-
-    // Track if settings
     settings_window_open: bool,
+
+    // Shared stats handle (set after voice starts)
+    voice_stats: Option<Arc<voice_chat_core::AudioStats>>,
 
     // Thread handles
     network_thread: Option<thread::JoinHandle<()>>,
     voice_thread: Option<thread::JoinHandle<()>>,
-    bridge_thread: Option<thread::JoinHandle<()>>,
-    voice_drops: Option<Arc<AtomicU64>>,
-    network_drops: Option<Arc<AtomicU64>>,
 }
 
 impl App {
@@ -118,29 +138,20 @@ impl App {
 
         let (sender, receiver) = app::channel::<UiMessage>();
 
-        // Create channels for network thread
-        // Use bounded channels to prevent runaway accumulation
-        let (network_tx, network_control_rx) = bounded::<NetworkControl>(256); // Control messages can queue a bit
-        let (network_msg_tx, network_rx) = bounded::<NetworkMessage>(256); // UI messages
+        // Network channels
+        let (network_tx, network_control_rx) = bounded::<NetworkControl>(256);
+        let (network_msg_tx, network_rx) = bounded::<NetworkMessage>(256);
 
-        // Create channels for voice system
-        let (voice_tx, voice_control_rx) = bounded::<VoiceControl>(64); // Control is less frequent
-        let (voice_response_tx, voice_response_rx) = bounded::<VoiceResponse>(64);
-        let (voice_packet_tx, voice_packet_rx) = bounded::<AudioPacket>(32); // CRITICAL: Keep small for low latency
+        // Voice channels
+        let (voice_tx, voice_control_rx) = bounded::<VoiceControl>(64);
+        let (voice_event_tx, voice_event_rx) = bounded::<VoiceEvent>(32);
 
-        // Add stats for dropped packets
-        let voice_drops = Arc::new(AtomicU64::new(0));
-        let voice_drops_handle = voice_drops.clone();
+        // Start threads
+        let network_thread =
+            Self::spawn_network_thread(network_control_rx, network_msg_tx, voice_tx.clone());
 
-        // Start network thread (owns NetworkClient)
-        let network_thread = Self::start_network_thread(network_control_rx, network_msg_tx, voice_tx.clone());
-
-        let voice_thread = Self::start_voice_thread(
-            voice_control_rx,
-            voice_response_tx,
-            voice_packet_tx.clone(),
-            voice_drops.clone(),
-        );
+        let voice_thread =
+            Self::spawn_voice_thread(voice_control_rx, voice_event_tx, network_tx.clone());
 
         let settings = Settings::load();
         let initial_mute = settings.mute_on_start;
@@ -152,8 +163,7 @@ impl App {
             network_tx,
             network_rx,
             voice_tx,
-            voice_response_rx,
-            voice_packet_rx,
+            voice_event_rx,
             users: HashMap::new(),
             our_client_id: None,
             connected: false,
@@ -165,48 +175,46 @@ impl App {
             chat: None,
             error_frame: None,
             settings_window_open: false,
+            voice_stats: None,
             network_thread: Some(network_thread),
             voice_thread: Some(voice_thread),
-            bridge_thread: None,
-            voice_drops: Some(Arc::new(AtomicU64::new(0))),
-            network_drops: Some(Arc::new(AtomicU64::new(0))),
         }
     }
 
-   pub fn run(&mut self) {
+    pub fn run(&mut self) {
         self.show_connection_screen();
 
-        // Main event loop - only handles UI messages
         while self.app.wait() {
-            // Process a single UI message per tick (non-blocking)
-            if let Some(msg) = self.receiver.recv() {
-                self.handle_message(msg);
+            // UI messages
+            while let Some(msg) = self.receiver.recv() {
+                self.handle_ui_message(msg);
             }
 
-            // Drain a bounded number of network messages per tick to avoid UI starvation
-            const MAX_NET_PER_TICK: usize = 256;
-            for _ in 0..MAX_NET_PER_TICK {
+            // Network messages (bounded drain)
+            for _ in 0..256 {
                 match self.network_rx.try_recv() {
-                    Ok(network_msg) => self.handle_network_message(network_msg),
+                    Ok(msg) => self.handle_network_message(msg),
                     Err(_) => break,
                 }
             }
 
-            // Drain a bounded number of voice responses
-            const MAX_VOICE_RESP_PER_TICK: usize = 64;
-            for _ in 0..MAX_VOICE_RESP_PER_TICK {
-                match self.voice_response_rx.try_recv() {
-                    Ok(resp) => self.handle_voice_response(resp),
+            // Voice events (bounded drain)
+            for _ in 0..32 {
+                match self.voice_event_rx.try_recv() {
+                    Ok(evt) => self.handle_voice_event(evt),
                     Err(_) => break,
                 }
             }
         }
 
-        // Cleanup on exit
         self.shutdown();
-    } 
+    }
 
-fn start_network_thread(
+    // ════════════════════════════════════════════════════════════════════
+    //  NETWORK THREAD
+    // ════════════════════════════════════════════════════════════════════
+
+    fn spawn_network_thread(
         control_rx: Receiver<NetworkControl>,
         msg_tx: Sender<NetworkMessage>,
         voice_tx: Sender<VoiceControl>,
@@ -214,125 +222,56 @@ fn start_network_thread(
         thread::spawn(move || {
             let mut client: Option<NetworkClient> = None;
             let mut running = true;
-            let mut voice_packet_buffer = VecDeque::with_capacity(8); // Small ring, preserves order
 
-            let mut frames_sent_this_tick = 0usize;
-            let mut bytes_sent_this_tick = 0usize;
-            let mut next_budget_reset = Instant::now() + Duration::from_millis(10);
             while running {
-                // Time-based budget reset every 10ms
-                let now_tick = Instant::now();
-                if now_tick >= next_budget_reset {
-                    // Advance by multiples of 10ms to avoid drift
-                    let mut next = next_budget_reset;
-                    while next <= now_tick {
-                        next += Duration::from_millis(10);
-                    }
-                    next_budget_reset = next;
-                }
-
-                // Process control messages with a limit per iteration
-                let mut controls_processed = 0;
-                const MAX_CONTROLS_PER_TICK: usize = 10;
-                frames_sent_this_tick = 0;
-                bytes_sent_this_tick = 0;
-
-                while controls_processed < MAX_CONTROLS_PER_TICK {
+                // Process control messages
+                for _ in 0..32 {
                     match control_rx.try_recv() {
-                        Ok(control) => {
-                            controls_processed += 1;
-                            match control {
-                                NetworkControl::Connect { addr, nickname } => {
-                                    match NetworkClient::connect(addr, nickname) {
-                                        Ok(c) => {
-                                            msg_tx.send(NetworkMessage::Connected).ok();
-                                            client = Some(c);
-                                        }
-                                        Err(e) => {
-                                            msg_tx.send(NetworkMessage::Disconnected(e)).ok();
-                                        }
+                        Ok(ctrl) => match ctrl {
+                            NetworkControl::Connect { addr, nickname } => {
+                                match NetworkClient::connect(addr, nickname) {
+                                    Ok(c) => {
+                                        msg_tx.send(NetworkMessage::Connected).ok();
+                                        client = Some(c);
                                     }
-                                }
-                                NetworkControl::Disconnect => {
-                                    if let Some(mut c) = client.take() {
-                                        c.disconnect();
+                                    Err(e) => {
+                                        msg_tx.send(NetworkMessage::Disconnected(e)).ok();
                                     }
-                                    msg_tx
-                                        .send(NetworkMessage::Disconnected(
-                                            "User requested".to_string(),
-                                        ))
-                                        .ok();
-                                }
-                                NetworkControl::SendMessage(text) => {
-                                    if let Some(ref mut c) = client {
-                                        c.send_message(text);
-                                    }
-                                }
-                                NetworkControl::SendVoicePacket(packet) => {
-                                    // CHECK PER-TICK LIMITS BEFORE BUFFERING
-                                    if frames_sent_this_tick >= VOICE_MAX_FRAMES_PER_TICK {
-                                        // Hit frame limit for this tick, drop or defer
-                                        debug!("Voice frame limit hit for tick, deferring");
-                                        voice_packet_buffer.insert(0, packet); // Save for next tick
-                                        continue;
-                                    }
-
-                                    if bytes_sent_this_tick >= VOICE_MAX_BYTES_PER_TICK {
-                                        // Hit byte limit for this tick
-                                        debug!("Voice byte limit hit for tick, deferring");
-                                        voice_packet_buffer.push_back(packet); // defer to next tick, keep order
-                                        continue;
-                                    }
-
-                                    // Add to buffer but keep it small
-                                    if voice_packet_buffer.len() >= 4 {
-                                        voice_packet_buffer.pop_front(); // Drop oldest, keep order
-                                    }
-                                    voice_packet_buffer.push_back(packet);
-
-                                    // FLUSH AT THRESHOLD (2 frames)
-                                    if voice_packet_buffer.len() >= VOICE_PACKET_BATCH_THRESHOLD
-                                        && let Some(ref mut c) = client {
-                                            let mut sent_now = 0usize;
-                                            while sent_now < VOICE_PACKET_BATCH_THRESHOLD {
-                                                if let Some(p) = voice_packet_buffer.pop_front() {
-                                                    let sz = p.opus_data.len() + 24;
-                                                    if bytes_sent_this_tick + sz
-                                                        > VOICE_MAX_BYTES_PER_TICK
-                                                        || frames_sent_this_tick
-                                                            >= VOICE_MAX_FRAMES_PER_TICK
-                                                    {
-                                                        // Defer for next tick, put back to front to preserve order
-                                                        voice_packet_buffer.push_front(p);
-                                                        break;
-                                                    }
-                                                    frames_sent_this_tick += 1;
-                                                    bytes_sent_this_tick += sz;
-                                                    c.send_voice_frame_raw(
-                                                        p.header.ssrc,
-                                                        p.header.timestamp,
-                                                        &p.opus_data,
-                                                    );
-                                                    sent_now += 1;
-                                                } else {
-                                                    break;
-                                                }
-                                            }
-                                            if sent_now > 0 {
-                                                c.flush_voice_packet();
-                                            }
-                                        }
-                                }
-                                NetworkControl::SendSpeakingStatus(speaking) => {
-                                    if let Some(ref mut c) = client {
-                                        c.send_speaking_status(speaking);
-                                    }
-                                }
-                                NetworkControl::Shutdown => {
-                                    running = false;
                                 }
                             }
-                        }
+                            NetworkControl::Disconnect => {
+                                if let Some(mut c) = client.take() {
+                                    c.disconnect();
+                                }
+                                msg_tx
+                                    .send(NetworkMessage::Disconnected("User disconnected".into()))
+                                    .ok();
+                            }
+                            NetworkControl::SendMessage(text) => {
+                                if let Some(ref mut c) = client {
+                                    c.send_message(text);
+                                }
+                            }
+                            NetworkControl::SendVoicePacket(packet) => {
+                                if let Some(ref mut c) = client {
+                                    // Pass through seq/ts from the core encoder
+                                    c.send_voice_frame(
+                                        packet.header.ssrc,
+                                        packet.header.seq,
+                                        packet.header.timestamp,
+                                        &packet.opus_data,
+                                    );
+                                }
+                            }
+                            NetworkControl::SendSpeakingStatus(speaking) => {
+                                if let Some(ref mut c) = client {
+                                    c.send_speaking_status(speaking);
+                                }
+                            }
+                            NetworkControl::Shutdown => {
+                                running = false;
+                            }
+                        },
                         Err(TryRecvError::Empty) => break,
                         Err(TryRecvError::Disconnected) => {
                             running = false;
@@ -341,625 +280,509 @@ fn start_network_thread(
                     }
                 }
 
-                if !voice_packet_buffer.is_empty()
-                    && frames_sent_this_tick < VOICE_MAX_FRAMES_PER_TICK
-                    && let Some(ref mut c) = client {
-                        // Send up to remaining budget in order (FIFO)
-                        let can_send = (VOICE_MAX_FRAMES_PER_TICK - frames_sent_this_tick)
-                            .min(voice_packet_buffer.len());
-                        let mut sent_now = 0usize;
-                        while sent_now < can_send {
-                            if let Some(p) = voice_packet_buffer.pop_front() {
-                                let size = p.opus_data.len() + 24;
-                                if bytes_sent_this_tick + size <= VOICE_MAX_BYTES_PER_TICK {
-                                    bytes_sent_this_tick += size;
-                                    frames_sent_this_tick += 1;
-                                    c.send_voice_frame_raw(
-                                        p.header.ssrc,
-                                        p.header.timestamp,
-                                        &p.opus_data,
-                                    );
-                                    sent_now += 1;
-                                } else {
-                                    voice_packet_buffer.push_front(p);
-                                    break;
-                                }
-                            } else {
-                                break;
-                            }
-                        }
-                        if sent_now > 0 {
-                            c.flush_voice_packet();
-                        }
-                    }
-
-                // Poll network client if connected
+                // Poll network
                 if let Some(ref mut c) = client {
                     c.update();
 
-                    // Get messages and forward to UI or voice thread directly
                     for msg in c.poll_messages() {
                         match msg {
-                            NetworkMessage::VoiceData { client_id, seq, timestamp, data } => {
-                                let packet = AudioPacket::from_network(seq, timestamp, client_id, data);
-                                // Send directly to voice thread; drop if full to keep real-time
-                                let _ = voice_tx.try_send(VoiceControl::IncomingVoicePacket(packet));
+                            // Voice data goes directly to voice thread (skip UI)
+                            NetworkMessage::VoiceData {
+                                client_id,
+                                seq,
+                                timestamp,
+                                data,
+                            } => {
+                                let packet = AudioPacket::new(seq, timestamp, client_id, data);
+                                let _ =
+                                    voice_tx.try_send(VoiceControl::IncomingVoicePacket(packet));
                             }
                             other => {
-                                if msg_tx.try_send(other).is_err() {
-                                    // UI channel full, drop old messages
-                                    break;
-                                }
+                                let _ = msg_tx.try_send(other);
                             }
                         }
                     }
 
-                    // Check if still connected
+                    // Flush any pending voice bundle
+                    c.flush_voice_packet();
+
                     if !c.is_connected() && !c.is_connecting() {
                         client = None;
                         msg_tx
-                            .send(NetworkMessage::Disconnected("Connection lost".to_string()))
+                            .send(NetworkMessage::Disconnected("Connection lost".into()))
                             .ok();
                     }
                 }
 
-                // Tick-boundary flush: ensure partial packet doesn't linger forever
-                if let Some(ref mut c) = client {
-                    c.flush_voice_packet();
-                }
-
-                // Sleep only if we have no work
-                if controls_processed == 0 && voice_packet_buffer.is_empty() {
-                    thread::sleep(Duration::from_millis(2));
-                } else if voice_packet_buffer.len() > 2 {
-                    // If voice buffer is building up, don't sleep
-                    thread::yield_now();
-                } else {
+                // Adaptive sleep: shorter when we have a connection
+                if client.is_some() {
                     thread::sleep(Duration::from_millis(1));
+                } else {
+                    thread::sleep(Duration::from_millis(10));
                 }
             }
         })
     }
-    fn start_voice_thread(
+
+    // ════════════════════════════════════════════════════════════════════
+    //  VOICE THREAD
+    // ════════════════════════════════════════════════════════════════════
+
+    fn spawn_voice_thread(
         control_rx: Receiver<VoiceControl>,
-        response_tx: Sender<VoiceResponse>,
-        packet_tx: Sender<AudioPacket>,
-        voice_drops: Arc<AtomicU64>,
+        event_tx: Sender<VoiceEvent>,
+        network_tx: Sender<NetworkControl>,
     ) -> thread::JoinHandle<()> {
         thread::spawn(move || {
-            let mut voice_chat: Option<VoiceChat> = None;
-            let mut our_client_id: Option<renet::ClientId> = None;
+            let mut vc: Option<VoiceChat> = None;
+            let mut our_client_id: Option<u64> = None;
+            let mut was_speaking = false;
             let mut running = true;
-            let mut voice_started = false;
 
             while running {
-                // Handle control messages
-                while let Ok(control) = control_rx.try_recv() {
-                    match control {
-                        VoiceControl::Start(settings) => {
-                            if !voice_started {
-                                match VoiceChat::new() {
-                                    Ok(mut vc) => {
-                                        if let Err(e) = vc.start(&settings) {
-                                            response_tx
-                                                .send(VoiceResponse::Error(format!(
-                                                    "Failed to start voice: {}",
-                                                    e
-                                                )))
-                                                .ok();
-                                        } else {
-                                            // Apply saved settings
-                                            if settings.loopback_enabled {
-                                                vc.set_loopback(true);
-                                            }
-                                            if settings.mute_on_start {
-                                                vc.set_muted(true);
-                                            }
-                                            voice_chat = Some(vc);
-                                            voice_started = true;
-                                            info!("✅ Voice system started");
-                                        }
-                                    }
-                                    Err(e) => {
-                                        response_tx
-                                            .send(VoiceResponse::Error(format!(
-                                                "Failed to create voice: {}",
-                                                e
-                                            )))
-                                            .ok();
-                                    }
-                                }
-                            }
+                // Use select! to wake on control messages OR timeout for polling
+                select! {
+                    recv(control_rx) -> msg => {
+                        match msg {
+                            Ok(ctrl) => Self::handle_voice_control(
+                                ctrl, &mut vc, &mut our_client_id, &mut running,
+                                &event_tx, &mut was_speaking,
+                            ),
+                            Err(_) => { running = false; }
                         }
-                        VoiceControl::Stop => {
-                            voice_chat = None;
-                            voice_started = false;
-                            info!("🛑 Voice system stopped");
-                        }
-                        VoiceControl::SetOurClientId(id) => {
-                            our_client_id = Some(id);
-                            info!("🎤 Voice thread: Set client ID to {}", id);
-                        }
-                        VoiceControl::SetMuted(muted) => {
-                            if let Some(ref mut vc) = voice_chat {
-                                vc.set_muted(muted);
-                            }
-                        }
-                        VoiceControl::SetLoopback(enabled) => {
-                            if let Some(ref mut vc) = voice_chat {
-                                vc.set_loopback(enabled);
-                            }
-                        }
-                        VoiceControl::SetVadEnabled(enabled) => {
-                            // TODO: Add VAD control to VoiceChat
-                        }
-                        VoiceControl::SetInputDevice(device) => {
-                            if let Some(ref mut vc) = voice_chat
-                                && let Err(e) = vc.set_input_device(device.as_deref()) {
-                                    response_tx
-                                        .send(VoiceResponse::Error(format!(
-                                            "Failed to set input: {}",
-                                            e
-                                        )))
-                                        .ok();
-                                }
-                        }
-                        VoiceControl::SetOutputDevice(device) => {
-                            if let Some(ref mut vc) = voice_chat
-                                && let Err(e) = vc.set_output_device(device.as_deref()) {
-                                    response_tx
-                                        .send(VoiceResponse::Error(format!(
-                                            "Failed to set output: {}",
-                                            e
-                                        )))
-                                        .ok();
-                                }
-                        }
-                        VoiceControl::GetDeviceList => {
-                            if let Some(ref vc) = voice_chat {
-                                let input = vc.get_input_devices().unwrap_or_default();
-                                let output = vc.get_output_devices().unwrap_or_default();
-                                response_tx
-                                    .send(VoiceResponse::DeviceList { input, output })
-                                    .ok();
-                            }
-                        }
-                        VoiceControl::GetStats => {
-                            if let Some(ref vc) = voice_chat {
-                                response_tx.send(VoiceResponse::Stats(vc.get_stats())).ok();
-                            }
-                        }
-                     
-                       
-                        VoiceControl::AddClient(client_id) => {
-                            if let Some(ref mut vc) = voice_chat {
-                                vc.add_client(client_id);
-                            }
-                        }
-                        VoiceControl::RemoveClient(client_id) => {
-                            if let Some(ref mut vc) = voice_chat {
-                                vc.remove_client(client_id);
-                            }
-                        }
-                        VoiceControl::SetUserAudio(client_id, settings) => {
-                            if let Some(ref mut vc) = voice_chat {
-                                vc.set_user_audio_settings(client_id, settings);
-                            }
-                        }
-                        VoiceControl::IncomingVoicePacket(packet) => {
-                            if let Some(ref mut vc) = voice_chat {
-                                vc.receive_packet(packet);
-                            }
-                        }
-                        VoiceControl::Shutdown => {
-                            running = false;
-                        }
+                    }
+                    default(Duration::from_millis(5)) => {
+                        // Poll timeout — check outgoing packets and speaking state
                     }
                 }
 
-                // Poll outgoing voice packets (only if we have a client ID)
-                if let Some(ref mut vc) = voice_chat {
+                // Drain any remaining control messages (batch processing)
+                for _ in 0..32 {
+                    match control_rx.try_recv() {
+                        Ok(ctrl) => Self::handle_voice_control(
+                            ctrl,
+                            &mut vc,
+                            &mut our_client_id,
+                            &mut running,
+                            &event_tx,
+                            &mut was_speaking,
+                        ),
+                        Err(_) => break,
+                    }
+                }
+
+                // Poll outgoing packets
+                if let Some(voice) = vc.as_ref() {
                     if let Some(id) = our_client_id {
-                        let packets = vc.get_outgoing_packets();
-                        if !packets.is_empty() {
-                            for mut packet in packets {
-                                // Set our client ID in outgoing packets
-                                packet.header.ssrc = id;
-                                // Set our client ID in outgoing packets
-                                packet.header.ssrc = id;
-                                // Use try_send to avoid blocking
-                                match packet_tx.try_send(packet) {
-                                    Ok(_) => {
-                                        // Success
-                                    }
-                                    Err(crossbeam_channel::TrySendError::Full(_)) => {
-                                        debug!("Voice packet channel full, dropping packet");
-                                        voice_drops.fetch_add(1, Ordering::Relaxed); // Track the drop
-                                    }
-                                    Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
-                                        // Shutdown
-                                        return;
-                                    }
-                                }
-                            }
+                        for mut packet in voice.take_outgoing_packets() {
+                            packet.header.ssrc = id;
+                            let _ = network_tx.try_send(NetworkControl::SendVoicePacket(packet));
                         }
                     }
-                    // If no client ID yet, discard packets
-                    else {
-                        let _ = vc.get_outgoing_packets(); // Drain but don't send
+
+                    // Speaking state (edge-triggered)
+                    let speaking = voice.is_speaking();
+                    if speaking != was_speaking {
+                        was_speaking = speaking;
+                        let _ = network_tx.try_send(NetworkControl::SendSpeakingStatus(speaking));
+                        let _ = event_tx.try_send(VoiceEvent::SpeakingChanged(speaking));
                     }
-
-                    // Check if speaking state changed
-                    // TODO: Send speaking status updates
                 }
-
-                thread::sleep(Duration::from_millis(5)); // Poll less frequently
             }
         })
     }
 
-   fn start_message_bridge(&mut self) {
-    // Don't start if already running
-    if self.bridge_thread.is_some() {
-        return;
-    }
-
-    // Bridge voice packets -> network with pacing + speaking state
-    let network_tx = self.network_tx.clone();
-    let voice_packet_rx = self.voice_packet_rx.clone();
-
-    self.bridge_thread = Some(std::thread::spawn(move || {
-        use std::collections::VecDeque;
-        use std::time::{Duration, Instant};
-        use crossbeam_channel::{TryRecvError, TrySendError};
-
-        // Tiny FIFO buffer (drop-oldest) ~40ms max
-        let mut packet_buffer: VecDeque<AudioPacket> = VecDeque::with_capacity(4);
-
-        // VAD-driven speaking indicator:
-        //   - Raise "speaking=true" on first packet after silence
-        //   - Drop to false if we see a gap > 200ms (no packets)
-        let mut currently_speaking = false;
-        let mut last_audio = Instant::now().checked_sub(Duration::from_secs(10)).unwrap();
-
-        // Stats (optional)
-        let mut packet_count = 0u64;
-        let mut drops = 0u64;
-        let mut last_stats = Instant::now();
-        let stats_interval = Duration::from_secs(10);
-
-        loop {
-            // 1) Ingest from voice thread (non-blocking)
-            loop {
-                match voice_packet_rx.try_recv() {
-                    Ok(packet) => {
-                        // buffer with drop-oldest
-                        if packet_buffer.len() >= 4 {
-                            packet_buffer.pop_front();
-                            drops += 1;
-                        }
-                        packet_buffer.push_back(packet);
-                    }
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => return,
-                }
-            }
-
-            // 2) If we have packets, mark speaking=TRUE (edge)
-            if !packet_buffer.is_empty() && !currently_speaking {
-                currently_speaking = true;
-                let _ = network_tx.try_send(NetworkControl::SendSpeakingStatus(true));
-            }
-
-            // 3) Send up to 2 packets per tick (preserve order)
-            let mut sent_now = 0usize;
-            while sent_now < 2 {
-                if let Some(packet) = packet_buffer.pop_front() {
-                    match network_tx.try_send(NetworkControl::SendVoicePacket(packet)) {
-                        Ok(_) => {
-                            sent_now += 1;
-                            packet_count += 1;
-                            last_audio = Instant::now();
-                        }
-                        Err(TrySendError::Full(NetworkControl::SendVoicePacket(p))) => {
-                            // Re-queue newest at the back, drop oldest behavior already applied
-                            // This packet is already old; drop it.
-                            let _ = p; // drop
-                            drops += 1;
-                            break;
-                        }
-                        Err(TrySendError::Disconnected(_)) => return,
-                        _ => break,
-                    }
-                } else {
-                    break;
-                }
-            }
-
-            // 4) If no audio for > 200ms, mark speaking=FALSE once
-            if currently_speaking && last_audio.elapsed() > Duration::from_millis(200) {
-                currently_speaking = false;
-                let _ = network_tx.try_send(NetworkControl::SendSpeakingStatus(false));
-            }
-
-            // 5) Light telemetry (optional)
-            if last_stats.elapsed() >= stats_interval {
-                last_stats = Instant::now();
-                log::debug!(
-                    "Bridge: sent={} dropped={} buffer={}",
-                    packet_count,
-                    drops,
-                    packet_buffer.len()
-                );
-                packet_count = 0;
-                drops = 0;
-            }
-
-            // 6) Sleep a bit to yield
-            if sent_now == 0 && packet_buffer.is_empty() {
-                std::thread::sleep(Duration::from_millis(2));
-            } else {
-                std::thread::sleep(Duration::from_millis(1));
-            }
-        }
-    }));
-}
-
-   fn handle_network_message(&mut self, msg: NetworkMessage) {
-        use NetworkMessage::*;
-
-        match msg {
-            Connected => {
-                self.sender.send(UiMessage::ConnectionEstablished);
-            }
-            Disconnected(reason) => {
-                self.sender.send(UiMessage::ConnectionFailed(reason));
-            }
-            InitClient {
-                users,
-                server_name,
-                greeting,
+    fn handle_voice_control(
+        ctrl: VoiceControl,
+        vc: &mut Option<VoiceChat>,
+        our_client_id: &mut Option<u64>,
+        running: &mut bool,
+        event_tx: &Sender<VoiceEvent>,
+        was_speaking: &mut bool,
+    ) {
+        match ctrl {
+            VoiceControl::Start {
+                settings,
+                our_client_id: id,
             } => {
-                self.sender.send(UiMessage::InitClient {
-                    users,
-                    server_name,
-                    greeting,
-                });
+                let config = settings_to_config(&settings);
+                match VoiceChat::new(config) {
+                    Ok(mut voice) => {
+                        if let Err(e) = voice.start() {
+                            event_tx
+                                .send(VoiceEvent::Error(format!("Start failed: {}", e)))
+                                .ok();
+                            return;
+                        }
+                        if settings.loopback_enabled {
+                            voice.set_loopback(true);
+                        }
+                        if settings.mute_on_start {
+                            voice.set_muted(true);
+                        }
+                        *our_client_id = Some(id);
+                        *vc = Some(voice);
+                        *was_speaking = false;
+                        event_tx.send(VoiceEvent::Started).ok();
+                        info!("Voice started for client {}", id);
+                    }
+                    Err(e) => {
+                        event_tx
+                            .send(VoiceEvent::Error(format!("Init failed: {}", e)))
+                            .ok();
+                    }
+                }
             }
-            UserJoined { client_id, username } => {
-                self.sender.send(UiMessage::UserJoined { client_id, username });
+            VoiceControl::Stop => {
+                *vc = None;
+                *our_client_id = None;
+                *was_speaking = false;
+                info!("Voice stopped");
             }
-            UserLeft { client_id, username } => {
-                self.sender.send(UiMessage::UserLeft { client_id, username });
+            VoiceControl::SetMuted(muted) => {
+                if let Some(v) = vc.as_ref() {
+                    v.set_muted(muted);
+                }
             }
-            TextMessage { client_id: _, username, text } => {
-                self.sender.send(UiMessage::ReceiveChatMessage { username, text });
+            VoiceControl::SetLoopback(enabled) => {
+                if let Some(v) = vc.as_ref() {
+                    v.set_loopback(enabled);
+                }
             }
-            VoiceData { .. } => {
-                // Ignored here: handled directly by voice thread in network loop
+            VoiceControl::SetVadThreshold(t) => {
+                if let Some(v) = vc.as_ref() {
+                    v.set_vad_threshold(t);
+                }
             }
-            UserSpeaking { client_id, is_speaking } => {
-                self.sender.send(UiMessage::UserSpeaking { client_id, is_speaking });
+            VoiceControl::SetVadEnabled(e) => {
+                if let Some(v) = vc.as_ref() {
+                    v.set_vad_enabled(e);
+                }
             }
-            UiUpdate => {
-                // Periodic update already handled by timeout
+            VoiceControl::SetNoiseSuppression(e) => {
+                if let Some(v) = vc.as_ref() {
+                    v.set_noise_suppression(e);
+                }
             }
-        }
-    } 
-
-    fn handle_voice_response(&mut self, resp: VoiceResponse) {
-        use VoiceResponse::*;
-
-        match resp {
-            DeviceList { input, output } => {
-                // Update device lists in settings window if open
-                // For now, just log it
-                info!(
-                    "Device list received: {} input, {} output devices",
-                    input.len(),
-                    output.len()
-                );
+            VoiceControl::SetInputGain(g) => {
+                if let Some(v) = vc.as_ref() {
+                    v.set_input_gain(g);
+                }
             }
-            Error(err) => {
-                self.sender.send(UiMessage::ShowError(err));
+            VoiceControl::SetOutputGain(g) => {
+                if let Some(v) = vc.as_ref() {
+                    v.set_output_gain(g);
+                }
             }
-            Stats(_) => {},
-            DeviceInfo(_) => {},
+            VoiceControl::SetInputDevice(d) => {
+                if let Some(v) = vc.as_mut() {
+                    if let Err(e) = v.set_input_device(d.as_deref()) {
+                        event_tx
+                            .send(VoiceEvent::Error(format!("Input device: {}", e)))
+                            .ok();
+                    }
+                }
+            }
+            VoiceControl::SetOutputDevice(d) => {
+                if let Some(v) = vc.as_mut() {
+                    if let Err(e) = v.set_output_device(d.as_deref()) {
+                        event_tx
+                            .send(VoiceEvent::Error(format!("Output device: {}", e)))
+                            .ok();
+                    }
+                }
+            }
+            VoiceControl::AddPeer(id) => {
+                if let Some(v) = vc.as_mut() {
+                    v.add_peer(id);
+                }
+            }
+            VoiceControl::RemovePeer(id) => {
+                if let Some(v) = vc.as_mut() {
+                    v.remove_peer(id);
+                }
+            }
+            VoiceControl::SetPeerAudio(id, settings) => {
+                if let Some(v) = vc.as_ref() {
+                    v.set_peer_settings(id, settings);
+                }
+            }
+            VoiceControl::IncomingVoicePacket(packet) => {
+                if let Some(v) = vc.as_ref() {
+                    v.receive_packet(packet);
+                }
+            }
+            VoiceControl::Shutdown => {
+                *running = false;
+            }
         }
     }
 
-    fn handle_message(&mut self, msg: UiMessage) {
-        use UiMessage::*;
+    // ════════════════════════════════════════════════════════════════════
+    //  EVENT HANDLERS
+    // ════════════════════════════════════════════════════════════════════
 
-        match msg {
-            Connect { nickname, server } => {
-                self.handle_connect(nickname, server);
+    fn handle_voice_event(&mut self, evt: VoiceEvent) {
+        match evt {
+            VoiceEvent::Started => {
+                info!("Voice engine ready");
             }
-            ConnectionEstablished => {
+            VoiceEvent::Error(e) => {
+                self.show_error(&e);
+            }
+            VoiceEvent::SpeakingChanged(speaking) => {
+                // Update our own speaking indicator in the user list
+                if let Some(id) = self.our_client_id {
+                    if let Some(user) = self.users.get_mut(&id) {
+                        user.is_speaking = speaking;
+                        user.last_activity = Instant::now();
+                    }
+                }
+                self.update_user_list();
+            }
+        }
+    }
+
+    fn handle_network_message(&mut self, msg: NetworkMessage) {
+        match msg {
+            NetworkMessage::Connected => {
                 self.handle_connection_established();
             }
-            ConnectionFailed(error) => {
-                self.show_error(&error);
+            NetworkMessage::Disconnected(reason) => {
+                if self.connected {
+                    self.handle_disconnect_event(&reason);
+                } else {
+                    self.show_error(&reason);
+                }
             }
-            Disconnect => {
-                self.handle_disconnect();
-            }
-            InitClient {
+            NetworkMessage::InitClient {
                 users,
                 server_name,
                 greeting,
             } => {
                 self.handle_init_client(users, server_name, greeting);
             }
-            UserJoined {
+            NetworkMessage::UserJoined {
                 client_id,
                 username,
             } => {
                 self.handle_user_joined(client_id, username);
             }
-            UserLeft {
+            NetworkMessage::UserLeft {
                 client_id,
                 username,
             } => {
                 self.handle_user_left(client_id, username);
             }
-            UserSpeaking {
+            NetworkMessage::TextMessage {
+                client_id: _,
+                username,
+                text,
+            } => {
+                if let Some(chat) = &mut self.chat {
+                    chat.handle_text_message(username, text);
+                }
+            }
+            NetworkMessage::UserSpeaking {
                 client_id,
                 is_speaking,
             } => {
-                self.handle_user_speaking(client_id, is_speaking);
+                if let Some(user) = self.users.get_mut(&client_id) {
+                    user.is_speaking = is_speaking;
+                    user.last_activity = Instant::now();
+                }
+                self.update_user_list();
             }
-            SendChatMessage(text) => {
+            NetworkMessage::VoiceData { .. } => {
+                // Handled directly in network thread → voice thread
+            }
+            NetworkMessage::UiUpdate => {}
+        }
+    }
+
+    fn handle_ui_message(&mut self, msg: UiMessage) {
+        match msg {
+            UiMessage::Connect { nickname, server } => {
+                self.handle_connect(nickname, server);
+            }
+            UiMessage::ConnectionEstablished => {
+                self.handle_connection_established();
+            }
+            UiMessage::ConnectionFailed(e) => {
+                self.show_error(&e);
+            }
+            UiMessage::Disconnect => {
+                self.handle_disconnect();
+            }
+            UiMessage::InitClient {
+                users,
+                server_name,
+                greeting,
+            } => {
+                self.handle_init_client(users, server_name, greeting);
+            }
+            UiMessage::UserJoined {
+                client_id,
+                username,
+            } => {
+                self.handle_user_joined(client_id, username);
+            }
+            UiMessage::UserLeft {
+                client_id,
+                username,
+            } => {
+                self.handle_user_left(client_id, username);
+            }
+            UiMessage::UserSpeaking {
+                client_id,
+                is_speaking,
+            } => {
+                if let Some(user) = self.users.get_mut(&client_id) {
+                    user.is_speaking = is_speaking;
+                    user.last_activity = Instant::now();
+                }
+                self.update_user_list();
+            }
+            UiMessage::SendChatMessage(text) => {
                 self.network_tx.send(NetworkControl::SendMessage(text)).ok();
             }
-            ReceiveChatMessage { username, text } => {
-                self.handle_receive_chat_message(username, text);
+            UiMessage::ReceiveChatMessage { username, text } => {
+                if let Some(chat) = &mut self.chat {
+                    chat.handle_text_message(username, text);
+                }
             }
-            ToggleMute => {
+            UiMessage::ToggleMute => {
                 self.handle_toggle_mute();
             }
-            SetLoopback(enabled) => {
-                self.settings.loopback_enabled = enabled;
-                self.voice_tx.send(VoiceControl::SetLoopback(enabled)).ok();
+            UiMessage::SetLoopback(e) => {
+                self.settings.loopback_enabled = e;
+                self.voice_tx.send(VoiceControl::SetLoopback(e)).ok();
             }
-            SetVadThreshold(threshold) => {
-                self.settings.vad_threshold = threshold;
-                // TODO: Send to voice
+            UiMessage::SetVadThreshold(t) => {
+                self.settings.vad_threshold = t;
+                self.voice_tx.send(VoiceControl::SetVadThreshold(t)).ok();
             }
-            SetVadEnabled(enabled) => {
+            UiMessage::SetVadEnabled(e) => {
+                self.voice_tx.send(VoiceControl::SetVadEnabled(e)).ok();
+            }
+            UiMessage::SetNoiseSuppression(e) => {
+                self.settings.noise_suppression = e;
                 self.voice_tx
-                    .send(VoiceControl::SetVadEnabled(enabled))
+                    .send(VoiceControl::SetNoiseSuppression(e))
                     .ok();
             }
-            MuteUser {
+            UiMessage::SetInputGain(g) => {
+                self.settings.input_gain = g;
+                self.voice_tx.send(VoiceControl::SetInputGain(g)).ok();
+            }
+            UiMessage::SetOutputGain(g) => {
+                self.settings.output_gain = g;
+                self.voice_tx.send(VoiceControl::SetOutputGain(g)).ok();
+            }
+            UiMessage::MuteUser {
                 client_id,
                 username,
                 muted,
             } => {
                 self.handle_mute_user(client_id, username, muted);
             }
-            SetUserVolume {
+            UiMessage::SetUserVolume {
                 client_id,
                 username,
                 volume,
             } => {
                 self.handle_set_user_volume(client_id, username, volume);
             }
-            ResetUserAudio {
+            UiMessage::ResetUserAudio {
                 client_id,
                 username,
             } => {
                 self.handle_reset_user_audio(client_id, username);
             }
-            OpenSettings => {
+            UiMessage::OpenSettings => {
                 if !self.settings_window_open {
                     self.settings_window_open = true;
                     self.show_settings_window();
                 }
             }
- 
-
-            SaveSettings => {
+            UiMessage::SaveSettings => {
                 self.settings.save();
-                info!("Settings saved");
             }
-            ResetSettings => {
+            UiMessage::ResetSettings => {
                 self.settings = Settings::default();
                 self.settings.save();
-                info!("Settings reset to defaults");
             }
-            RefreshDevices => {
-                self.voice_tx.send(VoiceControl::GetDeviceList).ok();
+            UiMessage::SetInputDevice(d) => {
+                self.settings.input_device = d.clone();
+                self.voice_tx.send(VoiceControl::SetInputDevice(d)).ok();
             }
-            SetInputDevice(device) => {
-                self.settings.input_device = device.clone();
-                self.voice_tx
-                    .send(VoiceControl::SetInputDevice(device))
-                    .ok();
+            UiMessage::SetOutputDevice(d) => {
+                self.settings.output_device = d.clone();
+                self.voice_tx.send(VoiceControl::SetOutputDevice(d)).ok();
             }
-            SetOutputDevice(device) => {
-                self.settings.output_device = device.clone();
-                self.voice_tx
-                    .send(VoiceControl::SetOutputDevice(device))
-                    .ok();
-            }
-            UpdateUserList => {
+            UiMessage::UpdateUserList => {
                 self.update_user_list();
             }
-            UpdateStats => {
-                self.voice_tx.send(VoiceControl::GetStats).ok();
-
-                // Log pipeline health
-                if let Some(ref drops) = self.voice_drops {
-                    let voice_drops = drops.load(Ordering::Relaxed);
-                    if voice_drops > 0 {
-                        warn!("⚠️ Pipeline health: {} voice packets dropped", voice_drops);
-                        // Reset counter after logging
-                        drops.store(0, Ordering::Relaxed);
-                    }
-                }
+            UiMessage::ShowError(e) => {
+                self.show_error(&e);
             }
-
-            ShowError(error) => {
-                self.show_error(&error);
-            }
-            ClearError => {
+            UiMessage::ClearError => {
                 if let Some(frame) = &mut self.error_frame {
                     frame.set_label("");
                 }
             }
-            SettingsWindowClosed => {
+            UiMessage::SettingsWindowClosed => {
                 self.settings_window_open = false;
+                self.settings.save();
             }
-   
-            Shutdown => {
+            UiMessage::LocalSpeakingChanged(speaking) => {
+                if let Some(id) = self.our_client_id {
+                    if let Some(user) = self.users.get_mut(&id) {
+                        user.is_speaking = speaking;
+                        user.last_activity = Instant::now();
+                    }
+                }
+                self.update_user_list();
+            }
+            UiMessage::Shutdown => {
                 self.shutdown();
                 self.app.quit();
             }
-            _ => {}
         }
     }
 
+    // ════════════════════════════════════════════════════════════════════
+    //  CONNECTION HANDLERS
+    // ════════════════════════════════════════════════════════════════════
+
     fn handle_connect(&mut self, nickname: String, server: String) {
-        // Update settings
         self.settings.nickname = nickname.clone();
         self.settings.last_server = server.clone();
         self.settings.save();
 
-        // Parse server address
         let addr = match server.parse::<SocketAddr>() {
-            Ok(addr) => addr,
+            Ok(a) => a,
             Err(_) => {
-                self.show_error("Invalid server address (use format: ip:port)");
+                self.show_error("Invalid address (use ip:port)");
                 return;
             }
         };
 
-        // Send connect message to network thread
         self.network_tx
             .send(NetworkControl::Connect { addr, nickname })
             .ok();
-
-        // DON'T start voice here - wait until we get our client ID
     }
 
     fn handle_connection_established(&mut self) {
-        // Only proceed if not already connected
         if self.connected {
             return;
         }
-
         self.connected = true;
 
-        // Start message bridge now that we're connected
-        self.start_message_bridge();
-
-        // Hide connection window
         if let Some(mut wind) = self.connection_window.take() {
             wind.hide();
         }
 
-        // Show main window
         self.show_main_screen();
     }
 
@@ -970,65 +793,77 @@ fn start_network_thread(
         greeting: String,
     ) {
         // Find our client ID
+        let our_nick = &self.settings.nickname;
+        self.our_client_id = None;
+
+        // Try exact match first
         for (id, name) in &users {
-            if name == &self.settings.nickname {
+            if name == our_nick {
                 self.our_client_id = Some(*id);
-                info!("📍 Found our client ID: {}", id);
-
-                // NOW start voice with our client ID
-                self.voice_tx
-                    .send(VoiceControl::Start(self.settings.clone()))
-                    .ok();
-                self.voice_tx.send(VoiceControl::SetOurClientId(*id)).ok();
-
-                // Apply initial mute state
-                if self.settings.mute_on_start {
-                    self.is_muted = true;
-                    self.voice_tx.send(VoiceControl::SetMuted(true)).ok();
-                    info!("🔇 Starting muted as per settings");
-                } else {
-                    self.is_muted = false;
-                    info!("🔊 Starting unmuted");
-                }
-
                 break;
             }
         }
 
-        // Initialize user states
+        // Prefix match fallback
+        if self.our_client_id.is_none() {
+            for (id, name) in &users {
+                if name.starts_with(our_nick) || our_nick.starts_with(name) {
+                    self.our_client_id = Some(*id);
+                }
+            }
+        }
+
+        // Last resort: highest client ID (newest)
+        if self.our_client_id.is_none() {
+            if let Some((&id, _)) = users.iter().max_by_key(|(id, _)| *id) {
+                self.our_client_id = Some(id);
+                warn!("Could not match nickname, assuming client {}", id);
+            }
+        }
+
+        // Start voice
+        if let Some(id) = self.our_client_id {
+            self.voice_tx
+                .send(VoiceControl::Start {
+                    settings: self.settings.clone(),
+                    our_client_id: id,
+                })
+                .ok();
+
+            self.is_muted = self.settings.mute_on_start;
+        }
+
+        // Build user state map
         self.users.clear();
-        for (id, username) in users {
-            let audio_settings = self
+        for (id, username) in &users {
+            let audio = self
                 .settings
                 .user_audio_settings
-                .get(&username)
+                .get(username)
                 .cloned()
                 .unwrap_or_default();
 
             self.users.insert(
-                id,
+                *id,
                 UserState {
                     username: username.clone(),
                     is_speaking: false,
                     last_activity: Instant::now(),
-                    audio_settings,
+                    audio_settings: audio,
                 },
             );
 
-            // Add decoder for this user
-            self.voice_tx.send(VoiceControl::AddClient(id)).ok();
+            self.voice_tx.send(VoiceControl::AddPeer(*id)).ok();
         }
 
-        // Update UI
         if let Some(chat) = &mut self.chat {
             chat.handle_init(server_name, greeting);
         }
-
         self.update_user_list();
     }
 
     fn handle_user_joined(&mut self, client_id: renet::ClientId, username: String) {
-        let audio_settings = self
+        let audio = self
             .settings
             .user_audio_settings
             .get(&username)
@@ -1041,76 +876,51 @@ fn start_network_thread(
                 username: username.clone(),
                 is_speaking: false,
                 last_activity: Instant::now(),
-                audio_settings,
+                audio_settings: audio,
             },
         );
 
-        self.voice_tx.send(VoiceControl::AddClient(client_id)).ok();
+        self.voice_tx.send(VoiceControl::AddPeer(client_id)).ok();
 
         if let Some(chat) = &mut self.chat {
             chat.handle_user_joined(username);
         }
-
         self.update_user_list();
     }
 
     fn handle_user_left(&mut self, client_id: renet::ClientId, username: String) {
         self.users.remove(&client_id);
-        self.voice_tx
-            .send(VoiceControl::RemoveClient(client_id))
-            .ok();
+        self.voice_tx.send(VoiceControl::RemovePeer(client_id)).ok();
 
         if let Some(chat) = &mut self.chat {
             chat.handle_user_left(username);
         }
-
         self.update_user_list();
     }
 
-    fn handle_user_speaking(&mut self, client_id: renet::ClientId, is_speaking: bool) {
-        if let Some(user) = self.users.get_mut(&client_id) {
-            user.is_speaking = is_speaking;
-            user.last_activity = Instant::now();
-        }
-
-        self.update_user_list();
-    }
-
-    fn handle_receive_chat_message(&mut self, username: String, text: String) {
-        if let Some(chat) = &mut self.chat {
-            chat.handle_text_message(username, text);
-        }
-    }
-
-   fn handle_toggle_mute(&mut self) {
-    // Toggle mute
-    self.is_muted = !self.is_muted;
-
-    // Tell voice thread
-    self.voice_tx
-        .send(VoiceControl::SetMuted(self.is_muted))
-        .ok();
-
-    // Reflect in UI mute button, etc.
-    if let Some(sidebar) = &mut self.sidebar {
-        sidebar.set_mute_state(self.is_muted);
-    }
-
-    // Speaking indicator handling:
-    // - If we just MUTED: force "not speaking" on the wire immediately.
-    // - If we just UNMUTED: do NOT send "speaking=true". Let VAD/packets trigger it.
-    if self.is_muted {
-        self.network_tx
-            .send(NetworkControl::SendSpeakingStatus(false))
+    fn handle_toggle_mute(&mut self) {
+        self.is_muted = !self.is_muted;
+        self.voice_tx
+            .send(VoiceControl::SetMuted(self.is_muted))
             .ok();
+
+        if let Some(sidebar) = &mut self.sidebar {
+            sidebar.set_mute_state(self.is_muted);
+        }
+
+        // Force "not speaking" on mute
+        if self.is_muted {
+            self.network_tx
+                .send(NetworkControl::SendSpeakingStatus(false))
+                .ok();
+        }
     }
-} 
 
     fn handle_mute_user(&mut self, client_id: renet::ClientId, username: String, muted: bool) {
         let settings = self
             .settings
             .user_audio_settings
-            .entry(username.clone())
+            .entry(username)
             .or_default();
         settings.is_muted = muted;
 
@@ -1119,9 +929,11 @@ fn start_network_thread(
         }
 
         self.voice_tx
-            .send(VoiceControl::SetUserAudio(client_id, settings.clone()))
+            .send(VoiceControl::SetPeerAudio(
+                client_id,
+                to_peer_settings(settings),
+            ))
             .ok();
-
         self.settings.save();
         self.update_user_list();
     }
@@ -1135,7 +947,7 @@ fn start_network_thread(
         let settings = self
             .settings
             .user_audio_settings
-            .entry(username.clone())
+            .entry(username)
             .or_default();
         settings.volume = volume;
 
@@ -1144,9 +956,11 @@ fn start_network_thread(
         }
 
         self.voice_tx
-            .send(VoiceControl::SetUserAudio(client_id, settings.clone()))
+            .send(VoiceControl::SetPeerAudio(
+                client_id,
+                to_peer_settings(settings),
+            ))
             .ok();
-
         self.settings.save();
         self.update_user_list();
     }
@@ -1159,64 +973,72 @@ fn start_network_thread(
         }
 
         self.voice_tx
-            .send(VoiceControl::SetUserAudio(
+            .send(VoiceControl::SetPeerAudio(
                 client_id,
-                UserAudioSettings::default(),
+                to_peer_settings(&UserAudioSettings::default()),
             ))
             .ok();
-
         self.settings.save();
         self.update_user_list();
     }
 
     fn handle_disconnect(&mut self) {
         self.connected = false;
-
-        // Send disconnect to network
         self.network_tx.send(NetworkControl::Disconnect).ok();
-
-        // Stop voice
         self.voice_tx.send(VoiceControl::Stop).ok();
 
-        // Stop bridge thread if running
-        // (it will naturally stop when channels are dropped)
-
-        // Update UI
         if let Some(sidebar) = &mut self.sidebar {
             sidebar.handle_disconnected();
         }
-
         if let Some(chat) = &mut self.chat {
             chat.handle_disconnected("User disconnected".to_string());
         }
 
-        // Clear users
         self.users.clear();
         self.our_client_id = None;
-
-        // Reset mute state
         self.is_muted = false;
 
-        // Show connection screen again
-        if let Some(mut main_wind) = self.main_window.take() {
-            main_wind.hide();
+        if let Some(mut w) = self.main_window.take() {
+            w.hide();
         }
-
         self.show_connection_screen();
     }
 
-    fn update_user_list(&mut self) {
-        // Check for timed-out speaking indicators
-        let now = Instant::now();
-        let timeout = Duration::from_millis(100);
+    fn handle_disconnect_event(&mut self, reason: &str) {
+        self.connected = false;
+        self.voice_tx.send(VoiceControl::Stop).ok();
 
+        if let Some(sidebar) = &mut self.sidebar {
+            sidebar.handle_disconnected();
+        }
+        if let Some(chat) = &mut self.chat {
+            chat.handle_disconnected(reason.to_string());
+        }
+
+        self.users.clear();
+        self.our_client_id = None;
+
+        if let Some(mut w) = self.main_window.take() {
+            w.hide();
+        }
+        self.show_connection_screen();
+        self.show_error(reason);
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    //  UI
+    // ════════════════════════════════════════════════════════════════════
+
+    fn update_user_list(&mut self) {
+        // Expire stale speaking indicators
+        let timeout = Duration::from_millis(500);
+        let now = Instant::now();
         for user in self.users.values_mut() {
             if user.is_speaking && now.duration_since(user.last_activity) > timeout {
                 user.is_speaking = false;
             }
         }
 
-        // Update sidebar
         if let Some(sidebar) = &mut self.sidebar {
             sidebar.update_users(&self.users, self.our_client_id);
         }
@@ -1233,7 +1055,6 @@ fn start_network_thread(
         col.set_margins(20, 20, 20, 20);
         col.set_spacing(15);
 
-        // Logo/Title
         let mut title = frame::Frame::default()
             .with_label("baucord")
             .with_align(enums::Align::Center);
@@ -1248,7 +1069,6 @@ fn start_network_thread(
         subtitle.set_label_color(DarkTheme::TEXT_SECONDARY);
         col.fixed(&subtitle, 20);
 
-        // Nickname input
         let mut nick_frame = frame::Frame::default()
             .with_label("Nickname")
             .with_align(enums::Align::Left | enums::Align::Inside);
@@ -1261,7 +1081,6 @@ fn start_network_thread(
         DarkTheme::style_input(&mut nick_input);
         col.fixed(&nick_input, 35);
 
-        // Server address input
         let mut addr_frame = frame::Frame::default()
             .with_label("Server Address")
             .with_align(enums::Align::Left | enums::Align::Inside);
@@ -1274,14 +1093,12 @@ fn start_network_thread(
         DarkTheme::style_input(&mut addr_input);
         col.fixed(&addr_input, 35);
 
-        // Error display
         let mut error_frame = frame::Frame::default().with_align(enums::Align::Center);
         error_frame.set_label_color(DarkTheme::DANGER);
         error_frame.set_label_size(12);
         col.fixed(&error_frame, 25);
-        self.error_frame = Some(error_frame.clone());
+        self.error_frame = Some(error_frame);
 
-        // Connect button
         let mut connect_btn = button::Button::default().with_label("Connect");
         connect_btn.set_color(DarkTheme::ACCENT);
         connect_btn.set_label_color(enums::Color::White);
@@ -1292,14 +1109,12 @@ fn start_network_thread(
         wind.end();
         wind.show();
 
-        // Connect button callback
         let sender = self.sender;
         connect_btn.set_callback(move |_| {
             let nickname = nick_input.value();
             let server = addr_input.value();
-
             if nickname.trim().is_empty() {
-                sender.send(UiMessage::ShowError("Nickname cannot be empty".to_string()));
+                sender.send(UiMessage::ShowError("Nickname cannot be empty".into()));
             } else {
                 sender.send(UiMessage::Connect { nickname, server });
             }
@@ -1310,29 +1125,39 @@ fn start_network_thread(
 
     fn show_main_screen(&mut self) {
         let mut wind = window::Window::default()
-            .with_size(1000, 700)
+            .with_size(self.settings.window_width, self.settings.window_height)
             .with_label("baucord");
         wind.make_resizable(true);
         DarkTheme::style_window(&mut wind);
 
+        // Restore window position
+        if let (Some(x), Some(y)) = (self.settings.window_x, self.settings.window_y) {
+            wind.set_pos(x, y);
+        }
+
         let mut main_row = group::Flex::default_fill().row();
         main_row.set_color(DarkTheme::BG_PRIMARY);
 
-        // Create sidebar
         let mut sidebar = Sidebar::new(self.sender);
         let sidebar_group = sidebar.create_ui();
         main_row.fixed(&sidebar_group, 250);
-
-        // Apply current mute state
         sidebar.set_mute_state(self.is_muted);
 
-        // Create chat
         let mut chat = Chat::new(self.sender);
         let chat_group = chat.create_ui();
         main_row.add(&chat_group);
 
         main_row.end();
         wind.end();
+
+        // Save window geometry on close
+        let sender = self.sender;
+        wind.set_callback(move |_w| {
+            if app::event() == enums::Event::Close {
+                sender.send(UiMessage::Shutdown);
+            }
+        });
+
         wind.show();
 
         self.main_window = Some(wind);
@@ -1341,12 +1166,17 @@ fn start_network_thread(
     }
 
     fn show_settings_window(&mut self) {
-        use crate::ui::settings::AudioSettingsWindow;
+        use crate::ui::settings::SettingsWindow;
 
-        let sender = self.sender;
-        let settings = self.settings.clone();
+        let input_devices = VoiceChat::list_input_devices().unwrap_or_default();
+        let output_devices = VoiceChat::list_output_devices().unwrap_or_default();
 
-        AudioSettingsWindow::show(sender, settings);
+        SettingsWindow::show(
+            self.sender,
+            self.settings.clone(),
+            input_devices,
+            output_devices,
+        );
     }
 
     fn show_error(&mut self, error: &str) {
@@ -1355,7 +1185,6 @@ fn start_network_thread(
             frame.set_label_color(DarkTheme::DANGER);
         }
 
-        // Auto-clear error after 5 seconds
         let sender = self.sender;
         app::add_timeout3(5.0, move |_| {
             sender.send(UiMessage::ClearError);
@@ -1363,15 +1192,18 @@ fn start_network_thread(
     }
 
     fn shutdown(&mut self) {
-        info!("Shutting down application");
+        info!("Shutting down");
 
-        // Save settings
+        // Save window position
+        if let Some(ref w) = self.main_window {
+            self.settings.window_width = w.w();
+            self.settings.window_height = w.h();
+            self.settings.window_x = Some(w.x());
+            self.settings.window_y = Some(w.y());
+        }
         self.settings.save();
 
-        // Send shutdown to all threads
         self.network_tx.send(NetworkControl::Shutdown).ok();
         self.voice_tx.send(VoiceControl::Shutdown).ok();
-
-        // Threads will clean up when dropped
     }
 }

@@ -13,8 +13,11 @@ renet_netcode = "1.1.0"
 log = "0.4"
 env_logger = "0.11"
 opus = { git = "https://github.com/SpaceManiac/opus-rs" }
-cpal = "0.15"               
-voice_activity_detector = { version = "0.2", features = ["load-dynamic"], optional = true }
+cpal = "0.15"
+voice-chat-core = { path = "../core" }
+voice_activity_detector = { version = "0.2", features = [
+  "load-dynamic",
+], optional = true }
 earshot = { version = "0.1", optional = true }
 serde_json = "1.0"
 dirs = "5.0"
@@ -27,7 +30,6 @@ rand = "0.9.2"
 
 
 [features]
-default = ["earshot"] 
+default = ["earshot"]
 earshot = ["dep:earshot"]
 silero = ["dep:voice_activity_detector"]
-
