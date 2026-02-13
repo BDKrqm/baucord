@@ -264,7 +264,7 @@ impl ChatServer {
             })
             .unwrap_or_else(|| format!("User{}", client_id));
 
-        info!("✅ {} ({}) connected", username, client_id);
+        info!("{} ({}) connected", username, client_id);
         self.usernames.insert(client_id, username.clone());
 
         // Send init message with current users list and greeting to the new client
@@ -300,7 +300,7 @@ impl ChatServer {
 
     fn handle_client_disconnected(&mut self, client_id: ClientId, reason: renet::DisconnectReason) {
         if let Some(username) = self.usernames.remove(&client_id) {
-            info!("❌ {} ({}) disconnected: {}", username, client_id, reason);
+            info!("{} ({}) disconnected: {}", username, client_id, reason);
         }
 
         let message = ServerMessage::ClientDisconnected { client_id };
@@ -330,7 +330,7 @@ impl ChatServer {
         match message {
             ClientMessage::Text(text) => {
                 let username = self.get_username(client_id);
-                info!("💬 [{}]: {}", username, text);
+                info!("[{}]: {}", username, text);
                 self.stats.messages_count += 1;
 
                 let msg = ServerMessage::ClientMessage(Message { client_id, text });

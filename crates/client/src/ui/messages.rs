@@ -4,13 +4,16 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub enum UiMessage {
-    // Connection flow
-    Connect { nickname: String, server: String },
+    // ── Connection flow ─────────────────────────────────────────────
+    Connect {
+        nickname: String,
+        server: String,
+    },
     ConnectionEstablished,
     ConnectionFailed(String),
     Disconnect,
-    
-    // Network events from server
+
+    // ── Network events from server ──────────────────────────────────
     InitClient {
         users: HashMap<ClientId, String>,
         server_name: String,
@@ -28,21 +31,24 @@ pub enum UiMessage {
         client_id: ClientId,
         is_speaking: bool,
     },
-    
-    // Chat messages
+
+    // ── Chat ────────────────────────────────────────────────────────
     SendChatMessage(String),
     ReceiveChatMessage {
         username: String,
         text: String,
     },
-    
-    // Voice/Audio controls
+
+    // ── Voice controls ──────────────────────────────────────────────
     ToggleMute,
     SetLoopback(bool),
     SetVadThreshold(f32),
     SetVadEnabled(bool),
-    
-    // User audio settings
+    SetNoiseSuppression(bool),
+    SetInputGain(f32),
+    SetOutputGain(f32),
+
+    // ── Per-user audio ──────────────────────────────────────────────
     MuteUser {
         client_id: ClientId,
         username: String,
@@ -57,25 +63,25 @@ pub enum UiMessage {
         client_id: ClientId,
         username: String,
     },
-    
-    // Settings window
+
+    // ── Settings window ─────────────────────────────────────────────
     OpenSettings,
     SaveSettings,
     ResetSettings,
-    SettingsWindowClosed,  // Track window closure
-    
-    // Device management
-    RefreshDevices,
+    SettingsWindowClosed,
+
+    // ── Device management ───────────────────────────────────────────
     SetInputDevice(Option<String>),
     SetOutputDevice(Option<String>),
-    DevicesRefreshed, 
-    
-    // UI updates
+
+    // ── UI updates ──────────────────────────────────────────────────
     UpdateUserList,
-    UpdateStats,
     ShowError(String),
     ClearError,
-    
-    // Application lifecycle
+
+    // ── Speaking state from voice thread ─────────────────────────────
+    LocalSpeakingChanged(bool),
+
+    // ── Application lifecycle ───────────────────────────────────────
     Shutdown,
 }

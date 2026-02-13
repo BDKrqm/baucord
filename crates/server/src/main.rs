@@ -76,7 +76,7 @@ fn parse_log_level(level: &str) -> log::LevelFilter {
 fn create_default_config() -> Config {
     Config {
         server: server::ServerSettings {
-            name: "Chat & Voice Server".to_string(),
+            name: "Baucord Server".to_string(),
             host: "0.0.0.0".to_string(),
             port: 5000,
             greeting_message: "Welcome to the server!".to_string(),

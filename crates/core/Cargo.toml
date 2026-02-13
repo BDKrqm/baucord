@@ -1,0 +1,43 @@
+[package]
+name = "core"
+version = "0.3.0"
+edition = "2021"
+description = "core components for baucord"
+
+[dependencies]
+# Audio I/O
+cpal = "0.15"
+dasp_sample = "0.11"
+
+# Lock-free ring buffer (RT-safe)
+rtrb = "0.3"
+
+# Bounded channels
+crossbeam-channel = "0.5"
+
+# Opus codec
+opus = "0.3"
+
+# Resampling
+rubato = "0.16"
+
+# Noise suppression (Mozilla RNNoise, pure Rust)
+nnnoiseless = "0.5"
+
+# VAD (WebRTC port, pure Rust, no_std compatible)
+earshot = "0.1"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+[dev-dependencies]
+fltk = { version = "1.5", features = ["fltk-bundled"] }
+
+[[example]]
+name = "basic_usage"
+path = "examples/basic_usage.rs"
+
+[[example]]
+name = "stats_dashboard"
+path = "examples/stats_dashboard.rs"

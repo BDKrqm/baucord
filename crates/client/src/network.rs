@@ -180,10 +180,6 @@ pub struct NetworkClient {
     last_updated: Instant,
     voice_bundler: VoiceBundler,
 
-    // Monotonic 48kHz counters
-    voice_next_seq: u32,
-    voice_ts_48k: u32, // Increments by 480 per 10ms frame
-
     // Reordering buffer for received packets
     reorder_buffer: HashMap<(u64, u32), Vec<u8>>, // (client_id, seq) -> packet
     expected_seqs: HashMap<u64, u32>,             // client_id -> next expected seq
@@ -263,15 +259,11 @@ impl NetworkClient {
             message_queue: vec![NetworkMessage::Connected],
             last_updated: Instant::now(),
             voice_bundler: VoiceBundler::new(),
-            voice_next_seq: 0,
-            voice_ts_48k: 0,
             reorder_buffer: HashMap::new(),
             expected_seqs: HashMap::new(),
             last_speaking_sent: false,
-last_speaking_instant: Instant::now()
-    .checked_sub(Duration::from_secs(5))
-    .unwrap(),
-speaking_cache: HashMap::new(),
+            last_speaking_instant: Instant::now().checked_sub(Duration::from_secs(5)).unwrap(),
+            speaking_cache: HashMap::new(),
         })
     }
 
@@ -475,47 +467,14 @@ speaking_cache: HashMap::new(),
             }
         }
     }
-    /// Send one 10ms Opus frame
-    pub fn send_voice_frame_raw(
-        &mut self,
-        our_client_id: ClientId,
-        _ts_48k_ignored: u32,
-        opus_frame: &[u8],
-    ) {
-        // Start a new packet if needed
-        if self.voice_bundler.is_empty() {
-            self.voice_bundler
-                .begin(our_client_id, self.voice_next_seq, self.voice_ts_48k);
-        }
-
-        // If it doesn't fit, flush and begin a new one
-        if !self.voice_bundler.try_push_frame(opus_frame) {
-            self.flush_voice_packet();
-            self.voice_bundler
-                .begin(our_client_id, self.voice_next_seq, self.voice_ts_48k);
-
-            if !self.voice_bundler.try_push_frame(opus_frame) {
-                // Frame too large, drop it
-                return;
-            }
-        }
-
-        // Increment counters for next frame
-        self.voice_next_seq = self.voice_next_seq.wrapping_add(1);
-        self.voice_ts_48k = self.voice_ts_48k.wrapping_add(480);
-
-        // FLUSH AT THRESHOLD (not just at max)
-        if self.voice_bundler.frames >= VOICE_PACKET_BATCH_THRESHOLD as u8 {
-            self.flush_voice_packet();
-        }
-    }
 
     /// Flush the current voice bundle
     pub fn flush_voice_packet(&mut self) {
         if let Some(pkt) = self.voice_bundler.finish_into_vec()
-            && pkt.len() <= VOICE_MTU_BUDGET {
-                self.client.send_message(VOICE_CHANNEL, pkt);
-            }
+            && pkt.len() <= VOICE_MTU_BUDGET
+        {
+            self.client.send_message(VOICE_CHANNEL, pkt);
+        }
     }
 
     pub fn send_message(&mut self, text: String) {
@@ -525,28 +484,26 @@ speaking_cache: HashMap::new(),
         self.client.send_message(RELIABLE_CHANNEL, message);
     }
 
-   pub fn send_speaking_status(&mut self, is_speaking: bool) {
-    use std::time::{Duration, Instant};
-    const SPEAKING_THROTTLE_MS: u64 = 50;
+    pub fn send_speaking_status(&mut self, is_speaking: bool) {
+        use std::time::{Duration, Instant};
+        const SPEAKING_THROTTLE_MS: u64 = 50;
 
-    let now = Instant::now();
-    let due = now
-        .duration_since(self.last_speaking_instant)
-        >= Duration::from_millis(SPEAKING_THROTTLE_MS);
-    let edge = is_speaking != self.last_speaking_sent;
+        let now = Instant::now();
+        let due = now.duration_since(self.last_speaking_instant)
+            >= Duration::from_millis(SPEAKING_THROTTLE_MS);
+        let edge = is_speaking != self.last_speaking_sent;
 
-    // Send only on edge or when the throttle window elapsed
-    if edge || due {
-        let message = bincode::options()
-            .serialize(&ClientMessage::Speaking(is_speaking))
-            .expect("Failed to serialize speaking status");
-        self.client.send_message(RELIABLE_CHANNEL, message);
+        // Send only on edge or when the throttle window elapsed
+        if edge || due {
+            let message = bincode::options()
+                .serialize(&ClientMessage::Speaking(is_speaking))
+                .expect("Failed to serialize speaking status");
+            self.client.send_message(RELIABLE_CHANNEL, message);
 
-        self.last_speaking_sent = is_speaking;
-        self.last_speaking_instant = now;
+            self.last_speaking_sent = is_speaking;
+            self.last_speaking_instant = now;
+        }
     }
-}
- 
 
     pub fn poll_messages(&mut self) -> Vec<NetworkMessage> {
         self.message_queue.drain(..).collect()
@@ -566,6 +523,37 @@ speaking_cache: HashMap::new(),
 
     pub fn get_users(&self) -> &HashMap<ClientId, String> {
         &self.usernames
+    }
+    /// Send one 10ms Opus frame, passing through the core encoder's seq/ts.
+    ///
+    /// Unlike send_voice_frame_raw, this uses the caller's sequence number
+    /// and timestamp instead of maintaining an internal counter. This keeps
+    /// one authoritative sequence chain from encoder to decoder.
+    pub fn send_voice_frame(
+        &mut self,
+        our_client_id: ClientId,
+        seq: u32,
+        ts_48k: u32,
+        opus_frame: &[u8],
+    ) {
+        // Start a new bundle if needed
+        if self.voice_bundler.is_empty() {
+            self.voice_bundler.begin(our_client_id, seq, ts_48k);
+        }
+
+        // If it doesn't fit, flush and begin a new one
+        if !self.voice_bundler.try_push_frame(opus_frame) {
+            self.flush_voice_packet();
+            self.voice_bundler.begin(our_client_id, seq, ts_48k);
+            if !self.voice_bundler.try_push_frame(opus_frame) {
+                return; // Frame too large, drop
+            }
+        }
+
+        // Flush at batch threshold (2 frames)
+        if self.voice_bundler.frames >= VOICE_PACKET_BATCH_THRESHOLD as u8 {
+            self.flush_voice_packet();
+        }
     }
 }
 

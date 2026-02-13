@@ -4,21 +4,33 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-// Settings struct that will be serialized/deserialized
+/// Persisted application settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub nickname: String,
     pub last_server: String,
+
+    // Voice
     pub vad_threshold: f32,
+    pub noise_suppression: bool,
+    pub input_gain: f32,
+    pub output_gain: f32,
+
+    // Behaviour
     pub loopback_enabled: bool,
-    pub verbose_logging: bool,
     pub mute_on_start: bool,
+
+    // Window
     pub window_width: i32,
     pub window_height: i32,
     pub window_x: Option<i32>,
     pub window_y: Option<i32>,
+
+    // Devices
     pub input_device: Option<String>,
     pub output_device: Option<String>,
+
+    // Per-user audio (keyed by username for persistence across sessions)
     pub user_audio_settings: HashMap<String, UserAudioSettings>,
 }
 
@@ -27,9 +39,11 @@ impl Default for Settings {
         Settings {
             nickname: String::new(),
             last_server: "127.0.0.1:5000".to_string(),
-            vad_threshold: 0.3,
+            vad_threshold: 0.15,
+            noise_suppression: true,
+            input_gain: 1.0,
+            output_gain: 1.0,
             loopback_enabled: false,
-            verbose_logging: false,
             mute_on_start: false,
             window_width: 1000,
             window_height: 700,
@@ -43,51 +57,34 @@ impl Default for Settings {
 }
 
 impl Settings {
-    // Get the path to the settings file
     fn get_settings_path() -> PathBuf {
         let mut path = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
-
-        // Just add -dev suffix in debug mode
         if cfg!(debug_assertions) {
             path.push("baucord-dev");
         } else {
             path.push("baucord");
         }
-
         fs::create_dir_all(&path).ok();
         path.push("settings.json");
         path
     }
 
-    // Load settings from disk
     pub fn load() -> Self {
         let path = Self::get_settings_path();
-
         if path.exists() {
-            match fs::read_to_string(&path) {
-                Ok(contents) => match serde_json::from_str(&contents) {
-                    Ok(settings) => {
-                        info!("Loaded settings from {:?}", path);
-                        return settings;
-                    }
-                    Err(e) => {
-                        info!("Failed to parse settings: {}", e);
-                    }
-                },
-                Err(e) => {
-                    info!("Failed to read settings file: {}", e);
+            if let Ok(contents) = fs::read_to_string(&path) {
+                if let Ok(settings) = serde_json::from_str(&contents) {
+                    info!("Loaded settings from {:?}", path);
+                    return settings;
                 }
             }
         }
-
         info!("Using default settings");
         Settings::default()
     }
 
-    // Save settings to disk
     pub fn save(&self) {
         let path = Self::get_settings_path();
-
         match serde_json::to_string_pretty(self) {
             Ok(contents) => {
                 if let Err(e) = fs::write(&path, contents) {
@@ -96,16 +93,15 @@ impl Settings {
                     info!("Settings saved to {:?}", path);
                 }
             }
-            Err(e) => {
-                info!("Failed to serialize settings: {}", e);
-            }
+            Err(e) => info!("Failed to serialize settings: {}", e),
         }
     }
 }
 
+/// Per-user audio settings (persisted by username).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserAudioSettings {
-    pub volume: f32, // 0.0 to 2.0 (0% to 200%)
+    pub volume: f32,
     pub is_muted: bool,
 }
 
