@@ -237,7 +237,7 @@ impl AudioOutput {
             }
 
             let high_wm = ring_capacity * 85 / 100;
-            const HOP: usize = 240;
+            const HOP: usize = 480;
             let mut hop_buf = vec![0.0f32; HOP];
             let mut next_tick = Instant::now();
 

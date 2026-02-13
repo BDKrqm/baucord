@@ -169,7 +169,7 @@ impl AudioInput {
         let config = StreamConfig {
             channels,
             sample_rate: cpal::SampleRate(sample_rate),
-            buffer_size: cpal::BufferSize::Fixed(480),
+            buffer_size: cpal::BufferSize::Default,
         };
 
         let mut ring_producer = self
@@ -304,20 +304,21 @@ impl AudioInput {
                     FRAME_SIZE
                 };
 
-                let available = ring_consumer.slots();
-                let to_read = available.min(target).min(read_buf.len());
+                let mut n_read = 0;
+                for i in 0..target.min(read_buf.len()) {
+                    match ring_consumer.pop() {
+                        Ok(s) => {
+                            read_buf[i] = s;
+                            n_read += 1;
+                        }
+                        Err(_) => break,
+                    }
+                }
 
-                if to_read == 0 {
+                if n_read == 0 {
                     thread::sleep(Duration::from_millis(1));
                     continue;
                 }
-
-                let chunk = ring_consumer.read_chunk(to_read).unwrap();
-                let (first, second) = chunk.as_slices();
-                read_buf[..first.len()].copy_from_slice(first);
-                read_buf[first.len()..first.len() + second.len()].copy_from_slice(second);
-                let n_read = first.len() + second.len();
-                chunk.commit_all();
 
                 // ── Resample to 48 kHz if needed ────────────────────────
                 let at_48k = if let Some(ref mut r) = resampler {
