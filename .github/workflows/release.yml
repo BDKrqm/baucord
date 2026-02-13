@@ -54,20 +54,19 @@ jobs:
       - name: Package (Unix)
         if: runner.os != 'Windows'
         run: |
-          mkdir -p staging
-          cp target/${{ matrix.target }}/release/client staging/
-          cp target/${{ matrix.target }}/release/server staging/
+          mkdir -p staging/baucord
+          cp target/${{ matrix.target }}/release/client staging/baucord/baucord
+          cp target/${{ matrix.target }}/release/server staging/baucord/dedicated-server
           cd staging
-          zip ../baucord-${{ matrix.suffix }}.zip *
-
+          zip -r ../baucord-${{ matrix.suffix }}.zip baucord/
       - name: Package (Windows)
         if: runner.os == 'Windows'
         run: |
-          mkdir staging
-          copy target\${{ matrix.target }}\release\client.exe staging\
-          copy target\${{ matrix.target }}\release\server.exe staging\
+          mkdir staging\baucord
+          copy target\${{ matrix.target }}\release\client.exe staging\baucord\baucord.exe
+          copy target\${{ matrix.target }}\release\server.exe staging\baucord\dedicated-server.exe
           cd staging
-          Compress-Archive -Path * -DestinationPath ..\baucord-${{ matrix.suffix }}.zip
+          Compress-Archive -Path baucord -DestinationPath ..\baucord-${{ matrix.suffix }}.zip
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
