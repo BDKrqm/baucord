@@ -401,6 +401,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "chrono",
+ "core",
  "cpal",
  "crossbeam",
  "crossbeam-channel",
@@ -418,7 +419,6 @@ dependencies = [
  "rubato",
  "serde",
  "serde_json",
- "voice-chat-core",
  "voice_activity_detector",
 ]
 
@@ -451,6 +451,23 @@ checksum = "ba5a308b75df32fe02788e748662718f03fde005016435c444eea572398219fd"
 dependencies = [
  "bytes",
  "memchr",
+]
+
+[[package]]
+name = "core"
+version = "0.3.0"
+dependencies = [
+ "cpal",
+ "crossbeam-channel",
+ "dasp_sample",
+ "earshot",
+ "env_logger",
+ "fltk",
+ "log",
+ "nnnoiseless",
+ "opus 0.3.1",
+ "rtrb",
+ "rubato",
 ]
 
 [[package]]
@@ -2405,23 +2422,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "voice-chat-core"
-version = "0.3.0"
-dependencies = [
- "cpal",
- "crossbeam-channel",
- "dasp_sample",
- "earshot",
- "env_logger",
- "fltk",
- "log",
- "nnnoiseless",
- "opus 0.3.1",
- "rtrb",
- "rubato",
-]
 
 [[package]]
 name = "voice_activity_detector"

@@ -2,7 +2,7 @@
 //!
 //! This shows the minimal wiring needed to get voice chat working.
 
-use voice_chat_core::{AudioPacket, PeerAudioSettings, VoiceChat, VoiceChatConfig};
+use core::{AudioPacket, PeerAudioSettings, VoiceChat, VoiceChatConfig};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();

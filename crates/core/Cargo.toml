@@ -1,8 +1,8 @@
 [package]
-name = "voice-chat-core"
+name = "core"
 version = "0.3.0"
 edition = "2021"
-description = "Low-latency voice chat engine: capture → denoise → VAD → Opus → network → decode → playback"
+description = "core components for baucord"
 
 [dependencies]
 # Audio I/O

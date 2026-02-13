@@ -11,7 +11,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-use voice_chat_core::{VoiceChat, VoiceChatConfig};
+use core::{VoiceChat, VoiceChatConfig};
 
 // ─── Dark theme ───────────────────────────────────────────────────────────
 

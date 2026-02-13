@@ -19,7 +19,7 @@ use crate::ui::chat::Chat;
 use crate::ui::messages::UiMessage;
 use crate::ui::sidebar::Sidebar;
 use crate::ui::theme::DarkTheme;
-use voice_chat_core::{AudioPacket, PeerAudioSettings, VoiceChat, VoiceChatConfig};
+use core::{AudioPacket, PeerAudioSettings, VoiceChat, VoiceChatConfig};
 
 // ── Public types ────────────────────────────────────────────────────────
 
@@ -124,7 +124,7 @@ pub struct App {
     settings_window_open: bool,
 
     // Shared stats handle (set after voice starts)
-    voice_stats: Option<Arc<voice_chat_core::AudioStats>>,
+    voice_stats: Option<Arc<core::AudioStats>>,
 
     // Thread handles
     network_thread: Option<thread::JoinHandle<()>>,

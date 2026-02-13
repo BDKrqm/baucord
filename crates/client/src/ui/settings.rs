@@ -9,7 +9,7 @@ use crate::ui::theme::DarkTheme;
 use fltk::{prelude::*, *};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use voice_chat_core::VoiceChat;
+use core::VoiceChat;
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
