@@ -1,5 +1,17 @@
 //! Audio input: capture → resample → denoise → AGC → gain → clamp → VAD → encode.
 //!
+//! Pipeline stages:
+//! 1. **Capture** (cpal callback): downmix to mono, soft clamp ±0.98
+//! 2. **Resample** (rubato): device rate → 48 kHz
+//! 3. **Energy gate**: cheap RMS check against user threshold — silent frames
+//!    skip all expensive processing below (denoise, AGC, earshot)
+//! 4. **Denoise** (nnnoiseless/RNNoise): noise suppression on raw mic signal
+//! 5. **AGC**: normalize clean signal to target RMS
+//! 6. **Gain**: user's input gain preference on clean, normalized audio
+//! 7. **Hard clamp** ±0.95: protect earshot from overflow
+//! 8. **VAD** (earshot): speech classifier rejects non-speech noise
+//! 9. **Encode** (Opus): speech frames sent to encoder thread
+//!
 //! Device compatibility strategy:
 //! - Use cpal's `default_input_config()` — accept whatever the OS/driver gives us
 //! - Resample to 48 kHz internally (rubato handles any rate)
@@ -61,9 +73,6 @@ pub struct AudioInput {
 
     // Stats
     stats: Arc<AudioStats>,
-
-    // Initial settings
-    initial_vad_threshold: f32,
 }
 
 impl AudioInput {
@@ -127,7 +136,6 @@ impl AudioInput {
             input_level: Arc::new(AtomicU32::new(0.0_f32.to_bits())),
             is_speaking: Arc::new(AtomicBool::new(false)),
             stats,
-            initial_vad_threshold: vad_threshold,
         })
     }
 
@@ -232,7 +240,6 @@ impl AudioInput {
         let is_muted = self.is_muted.clone();
         let vad_threshold_atomic = self.vad_threshold.clone();
         let noise_suppression = self.noise_suppression.clone();
-        let initial_threshold = self.initial_vad_threshold;
         let loopback_tx = self.loopback_tx.clone();
         let loopback_enabled = self.loopback_enabled.clone();
         let input_gain = self.input_gain.clone();
@@ -266,9 +273,8 @@ impl AudioInput {
             let mut denoiser = Denoiser::new();
             let mut agc = Agc::new(0.15);
 
-            // ── VAD ─────────────────────────────────────────────────────
-            let mut vad = VADProcessor::new(initial_threshold);
-            let mut last_threshold = initial_threshold;
+            // ── VAD (earshot speech classifier — energy gate is above) ──
+            let mut vad = VADProcessor::new();
 
             // ── Processing state ────────────────────────────────────────
             let mut read_buf = vec![0.0f32; 4096];
@@ -289,13 +295,6 @@ impl AudioInput {
                     agc.reset();
                     denoiser.reset();
                     continue;
-                }
-
-                // ── Check for threshold updates ─────────────────────────
-                let new_thr = f32::from_bits(vad_threshold_atomic.load(Ordering::Relaxed));
-                if (new_thr - last_threshold).abs() > f32::EPSILON {
-                    vad.set_threshold(new_thr);
-                    last_threshold = new_thr;
                 }
 
                 // ── Read from ring ──────────────────────────────────────
@@ -356,15 +355,68 @@ impl AudioInput {
                 while accumulator.len() >= FRAME_SIZE {
                     let mut frame: Vec<f32> = accumulator.drain(..FRAME_SIZE).collect();
 
-                    // ── Denoise (before AGC so RNNoise sees natural levels) ─
+                    // ── Energy gate (cheapest possible check) ────────────
+                    // Compute frame RMS and compare against threshold.
+                    // This is what the user's threshold slider controls.
+                    let frame_rms = {
+                        let sum_sq: f32 = frame.iter().map(|s| s * s).sum();
+                        (sum_sq / frame.len() as f32).sqrt()
+                    };
+
+                    let vad_on = vad_enabled.load(Ordering::Relaxed);
+                    let energy_pass = if vad_on {
+                        // Quick energy pre-check: if clearly below gate,
+                        // skip all expensive processing.
+                        let was_speaking = is_speaking_handle.load(Ordering::Relaxed);
+                        let energy_threshold = if was_speaking {
+                            // Lower threshold to stop (hysteresis) — don't
+                            // cut off speech tails prematurely.
+                            0.002
+                        } else {
+                            // Use the VAD threshold to determine minimum energy.
+                            let thr = f32::from_bits(vad_threshold_atomic.load(Ordering::Relaxed));
+                            (thr * 0.2).max(0.002)
+                        };
+                        frame_rms >= energy_threshold
+                    } else {
+                        true // VAD disabled — process everything
+                    };
+
+                    if !energy_pass {
+                        // ── Silence fast path ───────────────────────────
+                        // Skip denoise, AGC, earshot — save all the CPU.
+                        consecutive_silence += 1;
+
+                        // Update stats to show silence
+                        stats
+                            .denoised_level
+                            .store(0.0_f32.to_bits(), Ordering::Relaxed);
+                        stats
+                            .pipeline_level
+                            .store(0.0_f32.to_bits(), Ordering::Relaxed);
+                        is_speaking_handle.store(false, Ordering::Relaxed);
+                        stats.vad_active.store(false, Ordering::Relaxed);
+
+                        // Reset denoiser after prolonged silence so it doesn't
+                        // hold stale state. The warmed_up flag handles the
+                        // fade-in artifact on restart.
+                        if consecutive_silence == 50 {
+                            // 500ms
+                            denoiser.reset();
+                            agc.reset();
+                        }
+
+                        continue;
+                    }
+
+                    // ── Denoise (RNNoise sees raw mic signal at natural levels) ─
                     let denoise_on = noise_suppression.load(Ordering::Relaxed);
                     if denoise_on {
                         denoiser.process_frame(&mut frame);
                     }
                     stats.denoise_active.store(denoise_on, Ordering::Relaxed);
 
-                    // ── Post-denoise level (what the denoiser produced, before
-                    //    AGC/gain — use for VAD threshold visualization) ─────
+                    // ── Post-denoise level (before AGC/gain — for threshold viz) ─
                     {
                         let rms: f32 =
                             (frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32).sqrt();
@@ -385,12 +437,12 @@ impl AudioInput {
                         }
                     }
 
-                    // ── Hard clamp (protect earshot VAD from overflow) ───────
+                    // ── Hard clamp (protect earshot from overflow) ───────────
                     for s in frame.iter_mut() {
                         *s = s.clamp(-0.95, 0.95);
                     }
 
-                    // ── Pipeline output level (what VAD/encoder actually see) ─
+                    // ── Pipeline output level (what encoder actually sees) ───
                     {
                         let rms: f32 =
                             (frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32).sqrt();
@@ -407,12 +459,8 @@ impl AudioInput {
                         }
                     }
 
-                    // ── VAD gate ────────────────────────────────────────
-                    let is_speech = if vad_enabled.load(Ordering::Relaxed) {
-                        vad.process(&frame)
-                    } else {
-                        true
-                    };
+                    // ── VAD classification (earshot — rejects non-speech noise)
+                    let is_speech = if vad_on { vad.process(&frame) } else { true };
 
                     is_speaking_handle.store(is_speech, Ordering::Relaxed);
                     stats.vad_active.store(is_speech, Ordering::Relaxed);
