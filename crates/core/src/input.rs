@@ -114,8 +114,8 @@ impl AudioInput {
         );
 
         // Ring buffer: 100ms at device rate, mono (we downmix before pushing)
-        let ring_size = ((sample_rate as usize) * 100) / 1000;
-        let (ring_producer, ring_consumer) = RingBuffer::new(ring_size.max(4800));
+        let ring_size = ((sample_rate as usize) * 50) / 1000;
+        let (ring_producer, ring_consumer) = RingBuffer::new(ring_size.max(2400));
 
         Ok(Self {
             device,
@@ -169,7 +169,7 @@ impl AudioInput {
         let config = StreamConfig {
             channels,
             sample_rate: cpal::SampleRate(sample_rate),
-            buffer_size: cpal::BufferSize::Default,
+            buffer_size: cpal::BufferSize::Fixed(480),
         };
 
         let mut ring_producer = self
@@ -297,28 +297,27 @@ impl AudioInput {
                     continue;
                 }
 
-                // ── Read from ring ──────────────────────────────────────
+                // ── Read from ring ──────────────────────────────────
                 let target = if let Some(ref r) = resampler {
                     r.input_frames_next()
                 } else {
                     FRAME_SIZE
                 };
 
-                let mut n_read = 0;
-                for i in 0..target.min(read_buf.len()) {
-                    match ring_consumer.pop() {
-                        Ok(s) => {
-                            read_buf[i] = s;
-                            n_read += 1;
-                        }
-                        Err(_) => break,
-                    }
-                }
+                let available = ring_consumer.slots();
+                let to_read = available.min(target).min(read_buf.len());
 
-                if n_read == 0 {
-                    thread::sleep(Duration::from_millis(5));
+                if to_read == 0 {
+                    thread::sleep(Duration::from_millis(1));
                     continue;
                 }
+
+                let chunk = ring_consumer.read_chunk(to_read).unwrap();
+                let (first, second) = chunk.as_slices();
+                read_buf[..first.len()].copy_from_slice(first);
+                read_buf[first.len()..first.len() + second.len()].copy_from_slice(second);
+                let n_read = first.len() + second.len();
+                chunk.commit_all();
 
                 // ── Resample to 48 kHz if needed ────────────────────────
                 let at_48k = if let Some(ref mut r) = resampler {

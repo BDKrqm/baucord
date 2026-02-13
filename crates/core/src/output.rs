@@ -79,7 +79,7 @@ impl AudioOutput {
         );
 
         // Ring buffer: 200ms at device rate, mono
-        let ring_size = ((sample_rate as usize) * 200) / 1000;
+        let ring_size = ((sample_rate as usize) * 50) / 1000;
         let ring_size = ring_size.max(9600);
         let (ring_producer, ring_consumer) = RingBuffer::new(ring_size);
 
@@ -216,7 +216,7 @@ impl AudioOutput {
     ) -> thread::JoinHandle<()> {
         thread::spawn(move || {
             let mut jitter_buffer =
-                AdaptiveJitterBuffer::new(OPUS_SAMPLE_RATE as usize, 20, peer_settings);
+                AdaptiveJitterBuffer::new(OPUS_SAMPLE_RATE as usize, 10, peer_settings);
 
             // Build output resampler EAGERLY (not in the audio callback)
             let needs_resample = device_sample_rate != OPUS_SAMPLE_RATE;
@@ -237,7 +237,7 @@ impl AudioOutput {
             }
 
             let high_wm = ring_capacity * 85 / 100;
-            const HOP: usize = 480;
+            const HOP: usize = 240;
             let mut hop_buf = vec![0.0f32; HOP];
             let mut next_tick = Instant::now();
 
@@ -260,7 +260,7 @@ impl AudioOutput {
                 // Back-pressure: skip if ring is nearly full
                 let occupancy = ring_capacity - ring_producer.slots();
                 if occupancy > high_wm {
-                    next_tick += Duration::from_millis(10);
+                    next_tick += Duration::from_millis(5);
                     let now = Instant::now();
                     if next_tick > now {
                         thread::sleep(next_tick - now);

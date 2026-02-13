@@ -1,15 +1,14 @@
 // ui/settings.rs — Audio settings + live diagnostics panel.
 //
-// Modeled on the stats_dashboard example from voice-chat-core.
-// Controls send UiMessages; stats update at 8 Hz only while visible.
+// Controls send UiMessages; levels come from shared atomics written by
+// the voice thread. Meters update at 8 Hz only while the window is visible.
 
 use crate::settings::Settings;
 use crate::ui::messages::UiMessage;
 use crate::ui::theme::DarkTheme;
 use fltk::{prelude::*, *};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
-use core::VoiceChat;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -106,16 +105,6 @@ fn value_label(col: &mut group::Flex, text: &str) -> frame::Frame {
     lbl
 }
 
-fn stat_label(col: &mut group::Flex, text: &str) -> frame::Frame {
-    let mut lbl = frame::Frame::default()
-        .with_label(text)
-        .with_align(enums::Align::Left | enums::Align::Inside);
-    lbl.set_label_color(enums::Color::from_rgb(140, 200, 140)); // monospace green
-    lbl.set_label_size(11);
-    col.fixed(&lbl, 16);
-    lbl
-}
-
 fn make_vu_meter(
     col: &mut group::Flex,
     level_arc: Arc<AtomicU32>,
@@ -174,9 +163,13 @@ impl SettingsWindow {
         settings: Settings,
         input_devices: Vec<(String, bool)>,
         output_devices: Vec<(String, bool)>,
+        input_level: Arc<AtomicU32>,
+        output_level: Arc<AtomicU32>,
+        denoised_level: Arc<AtomicU32>,
+        speaking: Arc<AtomicBool>,
     ) {
         let mut wind = window::Window::default()
-            .with_size(560, 780)
+            .with_size(560, 710)
             .with_label("Settings");
         wind.set_color(DarkTheme::BG_PRIMARY);
         wind.make_resizable(false);
@@ -185,7 +178,7 @@ impl SettingsWindow {
         scroll.set_scrollbar_size(8);
 
         let mut col = group::Flex::default()
-            .with_size(530, 1100)
+            .with_size(530, 690)
             .with_pos(10, 10)
             .column();
         col.set_spacing(4);
@@ -224,8 +217,7 @@ impl SettingsWindow {
         section_header(&mut col, "\u{1f3a4}  INPUT");
 
         field_label(&mut col, "Capture Level");
-        let input_level_arc = Arc::new(AtomicU32::new(0));
-        let vu_input = make_vu_meter(&mut col, input_level_arc.clone(), 22, DarkTheme::SUCCESS);
+        let vu_input = make_vu_meter(&mut col, input_level.clone(), 22, DarkTheme::SUCCESS);
 
         field_label(&mut col, "Input Gain");
         let mut input_gain_slider = make_slider(
@@ -241,6 +233,21 @@ impl SettingsWindow {
             &format!("Gain: {}%", (settings.input_gain * 100.0) as i32),
         );
 
+        // Test Microphone button
+        let mut test_mic_btn = button::Button::default().with_label("\u{1f3a4}  Test Microphone");
+        col.fixed(&test_mic_btn, 30);
+        test_mic_btn.set_color(DarkTheme::BG_TERTIARY);
+        test_mic_btn.set_label_color(DarkTheme::TEXT_PRIMARY);
+        test_mic_btn.set_frame(enums::FrameType::FlatBox);
+        test_mic_btn.set_label_size(11);
+
+        let mut test_mic_info = frame::Frame::default()
+            .with_label("Listen to your own mic (others won't hear you)")
+            .with_align(enums::Align::Left | enums::Align::Inside);
+        test_mic_info.set_label_color(DarkTheme::TEXT_MUTED);
+        test_mic_info.set_label_size(10);
+        col.fixed(&test_mic_info, 14);
+
         separator(&mut col);
 
         // ════════════════════════════════════════════════════════════════
@@ -249,12 +256,11 @@ impl SettingsWindow {
 
         section_header(&mut col, "\u{1f50a}  OUTPUT");
 
-        let output_level_arc = Arc::new(AtomicU32::new(0));
         let vu_output = make_vu_meter(
             &mut col,
-            output_level_arc.clone(),
+            output_level.clone(),
             22,
-            enums::Color::from_rgb(56, 189, 248), // cyan
+            enums::Color::from_rgb(56, 189, 248),
         );
 
         field_label(&mut col, "Master Volume");
@@ -279,21 +285,16 @@ impl SettingsWindow {
 
         section_header(&mut col, "\u{26a1}  VOICE ACTIVATION");
 
-        let mut speaking_lbl = frame::Frame::default()
-            .with_label("\u{26ab}  Not transmitting")
-            .with_align(enums::Align::Left | enums::Align::Inside);
-        speaking_lbl.set_label_color(DarkTheme::TEXT_MUTED);
-        speaking_lbl.set_label_size(12);
-        col.fixed(&speaking_lbl, 22);
-
-        field_label(&mut col, "Denoised Level vs Threshold");
+        field_label(
+            &mut col,
+            "Select when to activate the microphone based on noise level",
+        );
 
         // VAD meter with threshold line
-        let denoised_level_arc = Arc::new(AtomicU32::new(0));
         let threshold_rc = std::rc::Rc::new(std::cell::RefCell::new(settings.vad_threshold));
 
         let threshold_draw = threshold_rc.clone();
-        let level_draw = denoised_level_arc.clone();
+        let level_draw = denoised_level.clone();
         let mut vu_vad = frame::Frame::default();
         vu_vad.set_frame(enums::FrameType::BorderBox);
         vu_vad.set_color(DarkTheme::BG_INPUT);
@@ -327,7 +328,7 @@ impl SettingsWindow {
             draw::draw_rect(f.x(), f.y(), f.w(), f.h());
         });
 
-        field_label(&mut col, "Activation Threshold");
+        field_label(&mut col, "Activation Sensitivity");
         let mut vad_slider = make_slider(
             &mut col,
             0.01,
@@ -339,34 +340,7 @@ impl SettingsWindow {
         let mut vad_sens_lbl =
             value_label(&mut col, &format_sensitivity(settings.vad_threshold as f64));
 
-        let noise_toggle = styled_check(
-            &mut col,
-            "Noise suppression (RNNoise)",
-            settings.noise_suppression,
-        );
-        let vad_toggle = styled_check(&mut col, "Voice activation (VAD)", true);
         let mute_on_start_toggle = styled_check(&mut col, "Start muted", settings.mute_on_start);
-        let loopback_toggle = styled_check(
-            &mut col,
-            "Monitor input (loopback)",
-            settings.loopback_enabled,
-        );
-
-        separator(&mut col);
-
-        // ════════════════════════════════════════════════════════════════
-        //  LIVE STATS
-        // ════════════════════════════════════════════════════════════════
-
-        section_header(&mut col, "\u{1f4ca}  LIVE STATS");
-
-        let stat_codec = stat_label(&mut col, "Codec: --");
-        let stat_bw = stat_label(&mut col, "Bandwidth: --");
-        let stat_packets = stat_label(&mut col, "Packets: --");
-        let stat_loss = stat_label(&mut col, "Loss: --");
-        let stat_recovery = stat_label(&mut col, "Recovery: --");
-        let stat_buffers = stat_label(&mut col, "Buffers: --");
-        let stat_jitter = stat_label(&mut col, "Jitter: --");
 
         separator(&mut col);
 
@@ -383,7 +357,7 @@ impl SettingsWindow {
         reset_btn.set_label_color(DarkTheme::TEXT_PRIMARY);
         reset_btn.set_frame(enums::FrameType::FlatBox);
 
-        let mut save_btn = button::Button::default().with_label("Save & Close");
+        let mut save_btn = button::Button::default().with_label("Save and Close");
         save_btn.set_color(DarkTheme::SUCCESS);
         save_btn.set_label_color(enums::Color::White);
         save_btn.set_frame(enums::FrameType::FlatBox);
@@ -440,6 +414,30 @@ impl SettingsWindow {
             s.send(UiMessage::SetOutputGain(val));
         });
 
+        // Test Microphone toggle
+        let s = sender;
+        let testing = std::rc::Rc::new(std::cell::RefCell::new(false));
+        let testing_cb = testing.clone();
+        let mut info_lbl = test_mic_info.clone();
+        test_mic_btn.set_callback(move |btn| {
+            let is_testing = !*testing_cb.borrow();
+            *testing_cb.borrow_mut() = is_testing;
+
+            if is_testing {
+                btn.set_label("\u{1f534}  Stop Testing");
+                btn.set_color(DarkTheme::DANGER);
+                info_lbl.set_label("Listening to your mic... others can't hear you");
+                info_lbl.set_label_color(DarkTheme::WARNING);
+            } else {
+                btn.set_label("\u{1f3a4}  Test Microphone");
+                btn.set_color(DarkTheme::BG_TERTIARY);
+                info_lbl.set_label("Listen to your own mic (others won't hear you)");
+                info_lbl.set_label_color(DarkTheme::TEXT_MUTED);
+            }
+
+            s.send(UiMessage::TestMicrophone(is_testing));
+        });
+
         // VAD slider
         let s = sender;
         let threshold_update = threshold_rc.clone();
@@ -453,35 +451,28 @@ impl SettingsWindow {
             s.send(UiMessage::SetVadThreshold(val));
         });
 
-        // Toggles
+        // Window close — stop test mic if active
         let s = sender;
-        noise_toggle.clone().set_callback(move |b| {
-            s.send(UiMessage::SetNoiseSuppression(b.is_checked()));
-        });
-
-        let s = sender;
-        vad_toggle.clone().set_callback(move |b| {
-            s.send(UiMessage::SetVadEnabled(b.is_checked()));
-        });
-
-        let s = sender;
-        loopback_toggle.clone().set_callback(move |b| {
-            s.send(UiMessage::SetLoopback(b.is_checked()));
-        });
-
-        // Window close
-        let s = sender;
+        let testing_close = testing.clone();
         wind.set_callback(move |w| {
             if app::event() == enums::Event::Close {
+                // Stop test mic if it was active
+                if *testing_close.borrow() {
+                    s.send(UiMessage::TestMicrophone(false));
+                }
                 s.send(UiMessage::SettingsWindowClosed);
                 w.hide();
             }
         });
 
-        // Save & Close
+        // Save & Close — stop test mic if active
         let s = sender;
         let mut wind_clone = wind.clone();
+        let testing_save = testing.clone();
         save_btn.set_callback(move |_| {
+            if *testing_save.borrow() {
+                s.send(UiMessage::TestMicrophone(false));
+            }
             s.send(UiMessage::SaveSettings);
             s.send(UiMessage::SettingsWindowClosed);
             wind_clone.hide();
@@ -492,8 +483,6 @@ impl SettingsWindow {
         let mut ig = input_gain_slider.clone();
         let mut og = output_gain_slider.clone();
         let mut vs = vad_slider.clone();
-        let mut nt = noise_toggle.clone();
-        let mut lb = loopback_toggle.clone();
         let mut ms = mute_on_start_toggle.clone();
         let threshold_reset = threshold_rc.clone();
         let mut vu_reset = vu_vad.clone();
@@ -505,8 +494,6 @@ impl SettingsWindow {
             og.do_callback();
             vs.set_value(d.vad_threshold as f64);
             vs.do_callback();
-            nt.set_checked(d.noise_suppression);
-            lb.set_checked(d.loopback_enabled);
             ms.set_checked(d.mute_on_start);
             *threshold_reset.borrow_mut() = d.vad_threshold;
             vu_reset.redraw();
@@ -514,33 +501,25 @@ impl SettingsWindow {
         });
 
         // ════════════════════════════════════════════════════════════════
-        //  TIMER: 8 Hz stats update (only while window is visible)
+        //  TIMER: 8 Hz — update VU meters + speaking indicator
         // ════════════════════════════════════════════════════════════════
-
-        // We read stats via the static VoiceChat methods where possible,
-        // but for live levels we need the atomic handles. Since we can't
-        // get those through the message system, we'll use placeholder arcs
-        // and update them from the timer. The VU meters will show 0 until
-        // we get a way to pass the stats handle — this is a known limitation
-        // for now. The stats text labels work via polling stats_summary.
 
         let mut vu_in_t = vu_input.clone();
         let mut vu_out_t = vu_output.clone();
         let mut vu_vad_t = vu_vad.clone();
-        let mut speak_t = speaking_lbl.clone();
-        let mut s_codec_t = stat_codec.clone();
-        let mut s_bw_t = stat_bw.clone();
-        let mut s_pkt_t = stat_packets.clone();
-        let mut s_loss_t = stat_loss.clone();
-        let mut s_rec_t = stat_recovery.clone();
-        let mut s_buf_t = stat_buffers.clone();
-        let mut s_jit_t = stat_jitter.clone();
+        let speaking_timer = speaking.clone();
+        let prev_speak = std::rc::Rc::new(std::cell::RefCell::new(false));
 
         app::add_timeout3(0.125, move |handle| {
-            // Redraw VU meters (they read from their arcs)
             vu_in_t.redraw();
             vu_out_t.redraw();
             vu_vad_t.redraw();
+
+            // Speaking indicator (edge-triggered)
+            let is_speaking = speaking_timer.load(Ordering::Relaxed);
+            if is_speaking != *prev_speak.borrow() {
+                *prev_speak.borrow_mut() = is_speaking;
+            }
 
             app::repeat_timeout3(0.125, handle);
         });

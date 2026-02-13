@@ -12,12 +12,10 @@ pub struct Settings {
 
     // Voice
     pub vad_threshold: f32,
-    pub noise_suppression: bool,
     pub input_gain: f32,
     pub output_gain: f32,
 
     // Behaviour
-    pub loopback_enabled: bool,
     pub mute_on_start: bool,
 
     // Window
@@ -38,12 +36,10 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             nickname: String::new(),
-            last_server: "127.0.0.1:5000".to_string(),
+            last_server: "64.176.16.18:5000".to_string(),
             vad_threshold: 0.15,
-            noise_suppression: true,
             input_gain: 1.0,
             output_gain: 1.0,
-            loopback_enabled: false,
             mute_on_start: false,
             window_width: 1000,
             window_height: 700,
