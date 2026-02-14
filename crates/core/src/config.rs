@@ -61,7 +61,7 @@ impl Default for VoiceChatConfig {
             vad_threshold: 0.15,
             noise_suppression: true,
             input_gain: 1.0,
-            output_gain: 1.0,
+            output_gain: 0.4,
         }
     }
 }

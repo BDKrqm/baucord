@@ -96,14 +96,12 @@ impl VoiceChat {
         // Below 5, quality drops noticeably on sibilants and fricatives.
         encoder.set_complexity(5)?;
         //
-        // Bandwidth: Wideband (50-8000 Hz) is the right choice for voice.
-        // Fullband (50-20000 Hz) wastes bits encoding frequencies that
-        // barely exist in human speech. Narrowband (50-4000 Hz) sounds
-        // tinny and telephonic. With VBR, Opus may adaptively use
-        // superwideband when the signal has significant high-frequency
-        // content, but Wideband as the target keeps the average bitrate
-        // reasonable.
-        encoder.set_bandwidth(opus::Bandwidth::Wideband)?;
+        // Bandwidth: Superwideband (50-12000 Hz) captures the clarity
+        // and "air" in sibilants (s, t, sh) that Wideband (50-8000 Hz)
+        // misses, without wasting bits on the 12-20 kHz range that
+        // barely matters for voice. At 24 kbps VBR, Opus handles this
+        // well since VBR allocates bits where they matter.
+        encoder.set_bandwidth(opus::Bandwidth::Superwideband)?;
         //
         // FEC: embeds a low-bitrate redundant copy of the PREVIOUS frame
         // into the current packet. When packet N is lost but packet N+1
@@ -129,10 +127,10 @@ impl VoiceChat {
             output: None,
             encoder: Arc::new(Mutex::new(encoder)),
             decoders: Arc::new(Mutex::new(HashMap::new())),
-            audio_to_encoder: bounded(32),
-            encoder_to_network: bounded(64),
-            network_to_decoder: bounded(128),
-            decoder_to_audio: bounded(32),
+            audio_to_encoder: bounded(4),
+            encoder_to_network: bounded(8),
+            network_to_decoder: bounded(16),
+            decoder_to_audio: bounded(4),
             encoder_thread: None,
             decoder_thread: None,
             user_settings: Arc::new(Mutex::new(HashMap::new())),
@@ -212,13 +210,8 @@ impl VoiceChat {
                     continue;
                 }
 
-                let samples_i16: Vec<i16> = samples
-                    .iter()
-                    .map(|&x| (x.clamp(-1.0, 1.0) * 32767.0) as i16)
-                    .collect();
-
                 let encode_start = Instant::now();
-                match encoder.lock().unwrap().encode(&samples_i16, &mut scratch) {
+                match encoder.lock().unwrap().encode_float(&samples, &mut scratch) {
                     Ok(size) => {
                         let encode_us = encode_start.elapsed().as_micros() as u64;
                         stats.last_encode_us.store(encode_us, Ordering::Relaxed);
@@ -254,7 +247,7 @@ impl VoiceChat {
         let stats = self.stats.clone();
 
         self.decoder_thread = Some(thread::spawn(move || {
-            let mut frame_buffer = vec![0i16; FRAME_SIZE * 2];
+            let mut frame_buffer = vec![0.0f32; FRAME_SIZE * 2];
             let mut last_seq: HashMap<u64, u32> = HashMap::new();
 
             info!("🔊 Decoder thread started");
@@ -302,13 +295,9 @@ impl VoiceChat {
                     // PLC for frames 1..N-1 (all but the last gap frame)
                     if gap > 1 {
                         for i in 0..(gap - 1) {
-                            match decoder.decode(&[], &mut frame_buffer, false) {
+                            match decoder.decode_float(&[], &mut frame_buffer, false) {
                                 Ok(n) => {
-                                    let samples: Vec<f32> = frame_buffer[..n]
-                                        .iter()
-                                        .map(|&x| x as f32 / 32768.0)
-                                        .collect();
-                                    let _ = tx.send((ssrc, samples));
+                                    let _ = tx.send((ssrc, frame_buffer[..n].to_vec()));
                                     stats.plc_frames.fetch_add(1, Ordering::Relaxed);
                                 }
                                 Err(e) => {
@@ -322,23 +311,15 @@ impl VoiceChat {
                     }
 
                     // FEC for the last missing frame (recovered from current packet)
-                    match decoder.decode(&packet.opus_data, &mut frame_buffer, true) {
+                    match decoder.decode_float(&packet.opus_data, &mut frame_buffer, true) {
                         Ok(n) => {
-                            let samples: Vec<f32> = frame_buffer[..n]
-                                .iter()
-                                .map(|&x| x as f32 / 32768.0)
-                                .collect();
-                            let _ = tx.send((ssrc, samples));
+                            let _ = tx.send((ssrc, frame_buffer[..n].to_vec()));
                             stats.fec_recoveries.fetch_add(1, Ordering::Relaxed);
                         }
                         Err(_) => {
                             // FEC data not available — fall back to PLC
-                            if let Ok(n) = decoder.decode(&[], &mut frame_buffer, false) {
-                                let samples: Vec<f32> = frame_buffer[..n]
-                                    .iter()
-                                    .map(|&x| x as f32 / 32768.0)
-                                    .collect();
-                                let _ = tx.send((ssrc, samples));
+                            if let Ok(n) = decoder.decode_float(&[], &mut frame_buffer, false) {
+                                let _ = tx.send((ssrc, frame_buffer[..n].to_vec()));
                                 stats.plc_frames.fetch_add(1, Ordering::Relaxed);
                             }
                         }
@@ -351,17 +332,13 @@ impl VoiceChat {
 
                 // ── Decode current packet normally ──────────────────────
                 let t0 = Instant::now();
-                match decoder.decode(&packet.opus_data, &mut frame_buffer, false) {
+                match decoder.decode_float(&packet.opus_data, &mut frame_buffer, false) {
                     Ok(n) => {
                         stats
                             .last_decode_us
                             .store(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
                         stats.record_packet_received(packet.opus_data.len());
-                        let samples: Vec<f32> = frame_buffer[..n]
-                            .iter()
-                            .map(|&x| x as f32 / 32768.0)
-                            .collect();
-                        if tx.send((ssrc, samples)).is_err() {
+                        if tx.send((ssrc, frame_buffer[..n].to_vec())).is_err() {
                             break;
                         }
                         last_seq.insert(ssrc, curr);
@@ -370,12 +347,8 @@ impl VoiceChat {
                         error!("Decode error for peer {}: {}", ssrc, e);
                         stats.decode_errors.fetch_add(1, Ordering::Relaxed);
                         // PLC fallback on decode failure
-                        if let Ok(n) = decoder.decode(&[], &mut frame_buffer, false) {
-                            let samples: Vec<f32> = frame_buffer[..n]
-                                .iter()
-                                .map(|&x| x as f32 / 32768.0)
-                                .collect();
-                            let _ = tx.send((ssrc, samples));
+                        if let Ok(n) = decoder.decode_float(&[], &mut frame_buffer, false) {
+                            let _ = tx.send((ssrc, frame_buffer[..n].to_vec()));
                             stats.plc_frames.fetch_add(1, Ordering::Relaxed);
                         }
                         last_seq.insert(ssrc, curr);
