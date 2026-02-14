@@ -1032,12 +1032,19 @@ impl App {
         }
     }
 
+    fn set_window_icon(wind: &mut window::Window) {
+    if let Ok(icon) = fltk::image::PngImage::from_data(include_bytes!("../assets/icon.png")) {
+        wind.set_icon(Some(icon));
+    }
+}
     fn show_connection_screen(&mut self) {
         let mut wind = window::Window::default()
             .with_size(600, 480)
             .with_label("baucord - Connect");
         wind.make_resizable(false);
         DarkTheme::style_window(&mut wind);
+        Self::set_window_icon(&mut wind);
+
 
         let mut col = group::Flex::default_fill().column();
         col.set_margins(20, 20, 20, 20);
@@ -1117,6 +1124,8 @@ impl App {
             .with_label("baucord");
         wind.make_resizable(true);
         DarkTheme::style_window(&mut wind);
+        Self::set_window_icon(&mut wind);
+
 
         if let (Some(x), Some(y)) = (self.settings.window_x, self.settings.window_y) {
             wind.set_pos(x, y);
