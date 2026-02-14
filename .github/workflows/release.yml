@@ -92,3 +92,14 @@ jobs:
         with:
           tag_name: ${{ github.event.release.tag_name }}
           files: artifacts/*.zip
+
+      - name: Upload to R2/S3
+        uses: jakejarvis/s3-sync-action@v0.5.1
+        with:
+          args: --acl public-read
+        env:
+          AWS_S3_BUCKET: baucord
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_S3_ENDPOINT: https://6bcc35de83e46a771896026baf11b4ac.r2.cloudflarestorage.com
+          SOURCE_DIR: artifacts
