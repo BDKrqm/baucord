@@ -20,7 +20,8 @@ use crossbeam_channel::{Sender, TrySendError};
 use dasp_sample::{FromSample, Sample as DaspSample, ToSample};
 use log::{error, info, warn};
 use rtrb::{Consumer, Producer, RingBuffer};
-use rubato::{Resampler, SincFixedIn};
+use rubato::{Async, Resampler};
+use audioadapter_buffers::direct::SequentialSliceOfVecs;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -230,12 +231,15 @@ impl AudioInput {
         let loopback_tx = self.loopback_tx.clone();
         let loopback_enabled = self.loopback_enabled.clone();
         let input_gain = self.input_gain.clone();
+        let vad_threshold = self.vad_threshold.clone();
+
 
         self.worker_thread = Some(thread::spawn(move || {
             // ── Resampler (if device rate ≠ 48 kHz) ─────────────────────
             let needs_resample = device_sample_rate != 48000;
-            let mut resampler: Option<SincFixedIn<f32>> = None;
+            let mut resampler: Option<Async<f32>> = None;
             let mut resampler_input: Vec<Vec<f32>> = Vec::new();
+            let mut resampler_output: Vec<Vec<f32>> = Vec::new();
             let mut resampler_accum = Vec::with_capacity(2048);
 
             if needs_resample {
@@ -247,6 +251,7 @@ impl AudioInput {
                 match build_input_resampler(device_sample_rate, chunk) {
                     Ok(r) => {
                         resampler_input = vec![Vec::with_capacity(r.input_frames_next())];
+                        resampler_output = vec![vec![0.0f32; r.output_frames_max()]];
                         resampler = Some(r);
                     }
                     Err(e) => {
@@ -326,8 +331,16 @@ impl AudioInput {
                         resampler_input[0].extend_from_slice(&resampler_accum[..n]);
                         resampler_accum.drain(..n);
 
-                        match r.process(&resampler_input, None) {
-                            Ok(out) if !out.is_empty() && !out[0].is_empty() => out[0].clone(),
+                        let expected = r.output_frames_next();
+                        resampler_output[0].resize(expected, 0.0);
+
+                       let in_adapter = SequentialSliceOfVecs::new(&resampler_input, 1, n).unwrap();
+let mut out_adapter = SequentialSliceOfVecs::new_mut(&mut resampler_output, 1, expected).unwrap(); 
+
+                        match r.process_into_buffer(&in_adapter, &mut out_adapter, None) {
+                            Ok((_in_len, out_len)) if out_len > 0 => {
+                                resampler_output[0][..out_len].to_vec()
+                            }
                             Ok(_) => Vec::new(),
                             Err(e) => {
                                 error!("Resampler error: {}", e);
@@ -403,11 +416,19 @@ impl AudioInput {
                     }
 
                     // ── VAD gate ────────────────────────────────────────
-                    let is_speech = if vad_enabled.load(Ordering::Relaxed) {
-                        vad.process(&frame)
-                    } else {
-                        true
-                    };
+                   let is_speech = if vad_enabled.load(Ordering::Relaxed) {
+    let rms = (frame.iter().map(|s| s * s).sum::<f32>()
+        / frame.len() as f32)
+        .sqrt();
+    let thresh = f32::from_bits(vad_threshold.load(Ordering::Relaxed));
+    if rms < thresh {
+        false
+    } else {
+        vad.process(&frame)
+    }
+} else {
+    true
+}; 
 
                     is_speaking_handle.store(is_speech, Ordering::Relaxed);
                     stats.vad_active.store(is_speech, Ordering::Relaxed);

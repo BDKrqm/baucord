@@ -15,7 +15,8 @@ use crossbeam_channel::Receiver;
 use dasp_sample::{FromSample, Sample as DaspSample, ToSample};
 use log::{error, info};
 use rtrb::{Consumer, Producer, RingBuffer};
-use rubato::{Resampler, SincFixedOut};
+use rubato::{Async, Resampler};
+use audioadapter_buffers::direct::SequentialSliceOfVecs;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -220,7 +221,7 @@ impl AudioOutput {
 
             // Build output resampler EAGERLY (not in the audio callback)
             let needs_resample = device_sample_rate != OPUS_SAMPLE_RATE;
-            let mut resampler: Option<SincFixedOut<f32>> = None;
+            let mut resampler: Option<Async<f32>> = None;
             let mut resampler_input: Vec<Vec<f32>> = Vec::new();
             let mut resampler_output: Vec<Vec<f32>> = Vec::new();
 
@@ -295,7 +296,10 @@ impl AudioOutput {
                     let expected = r.output_frames_next();
                     resampler_output[0].resize(expected, 0.0);
 
-                    match r.process_into_buffer(&resampler_input, &mut resampler_output, None) {
+                   let in_adapter = SequentialSliceOfVecs::new(&resampler_input, 1, needed).unwrap();
+let mut out_adapter = SequentialSliceOfVecs::new_mut(&mut resampler_output, 1, expected).unwrap(); 
+
+                    match r.process_into_buffer(&in_adapter, &mut out_adapter, None) {
                         Ok((_in_len, _out_len)) => {
                             for &s in &resampler_output[0][..expected] {
                                 if ring_producer.push(s).is_err() {

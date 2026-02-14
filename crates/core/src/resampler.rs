@@ -5,15 +5,15 @@
 
 use log::info;
 use rubato::{
-    SincFixedIn, SincFixedOut, SincInterpolationParameters,
-    SincInterpolationType, Resampler, WindowFunction,
+    Async, FixedAsync, Resampler, SincInterpolationParameters,
+    SincInterpolationType, WindowFunction,
 };
 
-/// Build a SincFixedIn resampler for input (device rate → 48 kHz).
+/// Build an async resampler with fixed input size for input (device rate → 48 kHz).
 pub fn build_input_resampler(
     input_rate: u32,
     chunk_frames: usize,
-) -> Result<SincFixedIn<f32>, Box<dyn std::error::Error>> {
+) -> Result<Async<f32>, Box<dyn std::error::Error>> {
     let ratio = 48000.0 / input_rate as f64;
 
     let params = SincInterpolationParameters {
@@ -24,7 +24,14 @@ pub fn build_input_resampler(
         window: WindowFunction::BlackmanHarris2,
     };
 
-    let resampler = SincFixedIn::new(ratio, 1.0, params, chunk_frames, 1)?;
+    let resampler = Async::<f32>::new_sinc(
+        ratio,
+        1.0, // max_resample_ratio_relative — no drift compensation needed
+        &params,
+        chunk_frames,
+        1, // mono
+        FixedAsync::Input,
+    )?;
 
     info!(
         "Input resampler: {}Hz → 48kHz (ratio {:.4}), chunk={}",
@@ -34,11 +41,11 @@ pub fn build_input_resampler(
     Ok(resampler)
 }
 
-/// Build a SincFixedOut resampler for output (48 kHz → device rate).
+/// Build an async resampler with fixed output size for output (48 kHz → device rate).
 pub fn build_output_resampler(
     device_rate: u32,
     chunk_frames: usize,
-) -> Result<SincFixedOut<f32>, Box<dyn std::error::Error>> {
+) -> Result<Async<f32>, Box<dyn std::error::Error>> {
     let ratio = device_rate as f64 / 48000.0;
 
     let params = SincInterpolationParameters {
@@ -49,7 +56,14 @@ pub fn build_output_resampler(
         window: WindowFunction::BlackmanHarris2,
     };
 
-    let resampler = SincFixedOut::new(ratio, 1.0, params, chunk_frames, 1)?;
+    let resampler = Async::<f32>::new_sinc(
+        ratio,
+        1.0, // max_resample_ratio_relative
+        &params,
+        chunk_frames,
+        1, // mono
+        FixedAsync::Output,
+    )?;
 
     info!(
         "Output resampler: 48kHz → {}Hz (ratio {:.4}), chunk={}",

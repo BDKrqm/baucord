@@ -78,7 +78,7 @@ impl AdaptiveJitterBuffer {
         Self {
             sample_rate,
             target_samples: (initial_target_ms * sample_rate) / 1000,
-            min_samples: (10 * sample_rate) / 1000,
+            min_samples: (2 * sample_rate) / 1000,
             max_samples: (30 * sample_rate) / 1000,
             buffers: HashMap::new(),
             peer_settings,

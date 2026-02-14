@@ -1,5 +1,5 @@
 use bincode::Options;
-use log::{info, warn};
+use log::{debug, info, warn};
 use renet::{ChannelConfig, ClientId, ConnectionConfig, RenetServer, SendType, ServerEvent};
 use renet_netcode::{
     NETCODE_USER_DATA_BYTES, NetcodeServerTransport, ServerAuthentication, ServerConfig,
@@ -69,17 +69,17 @@ const MAX_FRAMES_PER_PACKET: usize = 2;
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct VoiceHeader {
-    version: u8,        // NEW: Protocol version byte
-    _reserved: [u8; 3], // NEW: Padding for alignment
-    client_id: u64,     // sender id
-    seq: u32,           // frame counter
-    ts_48k: u32,        // 48kHz timestamp
-    frame_count: u8,    // NEW: Number of frames in packet
-    _padding: [u8; 3],  // NEW: Alignment padding
+    version: u8,
+    _reserved: [u8; 3],
+    client_id: u64,
+    seq: u32,
+    ts_48k: u32,
+    frame_count: u8,
+    _padding: [u8; 3],
 }
 
 impl VoiceHeader {
-    const SIZE: usize = 24; // CHANGED: from 16 to 24 bytes
+    const SIZE: usize = 24;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,8 +152,11 @@ struct ServerStats {
 
 impl ChatServer {
     pub fn new(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
-        // [Keep existing initialization code]
+        // Set the socket to non-blocking so recv doesn't stall the loop.
+        // renet_netcode handles the actual I/O, but the underlying socket
+        // must be non-blocking for our tight poll loop to work.
         let socket = UdpSocket::bind(config.socket_addr())?;
+        socket.set_nonblocking(true)?;
         let public_addr = socket.local_addr()?;
 
         info!("{} starting on {}", config.server.name, public_addr);
@@ -184,7 +187,7 @@ impl ChatServer {
             last_updated: Instant::now(),
             last_stats: Instant::now(),
             stats: ServerStats::default(),
-            voice_stats: VoiceStats::default(), // CHANGED
+            voice_stats: VoiceStats::default(),
         })
     }
 
@@ -193,19 +196,17 @@ impl ChatServer {
         config.client_channels_config.clear();
         config.server_channels_config.clear();
 
-        // ADD THIS - RELIABLE CHANNEL CONFIG WITH RESEND TIME
         let reliable_channel = ChannelConfig {
             channel_id: channels.reliable_channel_id,
-            max_memory_usage_bytes: 1024 * 1024, // 1MB for chat/control
+            max_memory_usage_bytes: 1024 * 1024,
             send_type: SendType::ReliableOrdered {
-                resend_time: Duration::from_millis(200), // Resend after 200ms
+                resend_time: Duration::from_millis(200),
             },
         };
 
         config.client_channels_config.push(reliable_channel.clone());
         config.server_channels_config.push(reliable_channel);
 
-        // EXISTING VOICE CHANNEL
         let voice_channel = ChannelConfig {
             channel_id: channels.voice_channel_id,
             max_memory_usage_bytes: channels.voice_buffer_size_mb * 1024 * 1024,
@@ -218,6 +219,10 @@ impl ChatServer {
         config
     }
 
+    /// Drive one tick of the server: receive, process, send.
+    ///
+    /// The caller controls the loop cadence. For lowest voice latency,
+    /// call this as fast as possible (≤1 ms sleeps or spin-poll).
     pub fn update(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let now = Instant::now();
         let duration = now - self.last_updated;
@@ -267,7 +272,6 @@ impl ChatServer {
         info!("{} ({}) connected", username, client_id);
         self.usernames.insert(client_id, username.clone());
 
-        // Send init message with current users list and greeting to the new client
         let init_message = ServerMessage::InitClient {
             usernames: self.usernames.clone(),
             server_name: self.config.server.name.clone(),
@@ -281,7 +285,6 @@ impl ChatServer {
         self.server
             .send_message(client_id, self.config.channels.reliable_channel_id, encoded);
 
-        // Notify all OTHER clients about the new connection
         let connected_msg = ServerMessage::ClientConnected {
             client_id,
             username: username.clone(),
@@ -370,9 +373,8 @@ impl ChatServer {
                 self.stats.bytes_received += message.len() as u64;
                 self.voice_stats.packets_received += 1;
 
-                // STEP 1: Validate packet size
+                // Validate packet size
                 if message.len() < VoiceHeader::SIZE + 3 {
-                    // header + min frame
                     self.voice_stats.packets_dropped_malformed += 1;
                     continue;
                 }
@@ -387,44 +389,45 @@ impl ChatServer {
                     continue;
                 }
 
-                // STEP 2: Validate protocol version
+                // Validate protocol version
                 if message[0] != VOICE_PROTOCOL_VERSION {
                     self.voice_stats.packets_dropped_version += 1;
                     warn!("Invalid protocol version {} from {}", message[0], client_id);
                     continue;
                 }
 
-                // STEP 3: Parse and validate header
+                // Parse header
                 let mut off = 0;
-                let version = message[off];
+                let _version = message[off];
                 off += 4; // version + reserved
 
                 let hdr_client_id = u64::from_le_bytes(message[off..off + 8].try_into().unwrap());
                 off += 8;
-                let seq = u32::from_le_bytes(message[off..off + 4].try_into().unwrap());
+                let _seq = u32::from_le_bytes(message[off..off + 4].try_into().unwrap());
                 off += 4;
-                let ts_48k = u32::from_le_bytes(message[off..off + 4].try_into().unwrap());
+                let _ts_48k = u32::from_le_bytes(message[off..off + 4].try_into().unwrap());
                 off += 4;
                 let frame_count = message[off] as usize;
                 off += 4; // frame_count + padding
 
-                // STEP 4: Validate frame count
+                // Validate frame count
                 if frame_count == 0 || frame_count > MAX_FRAMES_PER_PACKET {
                     self.voice_stats.packets_dropped_malformed += 1;
                     warn!("Invalid frame count {} from {}", frame_count, client_id);
                     continue;
                 }
 
-                // Optional: Verify client_id matches sender
+                // Client ID mismatch is expected during fast reconnects —
+                // the authenticated transport already guarantees the sender,
+                // so this is purely informational.
                 if hdr_client_id != *client_id {
-                    // Could drop for anti-spoofing, but for now just warn
-                    warn!(
-                        "Client ID mismatch: header {} != sender {}",
+                    debug!(
+                        "Header client_id {} != sender {} (stale session?)",
                         hdr_client_id, client_id
                     );
                 }
 
-                // STEP 5: Validate all frame lengths
+                // Validate all frame lengths
                 let mut valid = true;
                 let mut validation_offset = off;
 
@@ -441,9 +444,8 @@ impl ChatServer {
                     ) as usize;
                     validation_offset += 2;
 
-                    // Validate individual frame size
                     if len == 0 || len > 512 {
-                        warn!("Invalid frame {} size: {} bytes", i, len);
+                        debug!("Invalid frame {} size: {} bytes from {}", i, len, client_id);
                         valid = false;
                         break;
                     }
@@ -461,39 +463,36 @@ impl ChatServer {
                     continue;
                 }
 
-                // Should have consumed exactly the entire packet
                 if validation_offset != message.len() {
                     self.voice_stats.packets_dropped_malformed += 1;
-                    warn!(
-                        "Packet size mismatch: expected {}, got {}",
+                    debug!(
+                        "Trailing bytes: expected {}, got {} from {}",
                         validation_offset,
-                        message.len()
+                        message.len(),
+                        client_id,
                     );
                     continue;
                 }
 
-                // STEP 6: Update statistics
+                // Stats (EMA, not running mean)
                 self.voice_stats.total_frames += frame_count as u64;
-                let packet_count = self.voice_stats.packets_forwarded as f32 + 1.0;
-                self.voice_stats.avg_frames_per_packet = (self.voice_stats.avg_frames_per_packet
-                    * (packet_count - 1.0)
-                    + frame_count as f32)
-                    / packet_count;
+                self.voice_stats.avg_frames_per_packet =
+                    self.voice_stats.avg_frames_per_packet * 0.95 + frame_count as f32 * 0.05;
 
-                // STEP 7: PASSTHROUGH - Forward raw bytes immediately
-                // No modification, no re-encoding, no rebundling
+                // Forward raw bytes — renet takes ownership via into(),
+                // so we hand off the Bytes directly. No clone needed:
+                // receive_message already gave us an owned buffer.
+                let recipients = clients.len().saturating_sub(1);
                 self.server.broadcast_message_except(
                     *client_id,
                     channel_id,
-                    message.clone(), // Forward exactly as received
+                    message, // moved, not cloned
                 );
 
                 self.voice_stats.packets_forwarded += 1;
                 self.stats.voice_packets_count += 1;
-
-                // Update bytes sent stat
-                let recipients = clients.len().saturating_sub(1);
-                self.stats.bytes_sent += message.len() as u64 * recipients as u64;
+                self.stats.bytes_sent += (VoiceHeader::SIZE as u64 + validation_offset as u64)
+                    * recipients as u64;
             }
         }
     }
@@ -510,7 +509,6 @@ impl ChatServer {
         info!("Connected clients: {}", self.server.connected_clients());
         info!("Text messages: {}", self.stats.messages_count);
 
-        // NEW: Detailed voice statistics
         info!(
             "Voice packets - RX: {}, FWD: {}",
             self.voice_stats.packets_received, self.voice_stats.packets_forwarded

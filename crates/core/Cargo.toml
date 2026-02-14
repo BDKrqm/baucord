@@ -16,10 +16,11 @@ rtrb = "0.3"
 crossbeam-channel = "0.5"
 
 # Opus codec
-opus = "0.3"
+opus = { git = "https://github.com/SpaceManiac/opus-rs" }
 
 # Resampling
-rubato = "0.16"
+rubato = "1.0.1"
+audioadapter-buffers = "2.0"
 
 # Noise suppression (Mozilla RNNoise, pure Rust)
 nnnoiseless = "0.5"
