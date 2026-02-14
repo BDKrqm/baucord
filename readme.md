@@ -12,10 +12,12 @@ A lightweight voice and text chat application built with Rust, using `fltk` for 
 
 ## Screenshots
 
-![Client Interface 2](img/client2.png)
+![Client Interface 2](web/img/client2.png)
+
 *Connect to server and nickname setup*
 
-![Client Interface 1](img/client1.png)
+![Client Interface 1](web/img/client1.png)
+
 *Main chat interface with user list,voice indicators and settings page*
 
 ## Building and Running

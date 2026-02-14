@@ -231,8 +231,6 @@ impl AudioInput {
         let loopback_tx = self.loopback_tx.clone();
         let loopback_enabled = self.loopback_enabled.clone();
         let input_gain = self.input_gain.clone();
-        let vad_threshold = self.vad_threshold.clone();
-
 
         self.worker_thread = Some(thread::spawn(move || {
             // ── Resampler (if device rate ≠ 48 kHz) ─────────────────────
@@ -416,19 +414,11 @@ let mut out_adapter = SequentialSliceOfVecs::new_mut(&mut resampler_output, 1, e
                     }
 
                     // ── VAD gate ────────────────────────────────────────
-                   let is_speech = if vad_enabled.load(Ordering::Relaxed) {
-    let rms = (frame.iter().map(|s| s * s).sum::<f32>()
-        / frame.len() as f32)
-        .sqrt();
-    let thresh = f32::from_bits(vad_threshold.load(Ordering::Relaxed));
-    if rms < thresh {
-        false
-    } else {
-        vad.process(&frame)
-    }
-} else {
-    true
-}; 
+                    let is_speech = if vad_enabled.load(Ordering::Relaxed) {
+                        vad.process(&frame)
+                    } else {
+                        true
+                    };
 
                     is_speaking_handle.store(is_speech, Ordering::Relaxed);
                     stats.vad_active.store(is_speech, Ordering::Relaxed);
