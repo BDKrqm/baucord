@@ -59,6 +59,8 @@ pub struct AudioStats {
     pub vad_active: AtomicBool,
     pub denoise_active: AtomicBool,
     pub dtx_active: AtomicBool,
+    /// Whether the noise gate is currently open (passing audio).
+    pub gate_active: AtomicBool,
 
     // ── Timing ──────────────────────────────────────────────────────────
     pub start_time: Instant,
@@ -89,6 +91,7 @@ impl AudioStats {
             vad_active: AtomicBool::new(false),
             denoise_active: AtomicBool::new(true),
             dtx_active: AtomicBool::new(false),
+            gate_active: AtomicBool::new(false),
             start_time: Instant::now(),
         }
     }

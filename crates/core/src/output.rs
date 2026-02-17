@@ -248,8 +248,10 @@ impl AudioOutput {
             );
 
             while !should_stop.load(Ordering::Relaxed) {
-                // Drain decoded audio into jitter buffer (batch up to 16)
-                for _ in 0..16 {
+                // Drain ALL decoded audio into jitter buffer.
+                // At 30+ peers, each 10ms tick can produce 30 frames —
+                // the old batch(16) cap caused permanent starvation.
+                loop {
                     match decoder_rx.try_recv() {
                         Ok((peer_id, samples)) => {
                             jitter_buffer.push_decoded_audio(peer_id, samples);

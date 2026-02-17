@@ -1,0 +1,288 @@
+// voice_thread.rs — Owns VoiceChat on a dedicated thread.
+//
+// Receives VoiceControl commands, emits VoiceEvent notifications,
+// and forwards outgoing packets to the network thread.
+// All audio processing is handled by the core library.
+
+use crossbeam_channel::{Receiver, Sender, bounded, select};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
+
+use fltk::app;
+use log::info;
+
+use crate::config::Settings;
+use crate::network::NetworkControl;
+use core::{AudioPacket, PeerAudioSettings, VoiceChat, VoiceChatConfig};
+
+// ── Channel messages ────────────────────────────────────────────────────
+
+#[derive(Debug)]
+pub enum VoiceControl {
+    Start {
+        settings: Settings,
+        our_client_id: u64,
+    },
+    Stop,
+    SetMuted(bool),
+    SetLoopback(bool),
+    SetGateThreshold(f32),
+    SetInputGain(f32),
+    SetOutputGain(f32),
+    SetInputDevice(Option<String>),
+    SetOutputDevice(Option<String>),
+    AddPeer(u64),
+    RemovePeer(u64),
+    SetPeerAudio(u64, PeerAudioSettings),
+    IncomingVoicePacket(AudioPacket),
+    Shutdown,
+}
+
+#[derive(Debug, Clone)]
+pub enum VoiceEvent {
+    Started,
+    Error(String),
+    SpeakingChanged(bool),
+}
+
+// ── Shared levels (written here, read by UI) ────────────────────────────
+
+#[derive(Clone)]
+pub struct SharedAudioState {
+    pub input_level: Arc<AtomicU32>,
+    pub output_level: Arc<AtomicU32>,
+    pub denoised_level: Arc<AtomicU32>,
+    pub speaking: Arc<AtomicBool>,
+}
+
+impl SharedAudioState {
+    pub fn new() -> Self {
+        Self {
+            input_level: Arc::new(AtomicU32::new(0)),
+            output_level: Arc::new(AtomicU32::new(0)),
+            denoised_level: Arc::new(AtomicU32::new(0)),
+            speaking: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+// ── Config conversion ───────────────────────────────────────────────────
+
+fn settings_to_config(s: &Settings) -> VoiceChatConfig {
+    VoiceChatConfig {
+        input_device: s.input_device.clone(),
+        output_device: s.output_device.clone(),
+        mute_on_start: s.mute_on_start,
+        gate_threshold: s.gate_threshold,
+        noise_suppression: true,
+        input_gain: s.input_gain,
+        output_gain: s.output_gain,
+    }
+}
+
+// ── Public API ──────────────────────────────────────────────────────────
+
+pub struct VoiceThreadHandle {
+    pub tx: Sender<VoiceControl>,
+    pub event_rx: Receiver<VoiceEvent>,
+    pub shared: SharedAudioState,
+    join_handle: Option<thread::JoinHandle<()>>,
+}
+
+impl VoiceThreadHandle {
+    /// Spawn the voice thread. Returns a handle for sending commands and
+    /// receiving events.
+    pub fn spawn(
+        network_tx: Sender<NetworkControl>,
+        is_testing_mic: Arc<AtomicBool>,
+    ) -> Self {
+        let (tx, control_rx) = bounded::<VoiceControl>(64);
+        let (event_tx, event_rx) = bounded::<VoiceEvent>(32);
+        let shared = SharedAudioState::new();
+
+        let shared_clone = shared.clone();
+        let join_handle = thread::spawn(move || {
+            run_voice_loop(control_rx, event_tx, network_tx, shared_clone, is_testing_mic);
+        });
+
+        Self {
+            tx,
+            event_rx,
+            shared,
+            join_handle: Some(join_handle),
+        }
+    }
+
+    /// Send shutdown and wait for the thread to exit.
+    pub fn shutdown(&mut self) {
+        let _ = self.tx.send(VoiceControl::Shutdown);
+        if let Some(handle) = self.join_handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+// ── Thread loop ─────────────────────────────────────────────────────────
+
+fn run_voice_loop(
+    control_rx: Receiver<VoiceControl>,
+    event_tx: Sender<VoiceEvent>,
+    network_tx: Sender<NetworkControl>,
+    shared: SharedAudioState,
+    is_testing_mic: Arc<AtomicBool>,
+) {
+    let mut vc: Option<VoiceChat> = None;
+    let mut our_client_id: Option<u64> = None;
+    let mut was_speaking = false;
+    let mut running = true;
+
+    while running {
+        // Block until a message arrives or 5ms timeout (for polling outgoing packets)
+        select! {
+            recv(control_rx) -> msg => {
+                match msg {
+                    Ok(ctrl) => handle_control(
+                        ctrl, &mut vc, &mut our_client_id, &mut running,
+                        &event_tx, &mut was_speaking,
+                    ),
+                    Err(_) => { running = false; }
+                }
+            }
+            default(Duration::from_millis(5)) => {}
+        }
+
+        // Drain any queued control messages
+        for _ in 0..32 {
+            match control_rx.try_recv() {
+                Ok(ctrl) => handle_control(
+                    ctrl, &mut vc, &mut our_client_id, &mut running,
+                    &event_tx, &mut was_speaking,
+                ),
+                Err(_) => break,
+            }
+        }
+
+        // Poll outgoing packets and update shared state
+        if let Some(voice) = vc.as_ref() {
+            // Forward encoded packets to network (or drain in test mode)
+            if let Some(id) = our_client_id {
+                if !is_testing_mic.load(Ordering::Relaxed) {
+                    for mut packet in voice.take_outgoing_packets() {
+                        packet.header.ssrc = id;
+                        let _ = network_tx.try_send(NetworkControl::SendVoicePacket(packet));
+                    }
+                } else {
+                    voice.take_outgoing_packets(); // drain without sending
+                }
+            }
+
+            // Update shared levels for UI meters
+            shared.input_level.store(voice.input_level().to_bits(), Ordering::Relaxed);
+            shared.output_level.store(voice.output_level().to_bits(), Ordering::Relaxed);
+            shared.denoised_level.store(voice.denoised_level().to_bits(), Ordering::Relaxed);
+            shared.speaking.store(voice.is_speaking(), Ordering::Relaxed);
+
+            // Edge-triggered speaking notification
+            let speaking = voice.is_speaking();
+            if speaking != was_speaking {
+                was_speaking = speaking;
+                let _ = network_tx.try_send(NetworkControl::SendSpeakingStatus(speaking));
+                let _ = event_tx.try_send(VoiceEvent::SpeakingChanged(speaking));
+                app::awake();
+            }
+        }
+    }
+}
+
+// ── Control dispatch ────────────────────────────────────────────────────
+
+fn handle_control(
+    ctrl: VoiceControl,
+    vc: &mut Option<VoiceChat>,
+    our_client_id: &mut Option<u64>,
+    running: &mut bool,
+    event_tx: &Sender<VoiceEvent>,
+    was_speaking: &mut bool,
+) {
+    match ctrl {
+        VoiceControl::Start { settings, our_client_id: id } => {
+            let config = settings_to_config(&settings);
+            match VoiceChat::new(config) {
+                Ok(mut voice) => {
+                    if let Err(e) = voice.start() {
+                        event_tx.send(VoiceEvent::Error(format!("Start failed: {}", e))).ok();
+                        app::awake();
+                        return;
+                    }
+                    if settings.mute_on_start {
+                        voice.set_muted(true);
+                    }
+                    *our_client_id = Some(id);
+                    *vc = Some(voice);
+                    *was_speaking = false;
+                    event_tx.send(VoiceEvent::Started).ok();
+                    app::awake();
+                    info!("Voice started for client {}", id);
+                }
+                Err(e) => {
+                    event_tx.send(VoiceEvent::Error(format!("Init failed: {}", e))).ok();
+                    app::awake();
+                }
+            }
+        }
+        VoiceControl::Stop => {
+            *vc = None;
+            *our_client_id = None;
+            *was_speaking = false;
+            info!("Voice stopped");
+        }
+        VoiceControl::SetMuted(muted) => {
+            if let Some(v) = vc.as_ref() { v.set_muted(muted); }
+        }
+        VoiceControl::SetLoopback(enabled) => {
+            if let Some(v) = vc.as_ref() { v.set_loopback(enabled); }
+        }
+        VoiceControl::SetGateThreshold(t) => {
+            if let Some(v) = vc.as_ref() { v.set_gate_threshold(t); }
+        }
+        VoiceControl::SetInputGain(g) => {
+            if let Some(v) = vc.as_ref() { v.set_input_gain(g); }
+        }
+        VoiceControl::SetOutputGain(g) => {
+            if let Some(v) = vc.as_ref() { v.set_output_gain(g); }
+        }
+        VoiceControl::SetInputDevice(d) => {
+            if let Some(v) = vc.as_mut()
+                && let Err(e) = v.set_input_device(d.as_deref())
+            {
+                event_tx.send(VoiceEvent::Error(format!("Input device: {}", e))).ok();
+                app::awake();
+            }
+        }
+        VoiceControl::SetOutputDevice(d) => {
+            if let Some(v) = vc.as_mut()
+                && let Err(e) = v.set_output_device(d.as_deref())
+            {
+                event_tx.send(VoiceEvent::Error(format!("Output device: {}", e))).ok();
+                app::awake();
+            }
+        }
+        VoiceControl::AddPeer(id) => {
+            if let Some(v) = vc.as_mut() { v.add_peer(id); }
+        }
+        VoiceControl::RemovePeer(id) => {
+            if let Some(v) = vc.as_mut() { v.remove_peer(id); }
+        }
+        VoiceControl::SetPeerAudio(id, settings) => {
+            if let Some(v) = vc.as_ref() { v.set_peer_settings(id, settings); }
+        }
+        VoiceControl::IncomingVoicePacket(packet) => {
+            if let Some(v) = vc.as_ref() { v.receive_packet(packet); }
+        }
+        VoiceControl::Shutdown => {
+            *running = false;
+        }
+    }
+}

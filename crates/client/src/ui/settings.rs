@@ -3,7 +3,7 @@
 // Controls send UiMessages; levels come from shared atomics written by
 // the voice thread. Meters update at 8 Hz only while the window is visible.
 
-use crate::settings::Settings;
+use crate::config::Settings;
 use crate::ui::messages::UiMessage;
 use crate::ui::theme::DarkTheme;
 use fltk::{prelude::*, *};
@@ -144,13 +144,13 @@ fn make_vu_meter(
 
 fn format_sensitivity(value: f64) -> String {
     let name = match value {
-        v if v < 0.08 => "Very High",
-        v if v < 0.18 => "High",
-        v if v < 0.30 => "Medium",
-        v if v < 0.42 => "Low",
+        v if v < 0.010 => "Very High",
+        v if v < 0.020 => "High",
+        v if v < 0.040 => "Medium",
+        v if v < 0.065 => "Low",
         _ => "Very Low",
     };
-    format!("Sensitivity: {}", name)
+    format!("Sensitivity: {}  ({:.3} RMS)", name, value)
 }
 
 // ── Settings Window ─────────────────────────────────────────────────────
@@ -228,7 +228,7 @@ impl SettingsWindow {
             0.05,
             DarkTheme::ACCENT,
         );
-        let mut input_gain_lbl = value_label(
+        let input_gain_lbl = value_label(
             &mut col,
             &format!("Gain: {}%", (settings.input_gain * 100.0) as i32),
         );
@@ -272,7 +272,7 @@ impl SettingsWindow {
             0.05,
             enums::Color::from_rgb(56, 189, 248),
         );
-        let mut output_gain_lbl = value_label(
+        let output_gain_lbl = value_label(
             &mut col,
             &format!("Volume: {}%", (settings.output_gain * 100.0) as i32),
         );
@@ -280,18 +280,18 @@ impl SettingsWindow {
         separator(&mut col);
 
         // ════════════════════════════════════════════════════════════════
-        //  VOICE ACTIVATION
+        //  VOICE GATE
         // ════════════════════════════════════════════════════════════════
 
-        section_header(&mut col, "\u{26a1}  VOICE ACTIVATION");
+        section_header(&mut col, "\u{26a1}  VOICE GATE");
 
         field_label(
             &mut col,
-            "Select when to activate the microphone based on noise level",
+            "Audio below the threshold is silenced before transmission",
         );
 
         // VAD meter with threshold line
-        let threshold_rc = std::rc::Rc::new(std::cell::RefCell::new(settings.vad_threshold));
+        let threshold_rc = std::rc::Rc::new(std::cell::RefCell::new(settings.gate_threshold));
 
         let threshold_draw = threshold_rc.clone();
         let level_draw = denoised_level.clone();
@@ -328,17 +328,17 @@ impl SettingsWindow {
             draw::draw_rect(f.x(), f.y(), f.w(), f.h());
         });
 
-        field_label(&mut col, "Activation Sensitivity");
+        field_label(&mut col, "Gate Threshold");
         let mut vad_slider = make_slider(
             &mut col,
-            0.01,
-            0.50,
-            settings.vad_threshold as f64,
-            0.01,
+            0.005,
+            0.10,
+            settings.gate_threshold as f64,
+            0.001,
             DarkTheme::ACCENT,
         );
-        let mut vad_sens_lbl =
-            value_label(&mut col, &format_sensitivity(settings.vad_threshold as f64));
+        let vad_sens_lbl =
+            value_label(&mut col, &format_sensitivity(settings.gate_threshold as f64));
 
         let mute_on_start_toggle = styled_check(&mut col, "Start muted", settings.mute_on_start);
 
@@ -448,7 +448,7 @@ impl SettingsWindow {
             *threshold_update.borrow_mut() = val;
             sens_lbl.set_label(&format_sensitivity(sl.value()));
             vu_redraw.redraw();
-            s.send(UiMessage::SetVadThreshold(val));
+            s.send(UiMessage::SetGateThreshold(val));
         });
 
         // Window close — stop test mic if active
@@ -483,7 +483,7 @@ impl SettingsWindow {
         let mut ig = input_gain_slider.clone();
         let mut og = output_gain_slider.clone();
         let mut vs = vad_slider.clone();
-        let mut ms = mute_on_start_toggle.clone();
+        let ms = mute_on_start_toggle.clone();
         let threshold_reset = threshold_rc.clone();
         let mut vu_reset = vu_vad.clone();
         reset_btn.set_callback(move |_| {
@@ -492,10 +492,10 @@ impl SettingsWindow {
             ig.do_callback();
             og.set_value(d.output_gain as f64);
             og.do_callback();
-            vs.set_value(d.vad_threshold as f64);
+            vs.set_value(d.gate_threshold as f64);
             vs.do_callback();
             ms.set_checked(d.mute_on_start);
-            *threshold_reset.borrow_mut() = d.vad_threshold;
+            *threshold_reset.borrow_mut() = d.gate_threshold;
             vu_reset.redraw();
             s.send(UiMessage::ResetSettings);
         });

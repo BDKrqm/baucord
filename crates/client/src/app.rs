@@ -14,12 +14,11 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::network::{NetworkClient, NetworkMessage};
-use crate::settings::{Settings, UserAudioSettings};
-use crate::ui::chat::Chat;
-use crate::ui::messages::UiMessage;
-use crate::ui::sidebar::Sidebar;
-use crate::ui::theme::DarkTheme;
+use crate::{
+    config::{Settings, UserAudioSettings},
+    network::{NetworkClient, NetworkMessage},
+    ui::{chat::Chat, messages::UiMessage, sidebar::Sidebar, theme::DarkTheme},
+};
 use core::{AudioPacket, PeerAudioSettings, VoiceChat, VoiceChatConfig};
 
 // ── Public types ────────────────────────────────────────────────────────
@@ -53,7 +52,7 @@ enum VoiceControl {
     Stop,
     SetMuted(bool),
     SetLoopback(bool),
-    SetVadThreshold(f32),
+    SetGateThreshold(f32),
     SetInputGain(f32),
     SetOutputGain(f32),
     SetInputDevice(Option<String>),
@@ -86,8 +85,7 @@ fn settings_to_config(s: &Settings) -> VoiceChatConfig {
         input_device: s.input_device.clone(),
         output_device: s.output_device.clone(),
         mute_on_start: s.mute_on_start,
-        vad_enabled: true,
-        vad_threshold: s.vad_threshold,
+        gate_threshold: s.gate_threshold,
         noise_suppression: true, // Always on
         input_gain: s.input_gain,
         output_gain: s.output_gain,
@@ -501,9 +499,9 @@ impl App {
                     v.set_loopback(enabled);
                 }
             }
-            VoiceControl::SetVadThreshold(t) => {
+            VoiceControl::SetGateThreshold(t) => {
                 if let Some(v) = vc.as_ref() {
-                    v.set_vad_threshold(t);
+                    v.set_gate_threshold(t);
                 }
             }
             VoiceControl::SetInputGain(g) => {
@@ -658,9 +656,9 @@ impl App {
             UiMessage::TestMicrophone(enabled) => {
                 self.handle_test_microphone(enabled);
             }
-            UiMessage::SetVadThreshold(t) => {
-                self.settings.vad_threshold = t;
-                self.voice_tx.send(VoiceControl::SetVadThreshold(t)).ok();
+            UiMessage::SetGateThreshold(t) => {
+                self.settings.gate_threshold = t;
+                self.voice_tx.send(VoiceControl::SetGateThreshold(t)).ok();
             }
             UiMessage::SetInputGain(g) => {
                 self.settings.input_gain = g;
@@ -1033,10 +1031,10 @@ impl App {
     }
 
     fn set_window_icon(wind: &mut window::Window) {
-    if let Ok(icon) = fltk::image::PngImage::from_data(include_bytes!("../assets/icon.png")) {
-        wind.set_icon(Some(icon));
+        if let Ok(icon) = fltk::image::PngImage::from_data(include_bytes!("../assets/icon.png")) {
+            wind.set_icon(Some(icon));
+        }
     }
-}
     fn show_connection_screen(&mut self) {
         let mut wind = window::Window::default()
             .with_size(600, 480)
@@ -1044,7 +1042,6 @@ impl App {
         wind.make_resizable(false);
         DarkTheme::style_window(&mut wind);
         Self::set_window_icon(&mut wind);
-
 
         let mut col = group::Flex::default_fill().column();
         col.set_margins(20, 20, 20, 20);
@@ -1125,7 +1122,6 @@ impl App {
         wind.make_resizable(true);
         DarkTheme::style_window(&mut wind);
         Self::set_window_icon(&mut wind);
-
 
         if let (Some(x), Some(y)) = (self.settings.window_x, self.settings.window_y) {
             wind.set_pos(x, y);

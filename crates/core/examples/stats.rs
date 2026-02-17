@@ -159,13 +159,13 @@ fn make_vu_meter(
 
 fn format_sensitivity(value: f64) -> String {
     let name = match value {
-        v if v < 0.08 => "Very High",
-        v if v < 0.18 => "High",
-        v if v < 0.30 => "Medium",
-        v if v < 0.42 => "Low",
+        v if v < 0.010 => "Very High",
+        v if v < 0.020 => "High",
+        v if v < 0.040 => "Medium",
+        v if v < 0.065 => "Low",
         _ => "Very Low",
     };
-    format!("Sensitivity: {}", name)
+    format!("Sensitivity: {}  (threshold: {:.3} RMS)", name, value)
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────
@@ -287,12 +287,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     separator(&mut col);
 
     // ══════════════════════════════════════════════════════════════════
-    //  VOICE ACTIVATION
-    //  The VAD bar uses the POST-DENOISE level — this is what the VAD
+    //  VOICE GATE
+    //  The gate bar uses the POST-DENOISE level — this is what the gate
     //  actually sees. Noise that gets suppressed won't show here.
     // ══════════════════════════════════════════════════════════════════
 
-    section_header(&mut col, "\u{26a1}", "VOICE ACTIVATION");
+    section_header(&mut col, "\u{26a1}", "VOICE GATE");
 
     let mut speaking_lbl = frame::Frame::default()
         .with_label("\u{26ab}  Not transmitting")
@@ -305,7 +305,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // VAD bar: post-denoise level with threshold line
     let denoised_level_arc: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
-    let threshold_rc: Rc<RefCell<f32>> = Rc::new(RefCell::new(0.15));
+    let threshold_rc: Rc<RefCell<f32>> = Rc::new(RefCell::new(0.020));
 
     let threshold_draw = threshold_rc.clone();
     let level_draw_vad = denoised_level_arc.clone();
@@ -338,25 +338,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         draw::draw_rect(f.x(), f.y(), f.w(), f.h());
     });
 
-    field_label(&mut col, "Activation Threshold");
+    field_label(&mut col, "Gate Threshold");
     let mut vad_slider = valuator::HorSlider::default();
-    vad_slider.set_minimum(0.01);
-    vad_slider.set_maximum(0.50);
-    vad_slider.set_value(0.15);
-    vad_slider.set_step(0.01, 1);
+    vad_slider.set_minimum(0.005);
+    vad_slider.set_maximum(0.10);
+    vad_slider.set_value(0.020);
+    vad_slider.set_step(0.001, 1);
     vad_slider.set_color(Theme::BG_TERTIARY);
     vad_slider.set_selection_color(Theme::ACCENT);
     col.fixed(&vad_slider, 22);
 
     let mut vad_sens_lbl = frame::Frame::default()
-        .with_label(&format_sensitivity(0.15))
+        .with_label(&format_sensitivity(0.020))
         .with_align(enums::Align::Left | enums::Align::Inside);
     vad_sens_lbl.set_label_color(Theme::TEXT_MUTED);
     vad_sens_lbl.set_label_size(10);
     col.fixed(&vad_sens_lbl, 14);
 
     let noise_toggle = styled_check(&mut col, "Noise suppression (RNNoise)", true);
-    let vad_toggle = styled_check(&mut col, "Voice activation (VAD)", true);
     let mute_toggle = styled_check(&mut col, "Mute microphone", false);
     let loopback_toggle = styled_check(&mut col, "Monitor input (loopback)", false);
 
@@ -452,13 +451,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         *threshold_slider.borrow_mut() = val;
         vad_lbl_cb.set_label(&format_sensitivity(s.value()));
         vu_redraw.redraw();
-        vc_c.borrow().set_vad_threshold(val);
+        vc_c.borrow().set_gate_threshold(val);
     });
 
     let vc_c = vc.clone();
     noise_toggle.clone().set_callback(move |b| { vc_c.borrow().set_noise_suppression(b.is_checked()); });
-    let vc_c = vc.clone();
-    vad_toggle.clone().set_callback(move |b| { vc_c.borrow().set_vad_enabled(b.is_checked()); });
     let vc_c = vc.clone();
     mute_toggle.clone().set_callback(move |b| { vc_c.borrow().set_muted(b.is_checked()); });
     let vc_c = vc.clone();
@@ -554,10 +551,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let dtx = stats.dtx_active.load(Ordering::Relaxed);
         let denoise = stats.denoise_active.load(Ordering::Relaxed);
         let vad_state = stats.vad_active.load(Ordering::Relaxed);
+        let gate_state = stats.gate_active.load(Ordering::Relaxed);
         s_state_t.set_label(&format!(
-            "DTX: {}  |  Denoise: {}  |  VAD: {}",
+            "DTX: {}  |  Denoise: {}  |  Gate: {}  |  VAD: {}",
             if dtx { "ON (silence)" } else { "off" },
             if denoise { "ON" } else { "off" },
+            if gate_state { "OPEN" } else { "closed" },
             if vad_state { "SPEECH" } else { "quiet" },
         ));
 

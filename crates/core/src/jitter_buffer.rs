@@ -79,7 +79,7 @@ impl AdaptiveJitterBuffer {
             sample_rate,
             target_samples: (initial_target_ms * sample_rate) / 1000,
             min_samples: (2 * sample_rate) / 1000,
-            max_samples: (30 * sample_rate) / 1000,
+            max_samples: (60 * sample_rate) / 1000,
             buffers: HashMap::new(),
             peer_settings,
         }
@@ -168,12 +168,16 @@ impl AdaptiveJitterBuffer {
     /// Pull exactly `n` mixed samples, filling with silence if needed.
     ///
     /// Always mixes whatever audio is available for each peer (no hard gate).
+    /// Normalization is based on peers that actually contribute meaningful
+    /// audio energy to this frame, not just peers with non-empty buffers.
+    /// This prevents quiet peers (DTX residue, silence) from reducing the
+    /// volume of active speakers in large channels.
     pub fn pull_mixed(&mut self, n: usize, out: &mut [f32]) {
         debug_assert_eq!(out.len(), n);
         out.iter_mut().for_each(|s| *s = 0.0);
 
         let settings = self.peer_settings.lock().unwrap();
-        let mut active_streams = 0;
+        let mut contributing_peers = 0u32;
 
         for (peer_id, peer) in self.buffers.iter_mut() {
             let peer_settings = settings.get(peer_id).cloned().unwrap_or_default();
@@ -186,18 +190,28 @@ impl AdaptiveJitterBuffer {
                 continue;
             }
 
-            active_streams += 1;
             let available = peer.samples.len().min(n);
+            let mut peer_energy = 0.0f32;
             for i in 0..available {
                 if let Some(sample) = peer.samples.pop_front() {
-                    out[i] += sample * peer_settings.volume;
+                    let scaled = sample * peer_settings.volume;
+                    out[i] += scaled;
+                    peer_energy += scaled * scaled;
                 }
+            }
+
+            // Only count peers with meaningful audio (not silence/DTX residue).
+            // Threshold: ~-60 dBFS per sample average.
+            if available > 0 && (peer_energy / available as f32) > 1e-6 {
+                contributing_peers += 1;
             }
         }
 
-        // Normalize for multiple simultaneous streams
-        if active_streams > 1 {
-            let scale = 1.0 / (active_streams as f32).sqrt();
+        // Soft-knee normalization: no scaling for 1-2 speakers,
+        // gentle sqrt scaling above that. This keeps duets at full
+        // volume while preventing clipping in large group conversations.
+        if contributing_peers > 2 {
+            let scale = 1.0 / ((contributing_peers as f32 - 1.0).sqrt());
             for s in out.iter_mut() {
                 *s = (*s * scale).clamp(-0.99, 0.99);
             }

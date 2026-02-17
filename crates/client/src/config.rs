@@ -11,7 +11,7 @@ pub struct Settings {
     pub last_server: String,
 
     // Voice
-    pub vad_threshold: f32,
+    pub gate_threshold: f32,
     pub input_gain: f32,
     pub output_gain: f32,
 
@@ -37,7 +37,7 @@ impl Default for Settings {
         Settings {
             nickname: String::new(),
             last_server: "64.176.16.18:5000".to_string(),
-            vad_threshold: 0.15,
+            gate_threshold: 0.020,
             input_gain: 1.0,
             output_gain: 1.0,
             mute_on_start: false,
