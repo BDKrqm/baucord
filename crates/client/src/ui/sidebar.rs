@@ -139,27 +139,41 @@ impl Sidebar {
             }
         });
 
-        // Available width for user items — use the scroll widget width
-        // minus a small margin. Subtract scrollbar width (16px) always
-        // to prevent layout jumps when the scrollbar appears/disappears.
-        let scroll_w = (self.user_list_scroll.w() - 16 - 10).max(100);
-
-        // Add user items
-        for (client_id, state) in &sorted_users {
-            let is_us = Some(**client_id) == our_id;
-            self.create_user_item(**client_id, state, is_us, scroll_w);
-        }
-
-        // Calculate total height needed AFTER adding items
+        // Calculate total height needed
         let item_height = 35; // 30 item + 5 spacing
         let total_height = sorted_users.len() as i32 * item_height;
-        let scroll_h = self.user_list_scroll.h();
 
-        // Show scrollbar only when content overflows
+        // Show scrollbar only when content overflows the scroll area
+        let scroll_h = self.user_list_scroll.h();
         if total_height > scroll_h {
             self.user_list_scroll.set_type(group::ScrollType::Vertical);
         } else {
             self.user_list_scroll.set_type(group::ScrollType::None);
+        }
+
+        // Available width — always subtract scrollbar (16px) to prevent
+        // layout jumps when the scrollbar appears/disappears.
+        let scroll_w = (self.user_list_scroll.w() - 16 - 10).max(100);
+
+        // Resize pack to fit content BEFORE adding items.
+        // On macOS Cocoa, the pack must be correctly sized before
+        // children are added via .add(), otherwise child labels
+        // get zero-size bounding boxes and don't render.
+        self.user_list_pack.resize(
+            self.user_list_scroll.x() + 5,
+            self.user_list_scroll.y() + 5,
+            scroll_w,
+            total_height.max(10),
+        );
+
+        // Add user items — each calls user_list_pack.add() internally.
+        // Do NOT wrap in begin()/end() — that causes double-parenting
+        // on macOS where Flex::default() auto-parents into the active
+        // group AND .add() tries to parent again, corrupting the
+        // widget tree and making labels invisible.
+        for (client_id, state) in &sorted_users {
+            let is_us = Some(**client_id) == our_id;
+            self.create_user_item(**client_id, state, is_us, scroll_w);
         }
 
         // Force redraw

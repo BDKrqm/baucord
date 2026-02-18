@@ -68,7 +68,7 @@ impl Default for VoiceChatConfig {
             noise_suppression: true,
             input_gain: 1.0,
             output_gain: 0.4,
-            gate_threshold: 0.020,
+            gate_threshold: 0.012,
         }
     }
 }
@@ -92,3 +92,4 @@ impl Default for PeerAudioSettings {
         }
     }
 }
+
