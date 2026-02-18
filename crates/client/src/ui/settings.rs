@@ -26,7 +26,7 @@ impl SettingsWindow {
         speaking: Arc<AtomicBool>,
     ) {
         let mut wind = window::Window::default()
-            .with_size(560, 710)
+            .with_size(560, 630)
             .with_label("Settings");
         wind.make_resizable(false);
 
@@ -34,7 +34,7 @@ impl SettingsWindow {
         scroll.set_scrollbar_size(8);
 
         let mut col = group::Flex::default()
-            .with_size(530, 690)
+            .with_size(530, 600)
             .with_pos(10, 10)
             .column();
         col.set_spacing(4);
@@ -73,13 +73,22 @@ impl SettingsWindow {
         helpers::separator(&mut col);
 
         // ════════════════════════════════════════════════════════════════
-        //  INPUT
+        //  INPUT (capture level, gain, gate threshold — all in one place)
         // ════════════════════════════════════════════════════════════════
 
         helpers::section_header(&mut col, "\u{1f3a4}", "INPUT");
 
+        // Capture level meter — uses gate_bar to show the threshold line
+        // overlaid on the denoised audio level.  The red line shows where
+        // the noise gate activates: audio below it is silenced.
         helpers::field_label(&mut col, "Capture Level");
-        let vu_input = vu_meter::make(&mut col, input_level.clone(), 22, theme::SUCCESS);
+        let threshold_rc = std::rc::Rc::new(std::cell::RefCell::new(settings.gate_threshold));
+        let vu_input = gate_bar::make(
+            &mut col,
+            denoised_level.clone(),
+            threshold_rc.clone(),
+            22,
+        );
 
         helpers::field_label(&mut col, "Input Gain");
         let mut input_gain_slider = helpers::slider(
@@ -95,6 +104,24 @@ impl SettingsWindow {
             &format!("Gain: {}%", (settings.input_gain * 100.0) as i32),
         );
 
+        helpers::field_label(&mut col, "Input Sensitivity");
+        let mut vad_slider = helpers::slider(
+            &mut col,
+            0.005,
+            0.10,
+            settings.gate_threshold as f64,
+            0.001,
+            theme::ACCENT,
+        );
+        let vad_sens_lbl = helpers::hint_label(
+            &mut col,
+            &helpers::format_sensitivity(settings.gate_threshold as f64),
+        );
+        helpers::hint_label(
+            &mut col,
+            "Audio below the red line won't be transmitted",
+        );
+
         // Test Microphone button
         let mut test_mic_btn = helpers::button("\u{1f3a4}  Test Microphone");
         col.fixed(&test_mic_btn, 30);
@@ -103,6 +130,8 @@ impl SettingsWindow {
             &mut col,
             "Listen to your own mic (others won't hear you)",
         );
+
+        // let mute_on_start_toggle = helpers::check(&mut col, "Start muted", settings.mute_on_start);
 
         helpers::separator(&mut col);
 
@@ -127,44 +156,6 @@ impl SettingsWindow {
             &mut col,
             &format!("Volume: {}%", (settings.output_gain * 100.0) as i32),
         );
-
-        helpers::separator(&mut col);
-
-        // ════════════════════════════════════════════════════════════════
-        //  VOICE GATE
-        // ════════════════════════════════════════════════════════════════
-
-        helpers::section_header(&mut col, "\u{26a1}", "VOICE GATE");
-
-        helpers::field_label(
-            &mut col,
-            "Audio below the threshold is silenced before transmission",
-        );
-
-        // VAD meter with threshold line
-        let threshold_rc = std::rc::Rc::new(std::cell::RefCell::new(settings.gate_threshold));
-        let vu_vad = gate_bar::make(
-            &mut col,
-            denoised_level.clone(),
-            threshold_rc.clone(),
-            28,
-        );
-
-        helpers::field_label(&mut col, "Gate Threshold");
-        let mut vad_slider = helpers::slider(
-            &mut col,
-            0.005,
-            0.10,
-            settings.gate_threshold as f64,
-            0.001,
-            theme::ACCENT,
-        );
-        let vad_sens_lbl = helpers::hint_label(
-            &mut col,
-            &helpers::format_sensitivity(settings.gate_threshold as f64),
-        );
-
-        let mute_on_start_toggle = helpers::check(&mut col, "Start muted", settings.mute_on_start);
 
         helpers::separator(&mut col);
 
@@ -255,17 +246,17 @@ impl SettingsWindow {
             s.send(UiMessage::TestMicrophone(is_testing));
         });
 
-        // VAD slider — clone vu_vad before the closure captures it
+        // Gate threshold slider — updates the threshold line on the capture meter
         let s = sender;
         let threshold_update = threshold_rc.clone();
-        let mut vu_vad_reset = vu_vad.clone();
+        let mut vu_input_reset = vu_input.clone();
         let mut sens_lbl = vad_sens_lbl.clone();
-        let mut vu_vad_cb = vu_vad.clone();
+        let mut vu_input_cb = vu_input.clone();
         vad_slider.set_callback(move |sl| {
             let val = sl.value() as f32;
             *threshold_update.borrow_mut() = val;
             sens_lbl.set_label(&helpers::format_sensitivity(sl.value()));
-            vu_vad_cb.redraw();
+            vu_input_cb.redraw();
             s.send(UiMessage::SetGateThreshold(val));
         });
 
@@ -301,7 +292,6 @@ impl SettingsWindow {
         let mut ig = input_gain_slider.clone();
         let mut og = output_gain_slider.clone();
         let mut vs = vad_slider.clone();
-        let ms = mute_on_start_toggle.clone();
         let threshold_reset = threshold_rc.clone();
         reset_btn.set_callback(move |_| {
             let d = Settings::default();
@@ -311,9 +301,8 @@ impl SettingsWindow {
             og.do_callback();
             vs.set_value(d.gate_threshold as f64);
             vs.do_callback();
-            ms.set_checked(d.mute_on_start);
             *threshold_reset.borrow_mut() = d.gate_threshold;
-            vu_vad_reset.redraw();
+            vu_input_reset.redraw();
             s.send(UiMessage::ResetSettings);
         });
 
@@ -323,14 +312,12 @@ impl SettingsWindow {
 
         let mut vu_in_t = vu_input.clone();
         let mut vu_out_t = vu_output.clone();
-        let mut vu_vad_t = vu_vad.clone();
         let speaking_timer = speaking.clone();
         let prev_speak = std::rc::Rc::new(std::cell::RefCell::new(false));
 
         app::add_timeout3(0.125, move |handle| {
             vu_in_t.redraw();
             vu_out_t.redraw();
-            vu_vad_t.redraw();
 
             // Speaking indicator (edge-triggered)
             let is_speaking = speaking_timer.load(Ordering::Relaxed);
