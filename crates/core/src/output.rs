@@ -269,70 +269,74 @@ impl AudioOutput {
                     }
                 }
 
-                // Back-pressure: skip if ring is nearly full
-                let occupancy = ring_capacity - ring_producer.slots();
-                if occupancy > high_wm {
-                    next_tick += Duration::from_millis(5);
-                    let now = Instant::now();
-                    if next_tick > now {
-                        thread::sleep(next_tick - now);
+                // Fill the ring up to a target level, not just one hop.
+                // The cpal callback drains the ring at the device's hardware
+                // clock rate, which may be slightly faster than our 10ms tick.
+                // By filling multiple hops per tick when the ring is low, we
+                // absorb OS scheduler jitter and clock drift without underruns.
+                //
+                // Target: 30ms of audio in the ring at device sample rate.
+                let target_fill = (device_sample_rate as usize * 30) / 1000;
+                let max_hops_per_tick = 6; // cap to stay responsive
+
+                for _ in 0..max_hops_per_tick {
+                    // Stop if ring is sufficiently full
+                    let current_fill = ring_capacity - ring_producer.slots();
+                    if current_fill >= target_fill || current_fill >= high_wm {
+                        break;
+                    }
+
+                    // Pull 10 ms from jitter buffer (at 48 kHz)
+                    if deafened.load(Ordering::Relaxed) {
+                        jitter_buffer.pull_mixed(HOP, &mut hop_buf);
+                        hop_buf.fill(0.0);
                     } else {
-                        next_tick = now;
-                    }
-                    continue;
-                }
+                        jitter_buffer.pull_mixed(HOP, &mut hop_buf);
 
-                // Pull 10 ms from jitter buffer (at 48 kHz)
-                // When deafened, skip decoding/mixing entirely and push silence.
-                if deafened.load(Ordering::Relaxed) {
-                    // Drain jitter buffer state so it doesn't accumulate stale frames
-                    jitter_buffer.pull_mixed(HOP, &mut hop_buf);
-                    hop_buf.fill(0.0);
-                } else {
-                    jitter_buffer.pull_mixed(HOP, &mut hop_buf);
-
-                    // Apply master output gain
-                    let gain = f32::from_bits(output_gain.load(Ordering::Relaxed));
-                    if (gain - 1.0).abs() > f32::EPSILON {
-                        for s in hop_buf.iter_mut() {
-                            *s = (*s * gain).clamp(-0.99, 0.99);
-                        }
-                    }
-                }
-
-                // Resample 48 kHz → device rate, then push to ring
-                if let Some(ref mut r) = resampler {
-                    let needed = r.input_frames_next();
-                    resampler_input[0].clear();
-                    if hop_buf.len() >= needed {
-                        resampler_input[0].extend_from_slice(&hop_buf[..needed]);
-                    } else {
-                        resampler_input[0].extend_from_slice(&hop_buf);
-                        resampler_input[0].resize(needed, 0.0);
-                    }
-
-                    let expected = r.output_frames_next();
-                    resampler_output[0].resize(expected, 0.0);
-
-                    let in_adapter =
-                        SequentialSliceOfVecs::new(&resampler_input, 1, needed).unwrap();
-                    let mut out_adapter =
-                        SequentialSliceOfVecs::new_mut(&mut resampler_output, 1, expected).unwrap();
-
-                    match r.process_into_buffer(&in_adapter, &mut out_adapter, None) {
-                        Ok((_in_len, _out_len)) => {
-                            for &s in &resampler_output[0][..expected] {
-                                if ring_producer.push(s).is_err() {
-                                    break;
-                                }
+                        // Apply master output gain
+                        let gain = f32::from_bits(output_gain.load(Ordering::Relaxed));
+                        if (gain - 1.0).abs() > f32::EPSILON {
+                            for s in hop_buf.iter_mut() {
+                                *s = (*s * gain).clamp(-0.99, 0.99);
                             }
                         }
-                        Err(e) => error!("Output resampler error: {}", e),
                     }
-                } else {
-                    for &s in &hop_buf {
-                        if ring_producer.push(s).is_err() {
-                            break;
+
+                    // Resample 48 kHz → device rate, then push to ring
+                    if let Some(ref mut r) = resampler {
+                        let needed = r.input_frames_next();
+                        resampler_input[0].clear();
+                        if hop_buf.len() >= needed {
+                            resampler_input[0].extend_from_slice(&hop_buf[..needed]);
+                        } else {
+                            resampler_input[0].extend_from_slice(&hop_buf);
+                            resampler_input[0].resize(needed, 0.0);
+                        }
+
+                        let expected = r.output_frames_next();
+                        resampler_output[0].resize(expected, 0.0);
+
+                        let in_adapter =
+                            SequentialSliceOfVecs::new(&resampler_input, 1, needed).unwrap();
+                        let mut out_adapter =
+                            SequentialSliceOfVecs::new_mut(&mut resampler_output, 1, expected)
+                                .unwrap();
+
+                        match r.process_into_buffer(&in_adapter, &mut out_adapter, None) {
+                            Ok((_in_len, _out_len)) => {
+                                for &s in &resampler_output[0][..expected] {
+                                    if ring_producer.push(s).is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                            Err(e) => error!("Output resampler error: {}", e),
+                        }
+                    } else {
+                        for &s in &hop_buf {
+                            if ring_producer.push(s).is_err() {
+                                break;
+                            }
                         }
                     }
                 }
