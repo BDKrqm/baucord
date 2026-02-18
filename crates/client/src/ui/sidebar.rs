@@ -17,6 +17,7 @@ pub struct Sidebar {
     user_list_pack: group::Pack,
     connection_status: frame::Frame,
     mute_btn: button::Button,
+    deafen_btn: button::Button,
 }
 
 impl Sidebar {
@@ -35,9 +36,9 @@ impl Sidebar {
         user_count_label.set_label_color(theme::TEXT_SECONDARY);
         user_count_label.set_label_size(13);
 
-        // User list scroll area
+        // User list scroll area — scrollbar hidden by default, shown when needed
         let mut user_list_scroll = group::Scroll::default();
-        user_list_scroll.set_type(group::ScrollType::Vertical);
+        user_list_scroll.set_type(group::ScrollType::None);
         user_list_scroll.set_color(theme::BG_SECONDARY);
         user_list_scroll.set_frame(enums::FrameType::FlatBox);
 
@@ -60,12 +61,18 @@ impl Sidebar {
         connection_status.set_label_size(12);
         connection_status.set_align(enums::Align::Left | enums::Align::Inside);
 
-        // Mute button
+        // Mute / Deafen row
+        let mut audio_row = group::Flex::default().row();
+        audio_row.set_spacing(5);
+        sidebar.fixed(&audio_row, 35);
+
         let mut mute_btn = helpers::button("Mute");
-        sidebar.fixed(&mute_btn, 35);
+        let mut deafen_btn = helpers::button("Deafen");
+
+        audio_row.end();
 
         // Settings button
-        let mut settings_btn = helpers::button("\u{2699} Settings");
+        let mut settings_btn = helpers::button("Settings");
         sidebar.fixed(&settings_btn, 35);
 
         // Disconnect button
@@ -78,6 +85,11 @@ impl Sidebar {
         let s = sender;
         mute_btn.set_callback(move |_| {
             s.send(UiMessage::ToggleMute);
+        });
+
+        let s = sender;
+        deafen_btn.set_callback(move |_| {
+            s.send(UiMessage::ToggleDeafen);
         });
 
         let s = sender;
@@ -98,6 +110,7 @@ impl Sidebar {
             user_list_pack,
             connection_status,
             mute_btn,
+            deafen_btn,
         }
     }
 
@@ -126,27 +139,27 @@ impl Sidebar {
             }
         });
 
-        // Calculate total height needed
-        let item_height = 35;
-        let spacing = 5;
-        let total_height = sorted_users.len() as i32 * (item_height + spacing);
-
-        // Get scroll area dimensions
-        let scroll_w = self.user_list_scroll.w() - 20; // Account for scrollbar
-        let scroll_w = if scroll_w > 0 { scroll_w } else { 210 };
-
-        // Resize pack to fit content
-        self.user_list_pack.resize(
-            self.user_list_scroll.x() + 5,
-            self.user_list_scroll.y() + 5,
-            scroll_w,
-            total_height.max(10),
-        );
+        // Available width for user items — use the scroll widget width
+        // minus a small margin. Subtract scrollbar width (16px) always
+        // to prevent layout jumps when the scrollbar appears/disappears.
+        let scroll_w = (self.user_list_scroll.w() - 16 - 10).max(100);
 
         // Add user items
-        for (client_id, state) in sorted_users {
-            let is_us = Some(*client_id) == our_id;
-            self.create_user_item(*client_id, state, is_us, scroll_w);
+        for (client_id, state) in &sorted_users {
+            let is_us = Some(**client_id) == our_id;
+            self.create_user_item(**client_id, state, is_us, scroll_w);
+        }
+
+        // Calculate total height needed AFTER adding items
+        let item_height = 35; // 30 item + 5 spacing
+        let total_height = sorted_users.len() as i32 * item_height;
+        let scroll_h = self.user_list_scroll.h();
+
+        // Show scrollbar only when content overflows
+        if total_height > scroll_h {
+            self.user_list_scroll.set_type(group::ScrollType::Vertical);
+        } else {
+            self.user_list_scroll.set_type(group::ScrollType::None);
         }
 
         // Force redraw
@@ -288,6 +301,24 @@ impl Sidebar {
         }
     }
 
+    pub fn update_latency(&mut self, rtt_ms: f64) {
+        // RTT is round-trip; show half for one-way feel, but label as RTT
+        let label = if rtt_ms < 1.0 {
+            "\u{25cf} Connected - <1ms".to_string()
+        } else {
+            format!("\u{25cf} Connected - {:.0}ms", rtt_ms)
+        };
+        self.connection_status.set_label(&label);
+        // Color-code: green <80ms, yellow <150ms, red >150ms
+        if rtt_ms < 80.0 {
+            self.connection_status.set_label_color(theme::SUCCESS);
+        } else if rtt_ms < 150.0 {
+            self.connection_status.set_label_color(theme::WARNING);
+        } else {
+            self.connection_status.set_label_color(theme::DANGER);
+        }
+    }
+
     pub fn handle_disconnected(&mut self) {
         self.set_connection_status(false);
         self.user_list_pack.clear();
@@ -301,6 +332,16 @@ impl Sidebar {
         } else {
             self.mute_btn.set_label("Mute");
             self.mute_btn.set_color(theme::BG_TERTIARY);
+        }
+    }
+
+    pub fn set_deafen_state(&mut self, deafened: bool) {
+        if deafened {
+            self.deafen_btn.set_label("Undeafen");
+            self.deafen_btn.set_color(theme::WARNING);
+        } else {
+            self.deafen_btn.set_label("Deafen");
+            self.deafen_btn.set_color(theme::BG_TERTIARY);
         }
     }
 }

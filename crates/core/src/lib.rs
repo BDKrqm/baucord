@@ -89,6 +89,7 @@ pub struct VoiceChat {
     is_speaking: Arc<AtomicBool>,
     loopback_enabled: Arc<AtomicBool>,
     output_gain: Arc<AtomicU32>,
+    deafened: Arc<AtomicBool>,
 
     config: VoiceChatConfig,
 }
@@ -117,6 +118,7 @@ impl VoiceChat {
             is_speaking: Arc::new(AtomicBool::new(false)),
             loopback_enabled: Arc::new(AtomicBool::new(false)),
             output_gain: Arc::new(AtomicU32::new(config.output_gain.to_bits())),
+            deafened: Arc::new(AtomicBool::new(false)),
             config,
         })
     }
@@ -160,6 +162,7 @@ impl VoiceChat {
             self.config.output_gain,
         )?;
         self.output_gain = output.output_gain_handle();
+        self.deafened = output.deafened_handle();
         output.start()?;
         self.output = Some(output);
         Ok(())
@@ -490,6 +493,17 @@ impl VoiceChat {
 
     pub fn is_muted(&self) -> bool {
         self.input.as_ref().map_or(false, |i| i.is_muted())
+    }
+
+    /// Deafen: silences all incoming audio without decoding.
+    /// Unlike setting output gain to 0, this skips the decode/mix/resample
+    /// pipeline entirely, saving CPU.
+    pub fn set_deafened(&self, deafened: bool) {
+        self.deafened.store(deafened, Ordering::Relaxed);
+    }
+
+    pub fn is_deafened(&self) -> bool {
+        self.deafened.load(Ordering::Relaxed)
     }
 
     pub fn set_noise_suppression(&self, enabled: bool) {

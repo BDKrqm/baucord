@@ -41,6 +41,8 @@ pub struct AudioOutput {
     peer_settings: Arc<Mutex<HashMap<u64, PeerAudioSettings>>>,
     /// Master output gain (f32 bits). Applied after mixing.
     output_gain: Arc<AtomicU32>,
+    /// When true, the worker pushes silence instead of decoding/mixing.
+    deafened: Arc<AtomicBool>,
 
     // Stats
     stats: Arc<AudioStats>,
@@ -95,6 +97,7 @@ impl AudioOutput {
             should_stop: Arc::new(AtomicBool::new(false)),
             peer_settings,
             output_gain: Arc::new(AtomicU32::new(output_gain.to_bits())),
+            deafened: Arc::new(AtomicBool::new(false)),
             stats,
             decoder_rx: Some(decoder_rx),
         })
@@ -102,6 +105,10 @@ impl AudioOutput {
 
     pub fn output_gain_handle(&self) -> Arc<AtomicU32> {
         self.output_gain.clone()
+    }
+
+    pub fn deafened_handle(&self) -> Arc<AtomicBool> {
+        self.deafened.clone()
     }
 
     pub fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -122,6 +129,7 @@ impl AudioOutput {
                 self.ring_capacity,
                 sample_rate,
                 self.output_gain.clone(),
+                self.deafened.clone(),
             );
             self.worker_thread = Some(handle);
         }
@@ -214,6 +222,7 @@ impl AudioOutput {
         ring_capacity: usize,
         device_sample_rate: u32,
         output_gain: Arc<AtomicU32>,
+        deafened: Arc<AtomicBool>,
     ) -> thread::JoinHandle<()> {
         thread::spawn(move || {
             let mut jitter_buffer =
@@ -274,13 +283,20 @@ impl AudioOutput {
                 }
 
                 // Pull 10 ms from jitter buffer (at 48 kHz)
-                jitter_buffer.pull_mixed(HOP, &mut hop_buf);
+                // When deafened, skip decoding/mixing entirely and push silence.
+                if deafened.load(Ordering::Relaxed) {
+                    // Drain jitter buffer state so it doesn't accumulate stale frames
+                    jitter_buffer.pull_mixed(HOP, &mut hop_buf);
+                    hop_buf.fill(0.0);
+                } else {
+                    jitter_buffer.pull_mixed(HOP, &mut hop_buf);
 
-                // Apply master output gain
-                let gain = f32::from_bits(output_gain.load(Ordering::Relaxed));
-                if (gain - 1.0).abs() > f32::EPSILON {
-                    for s in hop_buf.iter_mut() {
-                        *s = (*s * gain).clamp(-0.99, 0.99);
+                    // Apply master output gain
+                    let gain = f32::from_bits(output_gain.load(Ordering::Relaxed));
+                    if (gain - 1.0).abs() > f32::EPSILON {
+                        for s in hop_buf.iter_mut() {
+                            *s = (*s * gain).clamp(-0.99, 0.99);
+                        }
                     }
                 }
 

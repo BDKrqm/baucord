@@ -35,6 +35,7 @@ pub enum VoiceControl {
     },
     Stop,
     SetMuted(bool),
+    SetDeafened(bool),
     SetLoopback(bool),
     SetGateThreshold(f32),
     SetInputGain(f32),
@@ -251,6 +252,9 @@ fn handle_control(
         }
         VoiceControl::SetMuted(muted) => {
             if let Some(v) = vc.as_ref() { v.set_muted(muted); }
+        }
+        VoiceControl::SetDeafened(deafened) => {
+            if let Some(v) = vc.as_ref() { v.set_deafened(deafened); }
         }
         VoiceControl::SetLoopback(enabled) => {
             if let Some(v) = vc.as_ref() { v.set_loopback(enabled); }

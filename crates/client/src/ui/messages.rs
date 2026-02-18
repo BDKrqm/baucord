@@ -15,6 +15,7 @@ pub enum UiMessage {
 
     // ── Voice controls ──────────────────────────────────────────────
     ToggleMute,
+    ToggleDeafen,
     TestMicrophone(bool),
     SetGateThreshold(f32),
     SetInputGain(f32),

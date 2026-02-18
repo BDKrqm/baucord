@@ -60,6 +60,7 @@ pub struct App {
     connected: bool,
     settings: Settings,
     is_muted: bool,
+    is_deafened: bool,
     is_testing_mic: bool,
     is_testing_mic_shared: Arc<AtomicBool>,
 
@@ -120,6 +121,7 @@ impl App {
             connected: false,
             settings,
             is_muted: initial_mute,
+            is_deafened: false,
             is_testing_mic: false,
             is_testing_mic_shared,
             connection_window: None,
@@ -247,6 +249,11 @@ impl App {
             }
             NetworkMessage::VoiceData { .. } => {}
             NetworkMessage::UiUpdate => {}
+            NetworkMessage::LatencyUpdate { rtt_ms } => {
+                if let Some(sidebar) = &mut self.sidebar {
+                    sidebar.update_latency(rtt_ms);
+                }
+            }
         }
     }
 
@@ -263,6 +270,9 @@ impl App {
             }
             UiMessage::ToggleMute => {
                 self.handle_toggle_mute();
+            }
+            UiMessage::ToggleDeafen => {
+                self.handle_toggle_deafen();
             }
             UiMessage::TestMicrophone(enabled) => {
                 self.handle_test_microphone(enabled);
@@ -504,6 +514,18 @@ impl App {
         }
     }
 
+    fn handle_toggle_deafen(&mut self) {
+        self.is_deafened = !self.is_deafened;
+        self.voice
+            .tx
+            .send(VoiceControl::SetDeafened(self.is_deafened))
+            .ok();
+
+        if let Some(sidebar) = &mut self.sidebar {
+            sidebar.set_deafen_state(self.is_deafened);
+        }
+    }
+
     fn handle_test_microphone(&mut self, enabled: bool) {
         self.is_testing_mic = enabled;
         self.is_testing_mic_shared.store(enabled, Ordering::Relaxed);
@@ -601,6 +623,7 @@ impl App {
         self.users.clear();
         self.our_client_id = None;
         self.is_muted = false;
+        self.is_deafened = false;
 
         if let Some(mut w) = self.main_window.take() {
             w.hide();

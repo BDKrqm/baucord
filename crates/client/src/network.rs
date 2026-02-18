@@ -59,6 +59,9 @@ pub enum NetworkMessage {
         client_id: ClientId,
         is_speaking: bool,
     },
+    LatencyUpdate {
+        rtt_ms: f64,
+    },
     UiUpdate, // For periodic UI refreshes
 }
 
@@ -198,6 +201,7 @@ pub(crate) struct NetworkClient {
     last_speaking_sent: bool,
     last_speaking_instant: Instant,
     speaking_cache: HashMap<ClientId, (bool, Instant)>,
+    last_rtt_check: Instant,
 }
 
 impl NetworkClient {
@@ -276,6 +280,7 @@ impl NetworkClient {
             last_speaking_sent: false,
             last_speaking_instant: Instant::now().checked_sub(Duration::from_secs(5)).unwrap(),
             speaking_cache: HashMap::new(),
+            last_rtt_check: Instant::now(),
         })
     }
 
@@ -382,6 +387,18 @@ impl NetworkClient {
                     "Failed to send packets: {}",
                     e
                 )));
+        }
+
+        // Sample RTT every ~2 seconds to avoid spamming the UI
+        let now = Instant::now();
+        if now.duration_since(self.last_rtt_check) >= Duration::from_secs(2) {
+            self.last_rtt_check = now;
+            if self.client.is_connected() {
+                let rtt = self.client.rtt();
+                self.message_queue.push(NetworkMessage::LatencyUpdate {
+                    rtt_ms: rtt,
+                });
+            }
         }
     }
 
