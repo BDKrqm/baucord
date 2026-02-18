@@ -34,11 +34,8 @@ env_logger = "0.11"
 
 [dev-dependencies]
 fltk = { version = "1.5", features = ["fltk-bundled"] }
+ui = { path = "../ui"}
 
 [[example]]
-name = "basic_usage"
-path = "examples/basic_usage.rs"
-
-[[example]]
-name = "stats_dashboard"
-path = "examples/stats_dashboard.rs"
+name = "stats"
+path = "examples/stats.rs"

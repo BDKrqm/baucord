@@ -3,4 +3,3 @@ pub mod chat;
 pub mod messages;
 pub mod settings;
 pub mod sidebar;
-pub mod theme;

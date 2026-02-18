@@ -2,14 +2,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod config;
 mod network;
-mod settings;
 mod ui;
+mod voice;
 
 use app::App;
 
 fn main() {
-    // Initialize logging
     #[cfg(debug_assertions)]
     {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
@@ -26,8 +26,6 @@ fn main() {
             .init();
     }
 
-    // Create and run the application
     let mut app = App::new();
     app.run();
 }
-

@@ -1,4 +1,4 @@
-//! Audio input: capture → resample → denoise → AGC → gain → clamp → VAD → encode.
+//! Audio input: capture → resample → denoise → gate → gain → clamp → VAD → encode.
 //!
 //! Device compatibility strategy:
 //! - Use cpal's `default_input_config()` — accept whatever the OS/driver gives us
@@ -7,8 +7,8 @@
 //! - This works with Bluetooth HFP (8/16 kHz), USB mics (44.1/48/96 kHz),
 //!   audio interfaces (any rate), and everything in between.
 
-use crate::agc::Agc;
 use crate::denoise::Denoiser;
+use crate::gate::NoiseGate;
 use crate::resampler::build_input_resampler;
 use crate::stats::AudioStats;
 use crate::vad::VADProcessor;
@@ -50,11 +50,11 @@ pub struct AudioInput {
 
     // Settings (shared with worker via atomics)
     is_muted: Arc<AtomicBool>,
-    vad_enabled: Arc<AtomicBool>,
-    vad_threshold: Arc<AtomicU32>, // f32 bits
     noise_suppression: Arc<AtomicBool>,
-    /// Master input gain (f32 bits). Applied after denoise/AGC, before VAD.
+    /// Master input gain (f32 bits). Applied after gate, before encoding.
     input_gain: Arc<AtomicU32>,
+    /// Noise gate threshold (f32 bits). The primary activation control.
+    gate_threshold: Arc<AtomicU32>,
 
     // Observable state
     input_level: Arc<AtomicU32>, // f32 bits, 0.0–1.0 — raw mic capture level (no gain)
@@ -70,9 +70,9 @@ impl AudioInput {
         encoder_tx: Sender<Vec<f32>>,
         loopback_tx: Option<Sender<(u64, Vec<f32>)>>,
         stats: Arc<AudioStats>,
-        vad_threshold: f32,
         noise_suppression: bool,
         input_gain: f32,
+        gate_threshold: f32,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let host = cpal::default_host();
 
@@ -102,9 +102,14 @@ impl AudioInput {
             device_config.sample_format(),
         );
 
-        // Ring buffer: 100ms at device rate, mono (we downmix before pushing)
-        let ring_size = ((sample_rate as usize) * 100) / 1000;
-        let (ring_producer, ring_consumer) = RingBuffer::new(ring_size.max(4800));
+        // Ring buffer: 200ms at device rate, mono (we downmix before pushing).
+        // 200ms gives headroom for WASAPI exclusive mode and USB interfaces
+        // that can deliver 20-30ms chunks, plus OS scheduling jitter.
+        let ring_size = ((sample_rate as usize) * 200) / 1000;
+        let (ring_producer, ring_consumer) = RingBuffer::new(ring_size.max(9600));
+
+        // Gate threshold atomic — shared with the NoiseGate instance in the worker
+        let gate_threshold_atomic = Arc::new(AtomicU32::new(gate_threshold.clamp(0.001, 0.5).to_bits()));
 
         Ok(Self {
             device,
@@ -118,10 +123,9 @@ impl AudioInput {
             worker_thread: None,
             should_stop: Arc::new(AtomicBool::new(false)),
             is_muted: Arc::new(AtomicBool::new(false)),
-            vad_enabled: Arc::new(AtomicBool::new(true)),
-            vad_threshold: Arc::new(AtomicU32::new(vad_threshold.to_bits())),
             noise_suppression: Arc::new(AtomicBool::new(noise_suppression)),
             input_gain: Arc::new(AtomicU32::new(input_gain.to_bits())),
+            gate_threshold: gate_threshold_atomic,
             input_level: Arc::new(AtomicU32::new(0.0_f32.to_bits())),
             is_speaking: Arc::new(AtomicBool::new(false)),
             stats,
@@ -180,7 +184,7 @@ impl AudioInput {
                 }
 
                 // Downmix to mono: average all channels per frame.
-                // No gain here — gain is applied in the worker after denoise/AGC.
+                // No gain here — gain is applied in the worker after denoise/gate.
                 let mut rms_acc = 0.0f32;
                 let mut count = 0usize;
 
@@ -225,12 +229,12 @@ impl AudioInput {
         let stats = self.stats.clone();
         let encoder_tx = self.encoder_tx.clone();
         let is_speaking_handle = self.is_speaking.clone();
-        let vad_enabled = self.vad_enabled.clone();
         let is_muted = self.is_muted.clone();
         let noise_suppression = self.noise_suppression.clone();
         let loopback_tx = self.loopback_tx.clone();
         let loopback_enabled = self.loopback_enabled.clone();
         let input_gain = self.input_gain.clone();
+        let gate_threshold = self.gate_threshold.clone();
 
         self.worker_thread = Some(thread::spawn(move || {
             // ── Resampler (if device rate ≠ 48 kHz) ─────────────────────
@@ -261,10 +265,18 @@ impl AudioInput {
 
             // ── Denoiser ────────────────────────────────────────────────
             let mut denoiser = Denoiser::new();
-            let mut agc = Agc::new(0.15);
 
-            // ── VAD (earshot speech classifier — energy gate is above) ──
+            // ── Noise gate (replaces AGC — users control their own gain,
+            //    the gate just enforces a hard floor) ────────────────────
+            // Uses the shared atomic so runtime set_gate_threshold() calls
+            // from the AudioInput API propagate immediately to the gate.
+            let mut gate = NoiseGate::with_threshold_handle(gate_threshold, 50);
+
+            // ── VAD (earshot speech classifier) ─────────────────────────
             let mut vad = VADProcessor::new();
+
+            // ── Pre-allocated conversion buffer for VAD ─────────────────
+            // Avoids allocating a Vec<i16> on every VAD call.
 
             // ── Processing state ────────────────────────────────────────
             let mut read_buf = vec![0.0f32; 4096];
@@ -291,8 +303,8 @@ impl AudioInput {
                     is_speaking_handle.store(false, Ordering::Relaxed);
                     while ring_consumer.pop().is_ok() {}
                     thread::sleep(Duration::from_millis(10));
-                    agc.reset();
                     denoiser.reset();
+                    gate.reset();
                     continue;
                 }
 
@@ -332,8 +344,8 @@ impl AudioInput {
                         let expected = r.output_frames_next();
                         resampler_output[0].resize(expected, 0.0);
 
-                       let in_adapter = SequentialSliceOfVecs::new(&resampler_input, 1, n).unwrap();
-let mut out_adapter = SequentialSliceOfVecs::new_mut(&mut resampler_output, 1, expected).unwrap(); 
+                        let in_adapter = SequentialSliceOfVecs::new(&resampler_input, 1, n).unwrap();
+                        let mut out_adapter = SequentialSliceOfVecs::new_mut(&mut resampler_output, 1, expected).unwrap();
 
                         match r.process_into_buffer(&in_adapter, &mut out_adapter, None) {
                             Ok((_in_len, out_len)) if out_len > 0 => {
@@ -362,15 +374,17 @@ let mut out_adapter = SequentialSliceOfVecs::new_mut(&mut resampler_output, 1, e
                 while accumulator.len() >= FRAME_SIZE {
                     let mut frame: Vec<f32> = accumulator.drain(..FRAME_SIZE).collect();
 
-                    // ── Denoise (before AGC so RNNoise sees natural levels) ─
+                    // ── Denoise (runs first so gate/VAD see clean signal) ─
                     let denoise_on = noise_suppression.load(Ordering::Relaxed);
-                    if denoise_on {
-                        denoiser.process_frame(&mut frame);
-                    }
+                    let rnnoise_vad_prob = if denoise_on {
+                        denoiser.process_frame(&mut frame)
+                    } else {
+                        1.0 // assume speech if denoise is off
+                    };
                     stats.denoise_active.store(denoise_on, Ordering::Relaxed);
 
-                    // ── Post-denoise level (what the denoiser produced, before
-                    //    AGC/gain — use for VAD threshold visualization) ─────
+                    // ── Post-denoise level (what the denoiser produced,
+                    //    before gate/gain — use for threshold visualization)
                     {
                         let rms: f32 =
                             (frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32).sqrt();
@@ -380,10 +394,14 @@ let mut out_adapter = SequentialSliceOfVecs::new_mut(&mut resampler_output, 1, e
                             .store(scaled.to_bits(), Ordering::Relaxed);
                     }
 
-                    // ── AGC (normalizes clean signal to target RMS) ─────────
-                    agc.process_frame(&mut frame);
+                    // ── Noise gate (hard threshold — silences everything
+                    //    below the floor, passes signal untouched above it).
+                    //    The gate is AUTHORITATIVE: if it's closed, we don't
+                    //    send audio regardless of what VAD thinks.
+                    let gate_open = gate.process_frame(&mut frame);
+                    stats.gate_active.store(gate.is_open(), Ordering::Relaxed);
 
-                    // ── Input gain (user preference on clean, normalized audio)
+                    // ── Input gain (user preference, applied to gated signal)
                     let gain = f32::from_bits(input_gain.load(Ordering::Relaxed));
                     if (gain - 1.0).abs() > f32::EPSILON {
                         for s in frame.iter_mut() {
@@ -413,11 +431,21 @@ let mut out_adapter = SequentialSliceOfVecs::new_mut(&mut resampler_output, 1, e
                         }
                     }
 
-                    // ── VAD gate ────────────────────────────────────────
-                    let is_speech = if vad_enabled.load(Ordering::Relaxed) {
-                        vad.process(&frame)
+                    // ── Speech detection ─────────────────────────────────
+                    // Gate is authoritative: if the gate is closed, this frame
+                    // is silence and we never send it, regardless of VAD.
+                    // VAD only runs when the gate is open, to distinguish
+                    // speech from non-speech noise that's above the gate
+                    // threshold (e.g., a loud fan).
+                    let is_speech = if !gate_open {
+                        // Gate closed — definitely not speech
+                        false
+                    } else if rnnoise_vad_prob < 0.1 {
+                        // RNNoise says definitely not speech — skip earshot
+                        false
                     } else {
-                        true
+                        // Gate open, RNNoise ambiguous — let earshot classify
+                        vad.process(&frame)
                     };
 
                     is_speaking_handle.store(is_speech, Ordering::Relaxed);
@@ -489,16 +517,6 @@ let mut out_adapter = SequentialSliceOfVecs::new_mut(&mut resampler_output, 1, e
         }
     }
 
-    pub fn set_vad_enabled(&self, enabled: bool) {
-        self.vad_enabled.store(enabled, Ordering::Relaxed);
-    }
-
-    pub fn set_vad_threshold(&self, threshold: f32) {
-        let clamped = threshold.clamp(0.01, 0.5);
-        self.vad_threshold
-            .store(clamped.to_bits(), Ordering::Relaxed);
-    }
-
     pub fn set_noise_suppression(&self, enabled: bool) {
         self.noise_suppression.store(enabled, Ordering::Relaxed);
     }
@@ -510,6 +528,14 @@ let mut out_adapter = SequentialSliceOfVecs::new_mut(&mut resampler_output, 1, e
     pub fn set_input_gain(&self, gain: f32) {
         let clamped = gain.clamp(0.0, 2.0);
         self.input_gain.store(clamped.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Set the noise gate threshold at runtime.
+    /// Values: 0.001–0.5 (RMS). See [`NoiseGate::new`] for guidance.
+    pub fn set_gate_threshold(&self, threshold: f32) {
+        let clamped = threshold.clamp(0.001, 0.5);
+        self.gate_threshold
+            .store(clamped.to_bits(), Ordering::Relaxed);
     }
 
     pub fn input_level_handle(&self) -> Arc<AtomicU32> {

@@ -1,10 +1,22 @@
+// network.rs — Renet client + network thread.
+//
+// NetworkClient handles protocol, serialization, voice bundling.
+// NetworkThreadHandle owns the thread that polls the client and routes
+// voice packets to the voice thread.
+
 use bincode::Options;
+use crossbeam_channel::{Receiver, Sender, TryRecvError, bounded};
 use renet::{ChannelConfig, ClientId, ConnectionConfig, RenetClient, SendType};
 use renet_netcode::{ClientAuthentication, NETCODE_USER_DATA_BYTES, NetcodeClientTransport};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{SocketAddr, UdpSocket};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime};
+
+use core::AudioPacket;
+
+use crate::voice::{VoiceControl, WakeFn};
 
 const PROTOCOL_ID: u64 = 27;
 
@@ -46,6 +58,9 @@ pub enum NetworkMessage {
     UserSpeaking {
         client_id: ClientId,
         is_speaking: bool,
+    },
+    LatencyUpdate {
+        rtt_ms: f64,
     },
     UiUpdate, // For periodic UI refreshes
 }
@@ -172,7 +187,7 @@ enum ServerMessage {
     },
 }
 
-pub struct NetworkClient {
+pub(crate) struct NetworkClient {
     client: RenetClient,
     transport: NetcodeClientTransport,
     usernames: HashMap<ClientId, String>,
@@ -186,6 +201,7 @@ pub struct NetworkClient {
     last_speaking_sent: bool,
     last_speaking_instant: Instant,
     speaking_cache: HashMap<ClientId, (bool, Instant)>,
+    last_rtt_check: Instant,
 }
 
 impl NetworkClient {
@@ -264,6 +280,7 @@ impl NetworkClient {
             last_speaking_sent: false,
             last_speaking_instant: Instant::now().checked_sub(Duration::from_secs(5)).unwrap(),
             speaking_cache: HashMap::new(),
+            last_rtt_check: Instant::now(),
         })
     }
 
@@ -370,6 +387,18 @@ impl NetworkClient {
                     "Failed to send packets: {}",
                     e
                 )));
+        }
+
+        // Sample RTT every ~2 seconds to avoid spamming the UI
+        let now = Instant::now();
+        if now.duration_since(self.last_rtt_check) >= Duration::from_secs(2) {
+            self.last_rtt_check = now;
+            if self.client.is_connected() {
+                let rtt = self.client.rtt();
+                self.message_queue.push(NetworkMessage::LatencyUpdate {
+                    rtt_ms: rtt,
+                });
+            }
         }
     }
 
@@ -568,5 +597,181 @@ impl Username {
         user_data[0] = self.0.len() as u8;
         user_data[1..self.0.len() + 1].copy_from_slice(self.0.as_bytes());
         user_data
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  Network control messages (sent from UI thread → network thread)
+// ════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug)]
+pub enum NetworkControl {
+    Connect { addr: SocketAddr, nickname: String },
+    Disconnect,
+    SendMessage(String),
+    SendVoicePacket(AudioPacket),
+    SendSpeakingStatus(bool),
+    Shutdown,
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  Network thread handle
+// ════════════════════════════════════════════════════════════════════════
+
+pub struct NetworkThreadHandle {
+    pub tx: Sender<NetworkControl>,
+    pub msg_rx: Receiver<NetworkMessage>,
+    join_handle: Option<thread::JoinHandle<()>>,
+}
+
+impl NetworkThreadHandle {
+    /// Spawn the network thread using pre-created channels.
+    /// This allows the caller to give `network_tx` to the voice thread
+    /// before the network thread is spawned (resolving the circular dependency).
+    pub fn spawn_with_channels(
+        tx: Sender<NetworkControl>,
+        control_rx: Receiver<NetworkControl>,
+        msg_tx: Sender<NetworkMessage>,
+        msg_rx: Receiver<NetworkMessage>,
+        voice_tx: Sender<VoiceControl>,
+        wake: WakeFn,
+    ) -> Self {
+        let join_handle = thread::spawn(move || {
+            run_network_loop(control_rx, msg_tx, voice_tx, wake);
+        });
+
+        Self { tx, msg_rx, join_handle: Some(join_handle) }
+    }
+
+    /// Convenience: spawn with internally created channels.
+    pub fn spawn(voice_tx: Sender<VoiceControl>, wake: WakeFn) -> Self {
+        let (tx, control_rx) = bounded::<NetworkControl>(256);
+        let (msg_tx, msg_rx) = bounded::<NetworkMessage>(256);
+        Self::spawn_with_channels(tx, control_rx, msg_tx, msg_rx, voice_tx, wake)
+    }
+
+    /// Send shutdown and wait for the thread to exit.
+    pub fn shutdown(&mut self) {
+        let _ = self.tx.send(NetworkControl::Shutdown);
+        if let Some(handle) = self.join_handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for NetworkThreadHandle {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+// ── Thread loop ─────────────────────────────────────────────────────────
+
+fn run_network_loop(
+    control_rx: Receiver<NetworkControl>,
+    msg_tx: Sender<NetworkMessage>,
+    voice_tx: Sender<VoiceControl>,
+    wake: WakeFn,
+) {
+    let mut client: Option<NetworkClient> = None;
+    let mut running = true;
+
+    while running {
+        // Process control messages
+        for _ in 0..32 {
+            match control_rx.try_recv() {
+                Ok(ctrl) => match ctrl {
+                    NetworkControl::Connect { addr, nickname } => {
+                        match NetworkClient::connect(addr, nickname) {
+                            Ok(c) => {
+                                msg_tx.send(NetworkMessage::Connected).ok();
+                                wake();
+                                client = Some(c);
+                            }
+                            Err(e) => {
+                                msg_tx.send(NetworkMessage::Disconnected(e)).ok();
+                                wake();
+                            }
+                        }
+                    }
+                    NetworkControl::Disconnect => {
+                        if let Some(mut c) = client.take() {
+                            c.disconnect();
+                        }
+                        msg_tx
+                            .send(NetworkMessage::Disconnected("User disconnected".into()))
+                            .ok();
+                        wake();
+                    }
+                    NetworkControl::SendMessage(text) => {
+                        if let Some(ref mut c) = client {
+                            c.send_message(text);
+                        }
+                    }
+                    NetworkControl::SendVoicePacket(packet) => {
+                        if let Some(ref mut c) = client {
+                            c.send_voice_frame(
+                                packet.header.ssrc,
+                                packet.header.seq,
+                                packet.header.timestamp,
+                                &packet.opus_data,
+                            );
+                        }
+                    }
+                    NetworkControl::SendSpeakingStatus(speaking) => {
+                        if let Some(ref mut c) = client {
+                            c.send_speaking_status(speaking);
+                        }
+                    }
+                    NetworkControl::Shutdown => {
+                        running = false;
+                    }
+                },
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    running = false;
+                    break;
+                }
+            }
+        }
+
+        // Poll network
+        if let Some(ref mut c) = client {
+            c.update();
+
+            for msg in c.poll_messages() {
+                match msg {
+                    NetworkMessage::VoiceData {
+                        client_id,
+                        seq,
+                        timestamp,
+                        data,
+                    } => {
+                        let packet = AudioPacket::new(seq, timestamp, client_id, data);
+                        let _ = voice_tx.try_send(VoiceControl::IncomingVoicePacket(packet));
+                    }
+                    other => {
+                        let _ = msg_tx.try_send(other);
+                        wake();
+                    }
+                }
+            }
+
+            c.flush_voice_packet();
+
+            if !c.is_connected() && !c.is_connecting() {
+                client = None;
+                msg_tx
+                    .send(NetworkMessage::Disconnected("Connection lost".into()))
+                    .ok();
+                wake();
+            }
+        }
+
+        if client.is_some() {
+            thread::sleep(Duration::from_millis(1));
+        } else {
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 }

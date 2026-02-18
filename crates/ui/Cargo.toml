@@ -1,0 +1,9 @@
+[package]
+name = "ui"
+version = "0.1.0"
+edition = "2021"
+description = "Shared FLTK widgets and theming for voice-chat-core examples and client"
+
+[dependencies]
+fltk = { version = "1.5", features = ["fltk-bundled"] }
+fltk-theme = "0.7"

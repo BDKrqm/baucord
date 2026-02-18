@@ -1,7 +1,7 @@
 //! Noise suppression via nnnoiseless (Mozilla RNNoise, pure Rust).
 //!
 //! Operates on 480-sample frames (10 ms @ 48 kHz) — exactly our Opus frame size.
-//! Sits in the input pipeline: capture → resample → **denoise** → VAD → encode.
+//! Sits in the input pipeline: capture → resample → **denoise** → gate → VAD → encode.
 
 use nnnoiseless::DenoiseState;
 
@@ -10,26 +10,36 @@ use nnnoiseless::DenoiseState;
 /// The denoiser expects f32 samples scaled to i16 range (−32768..32767),
 /// and returns cleaned samples in the same range. We handle the conversion
 /// from/to normalized f32 (−1.0..1.0) internally.
+///
+/// The denoiser is pre-warmed during construction by feeding a silent frame,
+/// so the first real frame of audio is processed correctly without artifacts.
 pub struct Denoiser {
     state: Box<DenoiseState<'static>>,
     output_buf: [f32; DenoiseState::FRAME_SIZE],
-    /// True after the first frame (we discard the first output due to fade-in artifacts).
-    warmed_up: bool,
 }
 
 impl Denoiser {
     pub fn new() -> Self {
+        let mut state = DenoiseState::new();
+
+        // Pre-warm: feed a silent frame so the RNN state is primed.
+        // Without this, the first real frame has fade-in artifacts
+        // that clip the onset of speech (bad for push-to-talk).
+        let silent_input = [0.0f32; DenoiseState::FRAME_SIZE];
+        let mut warmup_buf = [0.0f32; DenoiseState::FRAME_SIZE];
+        state.process_frame(&mut warmup_buf, &silent_input);
+
         Self {
-            state: DenoiseState::new(),
+            state,
             output_buf: [0.0; DenoiseState::FRAME_SIZE],
-            warmed_up: false,
         }
     }
 
     /// Process one frame of 480 normalized f32 samples (−1.0..1.0) in-place.
     ///
     /// Returns the VAD probability from the RNN (0.0–1.0), which can be used
-    /// as a secondary VAD signal if desired.
+    /// as a pre-filter for the earshot VAD to skip expensive processing on
+    /// frames that are clearly not speech.
     pub fn process_frame(&mut self, samples: &mut [f32]) -> f32 {
         debug_assert_eq!(samples.len(), DenoiseState::FRAME_SIZE);
 
@@ -38,26 +48,23 @@ impl Denoiser {
 
         let vad_prob = self.state.process_frame(&mut self.output_buf, &input);
 
-        if !self.warmed_up {
-            // First frame has fade-in artifacts — output silence
-            self.warmed_up = true;
-            for s in samples.iter_mut() {
-                *s = 0.0;
-            }
-        } else {
-            // Convert back to normalized f32
-            for (out, &denoised) in samples.iter_mut().zip(self.output_buf.iter()) {
-                *out = (denoised / 32767.0).clamp(-1.0, 1.0);
-            }
+        // Convert back to normalized f32
+        for (out, &denoised) in samples.iter_mut().zip(self.output_buf.iter()) {
+            *out = (denoised / 32767.0).clamp(-1.0, 1.0);
         }
 
         vad_prob
     }
 
     /// Reset state (e.g., after device switch).
+    /// Re-warms with a silent frame so the next real frame is clean.
     pub fn reset(&mut self) {
         self.state = DenoiseState::new();
         self.output_buf = [0.0; DenoiseState::FRAME_SIZE];
-        self.warmed_up = false;
+
+        // Re-warm after reset
+        let silent_input = [0.0f32; DenoiseState::FRAME_SIZE];
+        let mut warmup_buf = [0.0f32; DenoiseState::FRAME_SIZE];
+        self.state.process_frame(&mut warmup_buf, &silent_input);
     }
 }
