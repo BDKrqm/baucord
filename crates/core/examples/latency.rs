@@ -1,34 +1,64 @@
 //! Latency profiling for the voice-chat audio pipeline.
 //!
-//! Measures time spent at each stage by injecting timestamps through the pipeline.
+//! Measures ACTUAL pipeline latency by detecting impulse propagation:
+//! when pipeline_level spikes (input detected sound), start a timer.
+//! When output_level spikes (output played it back via loopback), stop the timer.
+//! The delta is the real, measured pipeline latency — no human reaction time.
+//!
 //! Run with: cargo run --example latency_profile
 //!
-//! This example uses loopback mode: mic → encode → (skip network) → decode → speaker.
-//! It prints per-stage timing every second so you can see exactly where latency hides.
+//! How to use:
+//! 1. Run the example (it enables loopback automatically)
+//! 2. Make a sharp loud noise (snap fingers, clap, tap the mic)
+//! 3. The profiler detects the impulse traveling through the pipeline
+//!    and prints the measured latency
+//! 4. Wait 1-2 seconds between snaps for clean measurements
 
 use core::{AudioStats, VoiceChat, VoiceChatConfig, FRAME_SIZE};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// Minimum level to consider an "impulse" on the input side.
+/// This needs to be high enough to ignore background noise but low
+/// enough to catch a clap/snap. 0.15 works well for most mics.
+const INPUT_IMPULSE_THRESHOLD: f32 = 0.15;
+
+/// Minimum level to consider the impulse arrived at output.
+/// Lower than input because loopback + mixing + gain may attenuate.
+const OUTPUT_IMPULSE_THRESHOLD: f32 = 0.02;
+
+/// Cooldown between measurements to avoid double-triggers.
+const MEASUREMENT_COOLDOWN: Duration = Duration::from_millis(1500);
+
+/// How fast we poll the level atomics. 0.5ms gives us ±0.5ms accuracy.
+const POLL_INTERVAL: Duration = Duration::from_micros(500);
+
+/// Maximum time to wait for output impulse after input detection.
+/// If exceeded, the measurement is discarded (sound didn't make it through).
+const MAX_IMPULSE_WAIT: Duration = Duration::from_millis(500);
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp_millis()
         .init();
 
-    println!("╔══════════════════════════════════════════════════════╗");
-    println!("║       Audio Pipeline Latency Profiler               ║");
-    println!("╠══════════════════════════════════════════════════════╣");
-    println!("║ This measures where time is spent in the pipeline.  ║");
-    println!("║ Speak into your mic — latency is printed per stage. ║");
-    println!("║ Press Ctrl+C to stop.                               ║");
-    println!("╚══════════════════════════════════════════════════════╝");
+    println!("╔══════════════════════════════════════════════════════════╗");
+    println!("║       Audio Pipeline Latency Profiler v2               ║");
+    println!("╠══════════════════════════════════════════════════════════╣");
+    println!("║ Measures REAL pipeline latency via impulse detection.   ║");
+    println!("║                                                        ║");
+    println!("║ 1. Make a SHARP loud noise (clap, snap, tap the mic)   ║");
+    println!("║ 2. Wait for the measurement to appear                  ║");
+    println!("║ 3. Repeat — wait ~2s between each snap                 ║");
+    println!("║                                                        ║");
+    println!("║ Press Ctrl+C to stop.                                  ║");
+    println!("╚══════════════════════════════════════════════════════════╝");
     println!();
 
-    // ── Build with loopback so we measure the full local round-trip ──
     let config = VoiceChatConfig {
         noise_suppression: true,
-        gate_threshold: 0.008, // low threshold to trigger easily
+        gate_threshold: 0.005, // very low — don't want the gate to eat our impulse
         ..Default::default()
     };
 
@@ -38,128 +68,132 @@ fn main() {
 
     let stats = vc.stats().clone();
 
-    println!("Pipeline started. Loopback enabled.");
-    println!("Speak to see latency measurements.\n");
-    println!(
-        "{:<10} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>10} {:>6} {:>6}",
-        "Time",
-        "Enc(µs)",
-        "Dec(µs)",
-        "JitBuf",
-        "Pkts↑",
-        "Pkts↓",
-        "Under",
-        "Speaking",
-        "Gate",
-        "VAD"
-    );
-    println!("{}", "-".repeat(100));
+    println!("Pipeline started. Loopback enabled.\n");
+    println!("Waiting for impulses... make a sharp noise!\n");
 
+    // ── Measurement state ───────────────────────────────────────────
+    let mut measurements: Vec<f64> = Vec::new();
+    let mut state = MeasureState::WaitingForInput;
+    let mut input_detected_at = Instant::now();
+    let mut input_peak: f32 = 0.0;
+    let mut last_measurement = Instant::now() - MEASUREMENT_COOLDOWN; // allow immediate first
+
+    // ── Also print periodic stats ───────────────────────────────────
+    let mut last_stats_print = Instant::now();
     let start = Instant::now();
-    let mut last_sent = 0u64;
-    let mut last_recv = 0u64;
 
     loop {
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(POLL_INTERVAL);
 
-        let elapsed = start.elapsed().as_secs();
-        let enc_us = stats.last_encode_us.load(Ordering::Relaxed);
-        let dec_us = stats.last_decode_us.load(Ordering::Relaxed);
-        let jitter_ms = stats.jitter_buffer_occupancy_ms.load(Ordering::Relaxed);
-        let sent = stats.packets_sent.load(Ordering::Relaxed);
-        let recv = stats.packets_received.load(Ordering::Relaxed);
-        let underruns = stats.output_underruns.load(Ordering::Relaxed);
-        let overruns = stats.input_overruns.load(Ordering::Relaxed);
-        let speaking = stats.vad_active.load(Ordering::Relaxed);
-        let gate = stats.gate_active.load(Ordering::Relaxed);
-        let denoise = stats.denoise_active.load(Ordering::Relaxed);
-        let dtx = stats.dtx_active.load(Ordering::Relaxed);
-
-        let denoised_lvl = f32::from_bits(stats.denoised_level.load(Ordering::Relaxed));
         let pipeline_lvl = f32::from_bits(stats.pipeline_level.load(Ordering::Relaxed));
         let output_lvl = f32::from_bits(stats.output_level.load(Ordering::Relaxed));
 
-        let pkt_rate_sent = sent - last_sent;
-        let pkt_rate_recv = recv - last_recv;
-        last_sent = sent;
-        last_recv = recv;
+        match state {
+            MeasureState::WaitingForInput => {
+                // Check cooldown
+                if last_measurement.elapsed() < MEASUREMENT_COOLDOWN {
+                    continue;
+                }
 
-        let speak_str = if speaking { "SPEAK" } else { "quiet" };
-        let gate_str = if gate { "OPEN" } else { "shut" };
-        let vad_str = if speaking { "YES" } else { "no" };
+                // Detect input impulse
+                if pipeline_lvl >= INPUT_IMPULSE_THRESHOLD {
+                    input_detected_at = Instant::now();
+                    input_peak = pipeline_lvl;
+                    state = MeasureState::WaitingForOutput;
+                }
+            }
 
-        println!(
-            "{:<10} {:>8} {:>8} {:>6}ms {:>8} {:>8} {:>6} {:>10} {:>6} {:>6}",
-            format!("{}s", elapsed),
-            enc_us,
-            dec_us,
-            jitter_ms,
-            pkt_rate_sent,
-            pkt_rate_recv,
-            underruns,
-            speak_str,
-            gate_str,
-            vad_str,
-        );
+            MeasureState::WaitingForOutput => {
+                // Track rising input (the impulse may span multiple polls)
+                if pipeline_lvl > input_peak {
+                    input_peak = pipeline_lvl;
+                }
 
-        // Detailed level info when speaking
-        if speaking || gate {
+                // Detect output impulse
+                if output_lvl >= OUTPUT_IMPULSE_THRESHOLD {
+                    let latency = input_detected_at.elapsed();
+                    let latency_ms = latency.as_secs_f64() * 1000.0;
+
+                    measurements.push(latency_ms);
+                    let count = measurements.len();
+
+                    // Compute running stats
+                    let avg = measurements.iter().sum::<f64>() / count as f64;
+                    let min = measurements.iter().cloned().fold(f64::MAX, f64::min);
+                    let max = measurements.iter().cloned().fold(0.0f64, f64::max);
+
+                    // Compute p50 (median)
+                    let mut sorted = measurements.clone();
+                    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    let p50 = if count % 2 == 0 && count >= 2 {
+                        (sorted[count / 2 - 1] + sorted[count / 2]) / 2.0
+                    } else {
+                        sorted[count / 2]
+                    };
+
+                    println!(
+                        "  🎯 #{:<3} Latency: {:.1}ms  (in={:.3} out={:.3})  │  avg={:.1}ms  min={:.1}ms  max={:.1}ms  p50={:.1}ms  [n={}]",
+                        count,
+                        latency_ms,
+                        input_peak,
+                        output_lvl,
+                        avg,
+                        min,
+                        max,
+                        p50,
+                        count,
+                    );
+
+                    last_measurement = Instant::now();
+                    state = MeasureState::WaitingForInput;
+                }
+
+                // Timeout — impulse didn't make it through
+                if input_detected_at.elapsed() > MAX_IMPULSE_WAIT {
+                    println!(
+                        "  ⏱️  Timeout: input impulse detected (level={:.3}) but no output after {}ms — discarded",
+                        input_peak,
+                        MAX_IMPULSE_WAIT.as_millis(),
+                    );
+                    last_measurement = Instant::now();
+                    state = MeasureState::WaitingForInput;
+                }
+            }
+        }
+
+        // ── Periodic status (every 5s) ──────────────────────────────
+        if last_stats_print.elapsed() >= Duration::from_secs(5) {
+            last_stats_print = Instant::now();
+            let elapsed = start.elapsed().as_secs();
+            let jitter_ms = stats.jitter_buffer_occupancy_ms.load(Ordering::Relaxed);
+            let underruns = stats.output_underruns.load(Ordering::Relaxed);
+            let overruns = stats.input_overruns.load(Ordering::Relaxed);
+            let speaking = stats.vad_active.load(Ordering::Relaxed);
+            let gate = stats.gate_active.load(Ordering::Relaxed);
+
             println!(
-                "           Levels: denoised={:.3} pipeline={:.3} output={:.3} | BW: ↑{:.1}kbps ↓{:.1}kbps | Pkt: {}B (avg {:.0}B)",
-                denoised_lvl,
+                "  ── {}s │ jitter_buf={}ms │ underruns={} │ overruns={} │ gate={} │ vad={} │ in={:.3} │ out={:.3} ──",
+                elapsed,
+                jitter_ms,
+                underruns,
+                overruns,
+                if gate { "OPEN" } else { "shut" },
+                if speaking { "YES" } else { "no" },
                 pipeline_lvl,
                 output_lvl,
-                stats.estimated_send_kbps(),
-                stats.estimated_recv_kbps(),
-                stats.last_packet_size.load(Ordering::Relaxed),
-                f32::from_bits(stats.avg_packet_size.load(Ordering::Relaxed)),
             );
-        }
 
-        // Print overrun warnings
-        if overruns > 0 {
-            println!(
-                "  ⚠️  Input overruns: {} (ring buffer full — input worker can't keep up)",
-                overruns
-            );
-        }
-
-        // Latency budget estimate
-        if speaking {
-            // These are the measurable components.
-            // cpal buffer sizes are not directly observable but we estimate.
-            let encode_ms = enc_us as f32 / 1000.0;
-            let decode_ms = dec_us as f32 / 1000.0;
-            let jitter_ms_f = jitter_ms as f32;
-
-            // Frame accumulation: 10ms (we need 480 samples @ 48kHz)
-            let frame_accum_ms = 10.0;
-            // Output worker tick: avg 5ms (worst 10ms from the sleep loop)
-            let output_tick_ms = 5.0;
-            // cpal buffers (estimated): 10-20ms each side
-            let cpal_input_est = 15.0;
-            let cpal_output_est = 15.0;
-
-            let total_est = cpal_input_est
-                + frame_accum_ms
-                + encode_ms
-                + 1.0  // network (LAN)
-                + decode_ms
-                + output_tick_ms
-                + jitter_ms_f
-                + cpal_output_est;
-
-            println!(
-                "  📊 Latency budget: cpal_in≈{:.0}ms + frame={:.0}ms + enc={:.1}ms + net≈1ms + dec={:.1}ms + tick≈{:.0}ms + jitter={:.0}ms + cpal_out≈{:.0}ms = ~{:.0}ms",
-                cpal_input_est,
-                frame_accum_ms,
-                encode_ms,
-                decode_ms,
-                output_tick_ms,
-                jitter_ms_f,
-                cpal_output_est,
-                total_est,
-            );
+            if measurements.is_empty() {
+                println!("  💡 No measurements yet — try clapping or tapping your mic!");
+            }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MeasureState {
+    /// Waiting for a loud impulse to appear on the input pipeline.
+    WaitingForInput,
+    /// Input impulse detected — waiting for it to appear on output.
+    WaitingForOutput,
 }

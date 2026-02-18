@@ -14,6 +14,7 @@ use crate::stats::AudioStats;
 use crate::vad::VADProcessor;
 use crate::FRAME_SIZE;
 
+use audioadapter_buffers::direct::SequentialSliceOfVecs;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig, SupportedStreamConfig};
 use crossbeam_channel::{Sender, TrySendError};
@@ -21,7 +22,6 @@ use dasp_sample::{FromSample, Sample as DaspSample, ToSample};
 use log::{error, info, warn};
 use rtrb::{Consumer, Producer, RingBuffer};
 use rubato::{Async, Resampler};
-use audioadapter_buffers::direct::SequentialSliceOfVecs;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -109,7 +109,8 @@ impl AudioInput {
         let (ring_producer, ring_consumer) = RingBuffer::new(ring_size.max(9600));
 
         // Gate threshold atomic — shared with the NoiseGate instance in the worker
-        let gate_threshold_atomic = Arc::new(AtomicU32::new(gate_threshold.clamp(0.001, 0.5).to_bits()));
+        let gate_threshold_atomic =
+            Arc::new(AtomicU32::new(gate_threshold.clamp(0.001, 0.5).to_bits()));
 
         Ok(Self {
             device,
@@ -344,8 +345,11 @@ impl AudioInput {
                         let expected = r.output_frames_next();
                         resampler_output[0].resize(expected, 0.0);
 
-                        let in_adapter = SequentialSliceOfVecs::new(&resampler_input, 1, n).unwrap();
-                        let mut out_adapter = SequentialSliceOfVecs::new_mut(&mut resampler_output, 1, expected).unwrap();
+                        let in_adapter =
+                            SequentialSliceOfVecs::new(&resampler_input, 1, n).unwrap();
+                        let mut out_adapter =
+                            SequentialSliceOfVecs::new_mut(&mut resampler_output, 1, expected)
+                                .unwrap();
 
                         match r.process_into_buffer(&in_adapter, &mut out_adapter, None) {
                             Ok((_in_len, out_len)) if out_len > 0 => {

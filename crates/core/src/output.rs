@@ -9,6 +9,7 @@ use crate::resampler::build_output_resampler;
 use crate::stats::AudioStats;
 use crate::OPUS_SAMPLE_RATE;
 
+use audioadapter_buffers::direct::SequentialSliceOfVecs;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, SupportedStreamConfig};
 use crossbeam_channel::Receiver;
@@ -16,7 +17,6 @@ use dasp_sample::{FromSample, Sample as DaspSample, ToSample};
 use log::{error, info};
 use rtrb::{Consumer, Producer, RingBuffer};
 use rubato::{Async, Resampler};
-use audioadapter_buffers::direct::SequentialSliceOfVecs;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -314,8 +314,10 @@ impl AudioOutput {
                     let expected = r.output_frames_next();
                     resampler_output[0].resize(expected, 0.0);
 
-                   let in_adapter = SequentialSliceOfVecs::new(&resampler_input, 1, needed).unwrap();
-let mut out_adapter = SequentialSliceOfVecs::new_mut(&mut resampler_output, 1, expected).unwrap(); 
+                    let in_adapter =
+                        SequentialSliceOfVecs::new(&resampler_input, 1, needed).unwrap();
+                    let mut out_adapter =
+                        SequentialSliceOfVecs::new_mut(&mut resampler_output, 1, expected).unwrap();
 
                     match r.process_into_buffer(&in_adapter, &mut out_adapter, None) {
                         Ok((_in_len, _out_len)) => {

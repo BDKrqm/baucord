@@ -1,16 +1,22 @@
 //! Adaptive jitter buffer with per-peer sequence tracking and mixing.
 //!
 //! Buffers decoded audio per-peer, mixes to mono, and adapts its target
-//! depth based on inter-arrival jitter estimation.
+//! depth based on inter-arrival jitter estimation and buffer health feedback.
 //!
-//! ## v0.4 changes from v0.3
+//! ## v0.5 changes from v0.4
 //!
-//! - **Sequence-aware**: Tracks seq numbers per peer to detect gaps, reorder,
-//!   and drop late packets before they reach the buffer.
-//! - **Jitter estimation**: Uses inter-arrival variance (simplified WebRTC
-//!   approach) instead of just buffer occupancy for adaptation.
-//! - **Gap reporting**: Exposes gap info so the decoder thread can trigger
-//!   PLC/FEC for the right number of missing frames.
+//! - **Bidirectional adaptation**: Target depth now decreases when conditions
+//!   are stable, not just increases on jitter spikes. Uses health-based
+//!   feedback (late packets, gaps) as the "increase" signal and stable time
+//!   as the "decrease" signal.
+//! - **Asymmetric jitter EMA**: Fast attack (0.3) to react to spikes,
+//!   slower release (0.03) to avoid oscillation, but not so slow it
+//!   never comes down (old code used 0.1 symmetric — too sticky).
+//! - **75th percentile jitter**: Uses p75 across peers instead of max,
+//!   so one bad peer doesn't penalize everyone.
+//! - **Convergence on stable networks**: On LAN with <1ms jitter, target
+//!   converges to minimum (~2ms) within seconds and stays there.
+//!   On internet with 20ms jitter, settles around 40-50ms.
 //! - **Still mixes whatever is available** (no hard gate on target depth).
 
 use crate::config::PeerAudioSettings;
@@ -28,6 +34,7 @@ struct PeerBuffer {
     /// Arrival time of the last packet (for jitter estimation).
     last_arrival: Option<Instant>,
     /// Smoothed jitter estimate in seconds (exponential moving average).
+    /// Uses asymmetric coefficients: fast attack, slower release.
     jitter_estimate: f32,
 }
 
@@ -37,7 +44,7 @@ impl PeerBuffer {
             samples: VecDeque::with_capacity(4800), // 100ms at 48kHz
             last_seq: None,
             last_arrival: None,
-            jitter_estimate: 0.010, // start at 10ms assumption
+            jitter_estimate: 0.002, // start at 2ms — optimistic, will rise if needed
         }
     }
 }
@@ -67,6 +74,15 @@ pub struct AdaptiveJitterBuffer {
 
     buffers: HashMap<u64, PeerBuffer>,
     peer_settings: Arc<Mutex<HashMap<u64, PeerAudioSettings>>>,
+
+    // ── Adaptation state ────────────────────────────────────────────
+    /// Counts adapt() calls since the last late/gap event.
+    /// When this is high, conditions are stable and we can drain.
+    stable_ticks: u32,
+    /// Number of late packets since last adapt() call.
+    late_count: u32,
+    /// Number of gap events since last adapt() call.
+    gap_count: u32,
 }
 
 impl AdaptiveJitterBuffer {
@@ -78,10 +94,13 @@ impl AdaptiveJitterBuffer {
         Self {
             sample_rate,
             target_samples: (initial_target_ms * sample_rate) / 1000,
-            min_samples: (2 * sample_rate) / 1000,
-            max_samples: (60 * sample_rate) / 1000,
+            min_samples: (2 * sample_rate) / 1000, // 2ms floor
+            max_samples: (120 * sample_rate) / 1000, // 120ms ceiling
             buffers: HashMap::new(),
             peer_settings,
+            stable_ticks: 0,
+            late_count: 0,
+            gap_count: 0,
         }
     }
 
@@ -106,14 +125,22 @@ impl AdaptiveJitterBuffer {
         let peer = self.buffers.entry(peer_id).or_insert_with(PeerBuffer::new);
         let now = Instant::now();
 
-        // Update jitter estimate
+        // Update jitter estimate with asymmetric EMA:
+        // - Rising (spike): fast attack, coeff 0.3 (reach ~80% in 3 packets)
+        // - Falling (stable): slow release, coeff 0.03 (decay over ~30 packets / 300ms)
+        // This reacts to jitter spikes within 30ms but doesn't get permanently
+        // inflated by a single burst.
         if let Some(last_arrival) = peer.last_arrival {
             let arrival_delta = now.duration_since(last_arrival).as_secs_f32();
-            // Expected delta for 10ms frames
             let expected_delta = FRAME_SIZE as f32 / self.sample_rate as f32;
             let jitter_sample = (arrival_delta - expected_delta).abs();
-            // EMA: jitter = 0.9 * jitter + 0.1 * sample
-            peer.jitter_estimate = peer.jitter_estimate * 0.9 + jitter_sample * 0.1;
+
+            let coeff = if jitter_sample > peer.jitter_estimate {
+                0.3 // fast attack — react to spikes quickly
+            } else {
+                0.03 // slow release — don't oscillate, but DO come down
+            };
+            peer.jitter_estimate = peer.jitter_estimate * (1.0 - coeff) + jitter_sample * coeff;
         }
         peer.last_arrival = Some(now);
 
@@ -136,17 +163,19 @@ impl AdaptiveJitterBuffer {
 
             if backward > 0 && backward <= 10 {
                 // Late packet — we've already moved past this seq
+                self.late_count += 1;
                 PushResult::Late
             } else if forward > 0 && forward <= 20 {
                 // Gap: we missed `forward` packets
                 let gap = forward.min(10) as usize; // cap PLC at 10 frames (100ms)
                 peer.last_seq = Some(seq);
+                self.gap_count += 1;
                 PushResult::Gap { gap_count: gap }
             } else {
                 // Huge jump — reset this peer's state
                 peer.samples.clear();
                 peer.last_seq = Some(seq);
-                peer.jitter_estimate = 0.010;
+                peer.jitter_estimate = 0.002;
                 PushResult::Reset
             }
         }
@@ -216,29 +245,112 @@ impl AdaptiveJitterBuffer {
                 *s = (*s * scale).clamp(-0.99, 0.99);
             }
         }
+
+        drop(settings); // release lock before drain
+
+        // ── Drain excess: prevent unbounded growth from clock drift ──
+        // The input and output clocks are independent (different devices,
+        // or worker threads paced by OS timers). Even 0.01% drift causes
+        // ~5 samples/sec of accumulation — enough to add 100ms+ of latency
+        // over a few minutes. Fix: after each pull, if any peer's buffer
+        // exceeds target + 1 frame of headroom, discard the oldest excess
+        // samples. This keeps occupancy pinned near the target without
+        // affecting normal operation.
+        let headroom = self.target_samples + n; // target + 1 frame
+        for peer in self.buffers.values_mut() {
+            if peer.samples.len() > headroom {
+                let excess = peer.samples.len() - headroom;
+                // Drop from the front (oldest samples — already stale)
+                peer.samples.drain(..excess);
+            }
+        }
     }
 
-    /// Adapt target depth based on jitter estimates across peers.
+    /// Adapt target depth based on jitter estimates and buffer health.
+    ///
+    /// Called every 10ms by the output worker. Uses two signals:
+    ///
+    /// 1. **Jitter estimates** (from inter-arrival times) — tells us what
+    ///    the network looks like right now.
+    /// 2. **Health feedback** (late packets, gaps) — tells us if the current
+    ///    target is actually too low.
+    ///
+    /// The target moves **up fast** on problems (within 1-2 ticks) and
+    /// **down slowly** during stable periods (over 50-100 ticks / 0.5-1s).
+    /// This avoids both underruns on bad networks and latency creep on
+    /// good ones.
     pub fn adapt(&mut self) {
         if self.buffers.is_empty() {
             return;
         }
 
-        // Use max jitter across active peers as the target
-        let max_jitter_ms = self
+        // ── Compute jitter-based target ─────────────────────────────
+        // Use 75th percentile across active peers instead of max.
+        // This prevents one bad peer from inflating the buffer for everyone.
+        let mut jitter_values: Vec<f32> = self
             .buffers
             .values()
             .filter(|p| p.last_arrival.is_some())
-            .map(|p| p.jitter_estimate * 1000.0)
-            .fold(0.0f32, f32::max);
+            .map(|p| p.jitter_estimate * 1000.0) // convert to ms
+            .collect();
 
-        // Target = 2x jitter estimate, clamped to [min, max]
-        let target_ms = (max_jitter_ms * 2.0).clamp(
-            (self.min_samples * 1000 / self.sample_rate) as f32,
-            (self.max_samples * 1000 / self.sample_rate) as f32,
-        );
+        let jitter_target_ms = if jitter_values.is_empty() {
+            0.0
+        } else {
+            jitter_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let p75_idx = (jitter_values.len() * 3) / 4;
+            let p75_jitter = jitter_values[p75_idx.min(jitter_values.len() - 1)];
+            // Target = 2× p75 jitter — enough headroom without being excessive
+            p75_jitter * 2.0
+        };
 
-        self.target_samples = ((target_ms * self.sample_rate as f32) / 1000.0) as usize;
+        // ── Health-based adjustment ─────────────────────────────────
+        let had_problems = self.late_count > 0 || self.gap_count > 0;
+
+        if had_problems {
+            // Problems detected — increase target immediately.
+            // Jump by 10ms per event, capped at one jump per adapt cycle.
+            // This is the "fast up" path.
+            let bump_ms = 10.0;
+            let current_ms = self.target_ms();
+            let new_target_ms = (current_ms + bump_ms).min(self.max_ms());
+            self.target_samples = self.ms_to_samples(new_target_ms);
+            self.stable_ticks = 0;
+        } else {
+            // No problems — count stable ticks and slowly drain toward
+            // the jitter-based target (which itself is slowly decreasing
+            // via the asymmetric EMA).
+            self.stable_ticks = self.stable_ticks.saturating_add(1);
+
+            // After 50 stable ticks (~500ms with no issues), start draining.
+            // Drain rate: 0.5ms per tick = ~5ms/sec of target reduction.
+            // This is conservative enough to not cause glitches but fast
+            // enough to converge within a few seconds on LAN.
+            if self.stable_ticks > 50 {
+                let current_ms = self.target_ms();
+                // Drain toward the jitter-based target, but never below min.
+                let floor_ms = jitter_target_ms.max(self.min_ms());
+                let new_target_ms = (current_ms - 0.5).max(floor_ms);
+                self.target_samples = self.ms_to_samples(new_target_ms);
+            }
+        }
+
+        // ── Always respect jitter-based minimum ─────────────────────
+        // If jitter estimate says we need more than current target,
+        // jump up immediately (don't wait for late packets to prove it).
+        let jitter_samples = self.ms_to_samples(jitter_target_ms);
+        if jitter_samples > self.target_samples {
+            self.target_samples = jitter_samples;
+        }
+
+        // ── Clamp to [min, max] ─────────────────────────────────────
+        self.target_samples = self
+            .target_samples
+            .clamp(self.min_samples, self.max_samples);
+
+        // Reset event counters for next cycle
+        self.late_count = 0;
+        self.gap_count = 0;
     }
 
     pub fn occupancy_ms(&self) -> f32 {
@@ -265,5 +377,19 @@ impl AdaptiveJitterBuffer {
     /// Current target depth in milliseconds (for stats).
     pub fn target_ms(&self) -> f32 {
         (self.target_samples as f32 * 1000.0) / self.sample_rate as f32
+    }
+
+    // ── Internal helpers ────────────────────────────────────────────
+
+    fn min_ms(&self) -> f32 {
+        (self.min_samples as f32 * 1000.0) / self.sample_rate as f32
+    }
+
+    fn max_ms(&self) -> f32 {
+        (self.max_samples as f32 * 1000.0) / self.sample_rate as f32
+    }
+
+    fn ms_to_samples(&self, ms: f32) -> usize {
+        ((ms * self.sample_rate as f32) / 1000.0) as usize
     }
 }
