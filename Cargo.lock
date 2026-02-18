@@ -421,6 +421,7 @@ dependencies = [
  "rubato 0.16.2",
  "serde",
  "serde_json",
+ "ui",
  "winresource",
 ]
 
@@ -471,6 +472,7 @@ dependencies = [
  "opus",
  "rtrb",
  "rubato 1.0.1",
+ "ui",
 ]
 
 [[package]]
@@ -814,6 +816,15 @@ checksum = "fdfd7cdacacea6074214cbb2309ca8fa114d4c8b9bb96f2fa50bf675d6de7dbd"
 dependencies = [
  "cmake",
  "cmk",
+]
+
+[[package]]
+name = "fltk-theme"
+version = "0.7.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eac14d47a555db231b4ce9729118a7c57c8a21714af008b8e9ae627998edb7a"
+dependencies = [
+ "fltk",
 ]
 
 [[package]]
@@ -1848,6 +1859,14 @@ name = "typenum"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1dccffe3ce07af9386bfd29e80c0ab1a8205a2fc34e4bcd40364df902cfa8f3f"
+
+[[package]]
+name = "ui"
+version = "0.1.0"
+dependencies = [
+ "fltk",
+ "fltk-theme",
+]
 
 [[package]]
 name = "unicode-ident"

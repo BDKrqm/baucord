@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use crate::app::UserState;
 use crate::ui::messages::UiMessage;
-use crate::ui::theme::DarkTheme;
+use ui::{helpers, theme};
 
 pub struct Sidebar {
     sender: app::Sender<UiMessage>,
@@ -22,7 +22,7 @@ pub struct Sidebar {
 impl Sidebar {
     pub fn new(sender: app::Sender<UiMessage>) -> Self {
         let mut sidebar = group::Flex::default().column();
-        sidebar.set_color(DarkTheme::BG_SECONDARY);
+        sidebar.set_color(theme::BG_SECONDARY);
         sidebar.set_frame(enums::FrameType::FlatBox);
         sidebar.set_margins(10, 10, 10, 10);
         sidebar.set_spacing(10);
@@ -32,13 +32,13 @@ impl Sidebar {
             .with_label("Users: 0")
             .with_align(enums::Align::Left | enums::Align::Inside);
         sidebar.fixed(&user_count_label, 25);
-        user_count_label.set_label_color(DarkTheme::TEXT_SECONDARY);
+        user_count_label.set_label_color(theme::TEXT_SECONDARY);
         user_count_label.set_label_size(13);
 
         // User list scroll area
         let mut user_list_scroll = group::Scroll::default();
         user_list_scroll.set_type(group::ScrollType::Vertical);
-        user_list_scroll.set_color(DarkTheme::BG_SECONDARY);
+        user_list_scroll.set_color(theme::BG_SECONDARY);
         user_list_scroll.set_frame(enums::FrameType::FlatBox);
 
         // Pack inside scroll - don't set fixed size, let it grow
@@ -54,32 +54,23 @@ impl Sidebar {
         sidebar.add(&frame::Frame::default());
 
         // Connection status
-        let mut connection_status = frame::Frame::default().with_label("● Connected");
+        let mut connection_status = frame::Frame::default().with_label("\u{25cf} Connected");
         sidebar.fixed(&connection_status, 25);
-        connection_status.set_label_color(DarkTheme::SUCCESS);
+        connection_status.set_label_color(theme::SUCCESS);
         connection_status.set_label_size(12);
         connection_status.set_align(enums::Align::Left | enums::Align::Inside);
 
         // Mute button
-        let mut mute_btn = button::Button::default().with_label("Mute");
+        let mut mute_btn = helpers::button("Mute");
         sidebar.fixed(&mute_btn, 35);
-        mute_btn.set_color(DarkTheme::BG_TERTIARY);
-        mute_btn.set_label_color(DarkTheme::TEXT_PRIMARY);
-        mute_btn.set_frame(enums::FrameType::FlatBox);
 
         // Settings button
-        let mut settings_btn = button::Button::default().with_label("⚙ Settings");
+        let mut settings_btn = helpers::button("\u{2699} Settings");
         sidebar.fixed(&settings_btn, 35);
-        settings_btn.set_color(DarkTheme::BG_TERTIARY);
-        settings_btn.set_label_color(DarkTheme::TEXT_PRIMARY);
-        settings_btn.set_frame(enums::FrameType::FlatBox);
 
         // Disconnect button
-        let mut disconnect_btn = button::Button::default().with_label("Disconnect");
+        let mut disconnect_btn = helpers::accent_button("Disconnect", theme::DANGER);
         sidebar.fixed(&disconnect_btn, 35);
-        disconnect_btn.set_color(DarkTheme::DANGER);
-        disconnect_btn.set_label_color(enums::Color::White);
-        disconnect_btn.set_frame(enums::FrameType::FlatBox);
 
         sidebar.end();
 
@@ -184,7 +175,7 @@ impl Sidebar {
         } else if (state.audio_settings.volume - 1.0).abs() > 0.01 {
             user_item.set_color(enums::Color::from_rgb(40, 40, 50));
         } else {
-            user_item.set_color(DarkTheme::BG_SECONDARY);
+            user_item.set_color(theme::BG_SECONDARY);
         }
 
         // Speaking indicator
@@ -192,19 +183,19 @@ impl Sidebar {
         user_item.fixed(&indicator, 20);
 
         if state.audio_settings.is_muted {
-            indicator.set_label("⊗");
+            indicator.set_label("\u{2298}");
         } else if state.is_speaking {
-            indicator.set_label("●");
+            indicator.set_label("\u{25cf}");
         } else {
-            indicator.set_label("○");
+            indicator.set_label("\u{25cb}");
         }
 
         indicator.set_label_size(14);
         indicator.set_label_font(Font::Helvetica);
         if state.is_speaking && !state.audio_settings.is_muted {
-            indicator.set_label_color(DarkTheme::SPEAKING);
+            indicator.set_label_color(theme::SPEAKING);
         } else {
-            indicator.set_label_color(DarkTheme::TEXT_MUTED);
+            indicator.set_label_color(theme::TEXT_MUTED);
         }
 
         // Username label
@@ -224,11 +215,11 @@ impl Sidebar {
         name_label.set_align(enums::Align::Left | enums::Align::Inside);
 
         if is_us {
-            name_label.set_label_color(DarkTheme::ACCENT);
+            name_label.set_label_color(theme::ACCENT);
         } else if state.audio_settings.is_muted {
-            name_label.set_label_color(DarkTheme::DANGER);
+            name_label.set_label_color(theme::DANGER);
         } else {
-            name_label.set_label_color(DarkTheme::TEXT_PRIMARY);
+            name_label.set_label_color(theme::TEXT_PRIMARY);
         }
         name_label.set_label_size(13);
 
@@ -289,11 +280,11 @@ impl Sidebar {
 
     pub fn set_connection_status(&mut self, connected: bool) {
         if connected {
-            self.connection_status.set_label("● Connected");
-            self.connection_status.set_label_color(DarkTheme::SUCCESS);
+            self.connection_status.set_label("\u{25cf} Connected");
+            self.connection_status.set_label_color(theme::SUCCESS);
         } else {
-            self.connection_status.set_label("● Disconnected");
-            self.connection_status.set_label_color(DarkTheme::DANGER);
+            self.connection_status.set_label("\u{25cf} Disconnected");
+            self.connection_status.set_label_color(theme::DANGER);
         }
     }
 
@@ -306,10 +297,10 @@ impl Sidebar {
     pub fn set_mute_state(&mut self, muted: bool) {
         if muted {
             self.mute_btn.set_label("Unmute");
-            self.mute_btn.set_color(DarkTheme::DANGER);
+            self.mute_btn.set_color(theme::DANGER);
         } else {
             self.mute_btn.set_label("Mute");
-            self.mute_btn.set_color(DarkTheme::BG_TERTIARY);
+            self.mute_btn.set_color(theme::BG_TERTIARY);
         }
     }
 }
@@ -318,7 +309,7 @@ fn show_volume_dialog(sender: app::Sender<UiMessage>, client_id: ClientId, usern
     let mut dialog = window::Window::default()
         .with_size(300, 200)
         .with_label(&format!("Volume - {}", username));
-    dialog.set_color(DarkTheme::BG_PRIMARY);
+    dialog.set_color(theme::BG_PRIMARY);
     dialog.make_modal(true);
 
     let mut col = group::Flex::default_fill().column();
@@ -327,7 +318,7 @@ fn show_volume_dialog(sender: app::Sender<UiMessage>, client_id: ClientId, usern
 
     // Title
     let mut title = frame::Frame::default().with_label(&format!("Adjust volume for {}", username));
-    title.set_label_color(DarkTheme::TEXT_PRIMARY);
+    title.set_label_color(theme::TEXT_PRIMARY);
     col.fixed(&title, 30);
 
     // Volume label
@@ -336,7 +327,7 @@ fn show_volume_dialog(sender: app::Sender<UiMessage>, client_id: ClientId, usern
     ));
     volume_label
         .borrow_mut()
-        .set_label_color(DarkTheme::TEXT_SECONDARY);
+        .set_label_color(theme::TEXT_SECONDARY);
     col.fixed(&*volume_label.borrow(), 25);
 
     // Volume slider
@@ -345,8 +336,8 @@ fn show_volume_dialog(sender: app::Sender<UiMessage>, client_id: ClientId, usern
     slider.set_maximum(2.0);
     slider.set_value(1.0);
     slider.set_step(0.05, 1);
-    slider.set_color(DarkTheme::BG_TERTIARY);
-    slider.set_selection_color(DarkTheme::ACCENT);
+    slider.set_color(theme::BG_TERTIARY);
+    slider.set_selection_color(theme::ACCENT);
     col.fixed(&slider, 35);
 
     // Buttons
@@ -354,13 +345,8 @@ fn show_volume_dialog(sender: app::Sender<UiMessage>, client_id: ClientId, usern
     col.fixed(&button_row, 35);
     button_row.set_spacing(10);
 
-    let mut reset_btn = button::Button::default().with_label("Reset");
-    reset_btn.set_color(DarkTheme::BG_TERTIARY);
-    reset_btn.set_label_color(DarkTheme::TEXT_PRIMARY);
-
-    let mut ok_btn = button::Button::default().with_label("OK");
-    ok_btn.set_color(DarkTheme::ACCENT);
-    ok_btn.set_label_color(enums::Color::White);
+    let mut reset_btn = helpers::button("Reset");
+    let mut ok_btn = helpers::accent_button("OK", theme::ACCENT);
 
     button_row.end();
     col.end();

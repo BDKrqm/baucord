@@ -1,157 +1,14 @@
 // ui/settings.rs — Audio settings + live diagnostics panel.
 //
 // Controls send UiMessages; levels come from shared atomics written by
-// the voice thread. Meters update at 8 Hz only while the window is visible.
+// the voice thread.  Meters update at 8 Hz only while the window is visible.
 
 use crate::config::Settings;
 use crate::ui::messages::UiMessage;
-use crate::ui::theme::DarkTheme;
 use fltk::{prelude::*, *};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-
-// ── Helpers ─────────────────────────────────────────────────────────────
-
-fn section_header(col: &mut group::Flex, label: &str) {
-    let mut lbl = frame::Frame::default()
-        .with_label(label)
-        .with_align(enums::Align::Left | enums::Align::Inside);
-    lbl.set_label_color(DarkTheme::TEXT_PRIMARY);
-    lbl.set_label_size(13);
-    col.fixed(&lbl, 24);
-}
-
-fn field_label(col: &mut group::Flex, text: &str) {
-    let mut lbl = frame::Frame::default()
-        .with_label(text)
-        .with_align(enums::Align::Left | enums::Align::Inside);
-    lbl.set_label_color(DarkTheme::TEXT_SECONDARY);
-    lbl.set_label_size(11);
-    col.fixed(&lbl, 18);
-}
-
-fn separator(col: &mut group::Flex) {
-    let mut sep = frame::Frame::default();
-    sep.set_frame(enums::FrameType::FlatBox);
-    sep.set_color(DarkTheme::BG_TERTIARY);
-    col.fixed(&sep, 1);
-}
-
-fn styled_check(col: &mut group::Flex, label: &str, checked: bool) -> button::CheckButton {
-    let mut cb = button::CheckButton::default().with_label(label);
-    cb.set_checked(checked);
-    cb.set_color(DarkTheme::BG_PRIMARY);
-    cb.set_label_color(DarkTheme::TEXT_PRIMARY);
-    cb.set_selection_color(DarkTheme::ACCENT);
-    cb.set_label_size(11);
-    col.fixed(&cb, 22);
-    cb
-}
-
-fn styled_choice(col: &mut group::Flex) -> menu::Choice {
-    let mut c = menu::Choice::default();
-    c.set_color(DarkTheme::BG_INPUT);
-    c.set_text_color(DarkTheme::TEXT_PRIMARY);
-    c.set_frame(enums::FrameType::BorderBox);
-    col.fixed(&c, 26);
-    c
-}
-
-fn populate_device_choice(
-    choice: &mut menu::Choice,
-    devices: &[(String, bool)],
-    current: &Option<String>,
-) {
-    choice.clear();
-    choice.add_choice("System Default");
-    let mut selected = 0;
-    for (i, (name, _)) in devices.iter().enumerate() {
-        choice.add_choice(name);
-        if let Some(cur) = current.as_ref() {
-            if cur == name {
-                selected = i + 1;
-            }
-        }
-    }
-    choice.set_value(selected as i32);
-}
-
-fn make_slider(
-    col: &mut group::Flex,
-    min: f64,
-    max: f64,
-    value: f64,
-    step: f64,
-    color: enums::Color,
-) -> valuator::HorSlider {
-    let mut s = valuator::HorSlider::default();
-    s.set_minimum(min);
-    s.set_maximum(max);
-    s.set_value(value);
-    s.set_step(step, 1);
-    s.set_color(DarkTheme::BG_TERTIARY);
-    s.set_selection_color(color);
-    col.fixed(&s, 22);
-    s
-}
-
-fn value_label(col: &mut group::Flex, text: &str) -> frame::Frame {
-    let mut lbl = frame::Frame::default()
-        .with_label(text)
-        .with_align(enums::Align::Left | enums::Align::Inside);
-    lbl.set_label_color(DarkTheme::TEXT_MUTED);
-    lbl.set_label_size(10);
-    col.fixed(&lbl, 14);
-    lbl
-}
-
-fn make_vu_meter(
-    col: &mut group::Flex,
-    level_arc: Arc<AtomicU32>,
-    height: i32,
-    color: enums::Color,
-) -> frame::Frame {
-    let mut f = frame::Frame::default();
-    f.set_frame(enums::FrameType::BorderBox);
-    f.set_color(DarkTheme::BG_INPUT);
-    col.fixed(&f, height);
-
-    f.draw(move |frm| {
-        draw::set_draw_color(DarkTheme::BG_INPUT);
-        draw::draw_rectf(frm.x(), frm.y(), frm.w(), frm.h());
-
-        let level = f32::from_bits(level_arc.load(Ordering::Relaxed)).clamp(0.0, 1.0);
-        let bar_w = ((frm.w() - 4) as f32 * level) as i32;
-
-        let c = if level > 0.9 {
-            DarkTheme::DANGER
-        } else if level > 0.7 {
-            DarkTheme::WARNING
-        } else {
-            color
-        };
-
-        if bar_w > 0 {
-            draw::set_draw_color(c);
-            draw::draw_rectf(frm.x() + 2, frm.y() + 3, bar_w, frm.h() - 6);
-        }
-
-        draw::set_draw_color(DarkTheme::BORDER);
-        draw::draw_rect(frm.x(), frm.y(), frm.w(), frm.h());
-    });
-    f
-}
-
-fn format_sensitivity(value: f64) -> String {
-    let name = match value {
-        v if v < 0.010 => "Very High",
-        v if v < 0.020 => "High",
-        v if v < 0.040 => "Medium",
-        v if v < 0.065 => "Low",
-        _ => "Very Low",
-    };
-    format!("Sensitivity: {}  ({:.3} RMS)", name, value)
-}
+use std::sync::Arc;
+use ui::{gate_bar, helpers, theme, vu_meter};
 
 // ── Settings Window ─────────────────────────────────────────────────────
 
@@ -171,7 +28,6 @@ impl SettingsWindow {
         let mut wind = window::Window::default()
             .with_size(560, 710)
             .with_label("Settings");
-        wind.set_color(DarkTheme::BG_PRIMARY);
         wind.make_resizable(false);
 
         let mut scroll = group::Scroll::default_fill();
@@ -187,162 +43,130 @@ impl SettingsWindow {
         //  DEVICES
         // ════════════════════════════════════════════════════════════════
 
-        section_header(&mut col, "\u{1f3a7}  DEVICES");
+        helpers::section_header(&mut col, "\u{1f3a7}", "DEVICES");
 
-        field_label(&mut col, "Input Device (Microphone)");
-        let mut input_choice = styled_choice(&mut col);
-        populate_device_choice(&mut input_choice, &input_devices, &settings.input_device);
+        helpers::field_label(&mut col, "Input Device (Microphone)");
+        let mut input_choice = helpers::choice(&mut col);
+        helpers::populate_device_choice_with_current(
+            &mut input_choice,
+            &input_devices,
+            &settings.input_device,
+        );
 
-        field_label(&mut col, "Output Device (Speakers/Headphones)");
-        let mut output_choice = styled_choice(&mut col);
-        populate_device_choice(&mut output_choice, &output_devices, &settings.output_device);
+        helpers::field_label(&mut col, "Output Device (Speakers/Headphones)");
+        let mut output_choice = helpers::choice(&mut col);
+        helpers::populate_device_choice_with_current(
+            &mut output_choice,
+            &output_devices,
+            &settings.output_device,
+        );
 
-        let mut device_info = frame::Frame::default()
-            .with_label(&format!(
+        helpers::hint_label(
+            &mut col,
+            &format!(
                 "{} input, {} output devices",
                 input_devices.len(),
-                output_devices.len(),
-            ))
-            .with_align(enums::Align::Left | enums::Align::Inside);
-        device_info.set_label_color(DarkTheme::TEXT_MUTED);
-        device_info.set_label_size(10);
-        col.fixed(&device_info, 14);
+                output_devices.len()
+            ),
+        );
 
-        separator(&mut col);
+        helpers::separator(&mut col);
 
         // ════════════════════════════════════════════════════════════════
         //  INPUT
         // ════════════════════════════════════════════════════════════════
 
-        section_header(&mut col, "\u{1f3a4}  INPUT");
+        helpers::section_header(&mut col, "\u{1f3a4}", "INPUT");
 
-        field_label(&mut col, "Capture Level");
-        let vu_input = make_vu_meter(&mut col, input_level.clone(), 22, DarkTheme::SUCCESS);
+        helpers::field_label(&mut col, "Capture Level");
+        let vu_input = vu_meter::make(&mut col, input_level.clone(), 22, theme::SUCCESS);
 
-        field_label(&mut col, "Input Gain");
-        let mut input_gain_slider = make_slider(
+        helpers::field_label(&mut col, "Input Gain");
+        let mut input_gain_slider = helpers::slider(
             &mut col,
             0.0,
             2.0,
             settings.input_gain as f64,
             0.05,
-            DarkTheme::ACCENT,
+            theme::ACCENT,
         );
-        let input_gain_lbl = value_label(
+        let input_gain_lbl = helpers::hint_label(
             &mut col,
             &format!("Gain: {}%", (settings.input_gain * 100.0) as i32),
         );
 
         // Test Microphone button
-        let mut test_mic_btn = button::Button::default().with_label("\u{1f3a4}  Test Microphone");
+        let mut test_mic_btn = helpers::button("\u{1f3a4}  Test Microphone");
         col.fixed(&test_mic_btn, 30);
-        test_mic_btn.set_color(DarkTheme::BG_TERTIARY);
-        test_mic_btn.set_label_color(DarkTheme::TEXT_PRIMARY);
-        test_mic_btn.set_frame(enums::FrameType::FlatBox);
-        test_mic_btn.set_label_size(11);
 
-        let mut test_mic_info = frame::Frame::default()
-            .with_label("Listen to your own mic (others won't hear you)")
-            .with_align(enums::Align::Left | enums::Align::Inside);
-        test_mic_info.set_label_color(DarkTheme::TEXT_MUTED);
-        test_mic_info.set_label_size(10);
-        col.fixed(&test_mic_info, 14);
+        let test_mic_info = helpers::hint_label(
+            &mut col,
+            "Listen to your own mic (others won't hear you)",
+        );
 
-        separator(&mut col);
+        helpers::separator(&mut col);
 
         // ════════════════════════════════════════════════════════════════
         //  OUTPUT
         // ════════════════════════════════════════════════════════════════
 
-        section_header(&mut col, "\u{1f50a}  OUTPUT");
+        helpers::section_header(&mut col, "\u{1f50a}", "OUTPUT");
 
-        let vu_output = make_vu_meter(
-            &mut col,
-            output_level.clone(),
-            22,
-            enums::Color::from_rgb(56, 189, 248),
-        );
+        let vu_output = vu_meter::make(&mut col, output_level.clone(), 22, theme::CYAN);
 
-        field_label(&mut col, "Master Volume");
-        let mut output_gain_slider = make_slider(
+        helpers::field_label(&mut col, "Master Volume");
+        let mut output_gain_slider = helpers::slider(
             &mut col,
             0.0,
             2.0,
             settings.output_gain as f64,
             0.05,
-            enums::Color::from_rgb(56, 189, 248),
+            theme::CYAN,
         );
-        let output_gain_lbl = value_label(
+        let output_gain_lbl = helpers::hint_label(
             &mut col,
             &format!("Volume: {}%", (settings.output_gain * 100.0) as i32),
         );
 
-        separator(&mut col);
+        helpers::separator(&mut col);
 
         // ════════════════════════════════════════════════════════════════
         //  VOICE GATE
         // ════════════════════════════════════════════════════════════════
 
-        section_header(&mut col, "\u{26a1}  VOICE GATE");
+        helpers::section_header(&mut col, "\u{26a1}", "VOICE GATE");
 
-        field_label(
+        helpers::field_label(
             &mut col,
             "Audio below the threshold is silenced before transmission",
         );
 
         // VAD meter with threshold line
         let threshold_rc = std::rc::Rc::new(std::cell::RefCell::new(settings.gate_threshold));
+        let vu_vad = gate_bar::make(
+            &mut col,
+            denoised_level.clone(),
+            threshold_rc.clone(),
+            28,
+        );
 
-        let threshold_draw = threshold_rc.clone();
-        let level_draw = denoised_level.clone();
-        let mut vu_vad = frame::Frame::default();
-        vu_vad.set_frame(enums::FrameType::BorderBox);
-        vu_vad.set_color(DarkTheme::BG_INPUT);
-        col.fixed(&vu_vad, 28);
-
-        vu_vad.draw(move |f| {
-            draw::set_draw_color(DarkTheme::BG_INPUT);
-            draw::draw_rectf(f.x(), f.y(), f.w(), f.h());
-
-            let level = f32::from_bits(level_draw.load(Ordering::Relaxed)).clamp(0.0, 1.0);
-            let bar_w = ((f.w() - 4) as f32 * level) as i32;
-            let thr = *threshold_draw.borrow();
-
-            let color = if level > thr {
-                DarkTheme::SUCCESS
-            } else {
-                DarkTheme::BG_TERTIARY
-            };
-            if bar_w > 0 {
-                draw::set_draw_color(color);
-                draw::draw_rectf(f.x() + 2, f.y() + 4, bar_w, f.h() - 8);
-            }
-
-            let thr_x = f.x() + 2 + ((f.w() - 4) as f32 * thr) as i32;
-            draw::set_draw_color(DarkTheme::DANGER);
-            draw::set_line_style(draw::LineStyle::Solid, 2);
-            draw::draw_line(thr_x, f.y() + 2, thr_x, f.y() + f.h() - 2);
-            draw::set_line_style(draw::LineStyle::Solid, 1);
-
-            draw::set_draw_color(DarkTheme::BORDER);
-            draw::draw_rect(f.x(), f.y(), f.w(), f.h());
-        });
-
-        field_label(&mut col, "Gate Threshold");
-        let mut vad_slider = make_slider(
+        helpers::field_label(&mut col, "Gate Threshold");
+        let mut vad_slider = helpers::slider(
             &mut col,
             0.005,
             0.10,
             settings.gate_threshold as f64,
             0.001,
-            DarkTheme::ACCENT,
+            theme::ACCENT,
         );
-        let vad_sens_lbl =
-            value_label(&mut col, &format_sensitivity(settings.gate_threshold as f64));
+        let vad_sens_lbl = helpers::hint_label(
+            &mut col,
+            &helpers::format_sensitivity(settings.gate_threshold as f64),
+        );
 
-        let mute_on_start_toggle = styled_check(&mut col, "Start muted", settings.mute_on_start);
+        let mute_on_start_toggle = helpers::check(&mut col, "Start muted", settings.mute_on_start);
 
-        separator(&mut col);
+        helpers::separator(&mut col);
 
         // ════════════════════════════════════════════════════════════════
         //  BUTTONS
@@ -352,15 +176,8 @@ impl SettingsWindow {
         col.fixed(&button_row, 35);
         button_row.set_spacing(10);
 
-        let mut reset_btn = button::Button::default().with_label("Reset Defaults");
-        reset_btn.set_color(DarkTheme::BG_TERTIARY);
-        reset_btn.set_label_color(DarkTheme::TEXT_PRIMARY);
-        reset_btn.set_frame(enums::FrameType::FlatBox);
-
-        let mut save_btn = button::Button::default().with_label("Save and Close");
-        save_btn.set_color(DarkTheme::SUCCESS);
-        save_btn.set_label_color(enums::Color::White);
-        save_btn.set_frame(enums::FrameType::FlatBox);
+        let mut reset_btn = helpers::button("Reset Defaults");
+        let mut save_btn = helpers::accent_button("Save and Close", theme::SUCCESS);
 
         button_row.end();
         col.end();
@@ -425,29 +242,30 @@ impl SettingsWindow {
 
             if is_testing {
                 btn.set_label("\u{1f534}  Stop Testing");
-                btn.set_color(DarkTheme::DANGER);
+                btn.set_color(theme::DANGER);
                 info_lbl.set_label("Listening to your mic... others can't hear you");
-                info_lbl.set_label_color(DarkTheme::WARNING);
+                info_lbl.set_label_color(theme::WARNING);
             } else {
                 btn.set_label("\u{1f3a4}  Test Microphone");
-                btn.set_color(DarkTheme::BG_TERTIARY);
+                btn.set_color(theme::BG_TERTIARY);
                 info_lbl.set_label("Listen to your own mic (others won't hear you)");
-                info_lbl.set_label_color(DarkTheme::TEXT_MUTED);
+                info_lbl.set_label_color(theme::TEXT_MUTED);
             }
 
             s.send(UiMessage::TestMicrophone(is_testing));
         });
 
-        // VAD slider
+        // VAD slider — clone vu_vad before the closure captures it
         let s = sender;
         let threshold_update = threshold_rc.clone();
-        let mut vu_redraw = vu_vad.clone();
+        let mut vu_vad_reset = vu_vad.clone();
         let mut sens_lbl = vad_sens_lbl.clone();
+        let mut vu_vad_cb = vu_vad.clone();
         vad_slider.set_callback(move |sl| {
             let val = sl.value() as f32;
             *threshold_update.borrow_mut() = val;
-            sens_lbl.set_label(&format_sensitivity(sl.value()));
-            vu_redraw.redraw();
+            sens_lbl.set_label(&helpers::format_sensitivity(sl.value()));
+            vu_vad_cb.redraw();
             s.send(UiMessage::SetGateThreshold(val));
         });
 
@@ -485,7 +303,6 @@ impl SettingsWindow {
         let mut vs = vad_slider.clone();
         let ms = mute_on_start_toggle.clone();
         let threshold_reset = threshold_rc.clone();
-        let mut vu_reset = vu_vad.clone();
         reset_btn.set_callback(move |_| {
             let d = Settings::default();
             ig.set_value(d.input_gain as f64);
@@ -496,7 +313,7 @@ impl SettingsWindow {
             vs.do_callback();
             ms.set_checked(d.mute_on_start);
             *threshold_reset.borrow_mut() = d.gate_threshold;
-            vu_reset.redraw();
+            vu_vad_reset.redraw();
             s.send(UiMessage::ResetSettings);
         });
 
