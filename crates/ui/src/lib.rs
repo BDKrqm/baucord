@@ -15,7 +15,7 @@
 //!
 //! fn main() {
 //!     let app = app::App::default();
-//!     voice_chat_ui::theme::apply();
+//!     ui::theme::apply();
 //!     // ... build your window ...
 //! }
 //! ```

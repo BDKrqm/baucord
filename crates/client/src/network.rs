@@ -15,9 +15,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use core::AudioPacket;
-use fltk::app;
 
-use crate::voice::VoiceControl;
+use crate::voice::{VoiceControl, WakeFn};
 
 const PROTOCOL_ID: u64 = 27;
 
@@ -185,7 +184,7 @@ enum ServerMessage {
     },
 }
 
-pub struct NetworkClient {
+pub(crate) struct NetworkClient {
     client: RenetClient,
     transport: NetcodeClientTransport,
     usernames: HashMap<ClientId, String>,
@@ -618,19 +617,20 @@ impl NetworkThreadHandle {
         msg_tx: Sender<NetworkMessage>,
         msg_rx: Receiver<NetworkMessage>,
         voice_tx: Sender<VoiceControl>,
+        wake: WakeFn,
     ) -> Self {
         let join_handle = thread::spawn(move || {
-            run_network_loop(control_rx, msg_tx, voice_tx);
+            run_network_loop(control_rx, msg_tx, voice_tx, wake);
         });
 
         Self { tx, msg_rx, join_handle: Some(join_handle) }
     }
 
     /// Convenience: spawn with internally created channels.
-    pub fn spawn(voice_tx: Sender<VoiceControl>) -> Self {
+    pub fn spawn(voice_tx: Sender<VoiceControl>, wake: WakeFn) -> Self {
         let (tx, control_rx) = bounded::<NetworkControl>(256);
         let (msg_tx, msg_rx) = bounded::<NetworkMessage>(256);
-        Self::spawn_with_channels(tx, control_rx, msg_tx, msg_rx, voice_tx)
+        Self::spawn_with_channels(tx, control_rx, msg_tx, msg_rx, voice_tx, wake)
     }
 
     /// Send shutdown and wait for the thread to exit.
@@ -654,6 +654,7 @@ fn run_network_loop(
     control_rx: Receiver<NetworkControl>,
     msg_tx: Sender<NetworkMessage>,
     voice_tx: Sender<VoiceControl>,
+    wake: WakeFn,
 ) {
     let mut client: Option<NetworkClient> = None;
     let mut running = true;
@@ -667,12 +668,12 @@ fn run_network_loop(
                         match NetworkClient::connect(addr, nickname) {
                             Ok(c) => {
                                 msg_tx.send(NetworkMessage::Connected).ok();
-                                app::awake();
+                                wake();
                                 client = Some(c);
                             }
                             Err(e) => {
                                 msg_tx.send(NetworkMessage::Disconnected(e)).ok();
-                                app::awake();
+                                wake();
                             }
                         }
                     }
@@ -683,7 +684,7 @@ fn run_network_loop(
                         msg_tx
                             .send(NetworkMessage::Disconnected("User disconnected".into()))
                             .ok();
-                        app::awake();
+                        wake();
                     }
                     NetworkControl::SendMessage(text) => {
                         if let Some(ref mut c) = client {
@@ -734,7 +735,7 @@ fn run_network_loop(
                     }
                     other => {
                         let _ = msg_tx.try_send(other);
-                        app::awake();
+                        wake();
                     }
                 }
             }
@@ -746,7 +747,7 @@ fn run_network_loop(
                 msg_tx
                     .send(NetworkMessage::Disconnected("Connection lost".into()))
                     .ok();
-                app::awake();
+                wake();
             }
         }
 

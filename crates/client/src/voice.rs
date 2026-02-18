@@ -1,21 +1,29 @@
-// voice_thread.rs — Owns VoiceChat on a dedicated thread.
+// voice.rs — Owns VoiceChat on a dedicated thread.
 //
 // Receives VoiceControl commands, emits VoiceEvent notifications,
 // and forwards outgoing packets to the network thread.
 // All audio processing is handled by the core library.
+//
+// This module has NO dependency on any UI toolkit.  The caller injects
+// a `WakeFn` callback that is called whenever the UI event loop should
+// check for new events (e.g. `fltk::app::awake` or a no-op for headless).
 
 use crossbeam_channel::{Receiver, Sender, bounded, select};
+
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use fltk::app;
 use log::info;
 
 use crate::config::Settings;
 use crate::network::NetworkControl;
 use core::{AudioPacket, PeerAudioSettings, VoiceChat, VoiceChatConfig};
+
+/// A callback the worker thread invokes to wake the UI event loop.
+/// Injected at construction so this module never imports a UI crate.
+pub type WakeFn = Arc<dyn Fn() + Send + Sync>;
 
 // ── Channel messages ────────────────────────────────────────────────────
 
@@ -97,6 +105,7 @@ impl VoiceThreadHandle {
     pub fn spawn(
         network_tx: Sender<NetworkControl>,
         is_testing_mic: Arc<AtomicBool>,
+        wake: WakeFn,
     ) -> Self {
         let (tx, control_rx) = bounded::<VoiceControl>(64);
         let (event_tx, event_rx) = bounded::<VoiceEvent>(32);
@@ -104,7 +113,7 @@ impl VoiceThreadHandle {
 
         let shared_clone = shared.clone();
         let join_handle = thread::spawn(move || {
-            run_voice_loop(control_rx, event_tx, network_tx, shared_clone, is_testing_mic);
+            run_voice_loop(control_rx, event_tx, network_tx, shared_clone, is_testing_mic, wake);
         });
 
         Self {
@@ -132,6 +141,7 @@ fn run_voice_loop(
     network_tx: Sender<NetworkControl>,
     shared: SharedAudioState,
     is_testing_mic: Arc<AtomicBool>,
+    wake: WakeFn,
 ) {
     let mut vc: Option<VoiceChat> = None;
     let mut our_client_id: Option<u64> = None;
@@ -145,7 +155,7 @@ fn run_voice_loop(
                 match msg {
                     Ok(ctrl) => handle_control(
                         ctrl, &mut vc, &mut our_client_id, &mut running,
-                        &event_tx, &mut was_speaking,
+                        &event_tx, &mut was_speaking, &wake,
                     ),
                     Err(_) => { running = false; }
                 }
@@ -158,7 +168,7 @@ fn run_voice_loop(
             match control_rx.try_recv() {
                 Ok(ctrl) => handle_control(
                     ctrl, &mut vc, &mut our_client_id, &mut running,
-                    &event_tx, &mut was_speaking,
+                    &event_tx, &mut was_speaking, &wake,
                 ),
                 Err(_) => break,
             }
@@ -190,7 +200,7 @@ fn run_voice_loop(
                 was_speaking = speaking;
                 let _ = network_tx.try_send(NetworkControl::SendSpeakingStatus(speaking));
                 let _ = event_tx.try_send(VoiceEvent::SpeakingChanged(speaking));
-                app::awake();
+                wake();
             }
         }
     }
@@ -205,6 +215,7 @@ fn handle_control(
     running: &mut bool,
     event_tx: &Sender<VoiceEvent>,
     was_speaking: &mut bool,
+    wake: &WakeFn,
 ) {
     match ctrl {
         VoiceControl::Start { settings, our_client_id: id } => {
@@ -213,7 +224,7 @@ fn handle_control(
                 Ok(mut voice) => {
                     if let Err(e) = voice.start() {
                         event_tx.send(VoiceEvent::Error(format!("Start failed: {}", e))).ok();
-                        app::awake();
+                        wake();
                         return;
                     }
                     if settings.mute_on_start {
@@ -223,12 +234,12 @@ fn handle_control(
                     *vc = Some(voice);
                     *was_speaking = false;
                     event_tx.send(VoiceEvent::Started).ok();
-                    app::awake();
-                    info!("Voice started for client {}", id);
+                    wake();
+                    info!("Voice started for client {:?}", id);
                 }
                 Err(e) => {
                     event_tx.send(VoiceEvent::Error(format!("Init failed: {}", e))).ok();
-                    app::awake();
+                    wake();
                 }
             }
         }
@@ -258,7 +269,7 @@ fn handle_control(
                 && let Err(e) = v.set_input_device(d.as_deref())
             {
                 event_tx.send(VoiceEvent::Error(format!("Input device: {}", e))).ok();
-                app::awake();
+                wake();
             }
         }
         VoiceControl::SetOutputDevice(d) => {
@@ -266,7 +277,7 @@ fn handle_control(
                 && let Err(e) = v.set_output_device(d.as_deref())
             {
                 event_tx.send(VoiceEvent::Error(format!("Output device: {}", e))).ok();
-                app::awake();
+                wake();
             }
         }
         VoiceControl::AddPeer(id) => {

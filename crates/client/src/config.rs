@@ -92,6 +92,12 @@ impl Settings {
             Err(e) => info!("Failed to serialize settings: {}", e),
         }
     }
+
+    /// Reset all settings to defaults and persist to disk.
+    pub fn reset(&mut self) {
+        *self = Settings::default();
+        self.save();
+    }
 }
 
 /// Per-user audio settings (persisted by username).
