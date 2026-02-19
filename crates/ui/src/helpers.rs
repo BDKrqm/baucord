@@ -6,7 +6,7 @@
 //! the few domain-specific colours (stat readouts, muted hints, etc.).
 
 use crate::theme;
-use fltk::{enums, frame, group, input, menu, button, text, valuator, prelude::*};
+use fltk::{button, enums, frame, group, input, menu, prelude::*, text, valuator};
 
 // ── Section & field labels ──────────────────────────────────────────────
 
@@ -111,6 +111,8 @@ pub fn check(col: &mut group::Flex, label: &str, checked: bool) -> button::Check
 pub fn button(label: &str) -> button::Button {
     let mut btn = button::Button::default().with_label(label);
     btn.set_frame(enums::FrameType::FlatBox);
+    btn.set_color(theme::BG_TERTIARY);
+    btn.set_label_color(theme::TEXT_PRIMARY);
     btn.set_label_size(11);
     btn
 }
@@ -121,6 +123,7 @@ pub fn accent_button(label: &str, color: enums::Color) -> button::Button {
     btn.set_color(color);
     btn.set_label_color(enums::Color::White);
     btn.set_frame(enums::FrameType::FlatBox);
+    btn.set_label_size(11);
     btn
 }
 
