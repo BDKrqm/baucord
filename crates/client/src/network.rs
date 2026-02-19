@@ -395,7 +395,7 @@ impl NetworkClient {
         if now.duration_since(self.last_rtt_check) >= Duration::from_secs(2) {
             self.last_rtt_check = now;
             if self.client.is_connected() {
-                let rtt = self.client.rtt();
+                let rtt = self.client.rtt() * 1000.0;
                 self.message_queue.push(NetworkMessage::LatencyUpdate {
                     rtt_ms: rtt,
                 });

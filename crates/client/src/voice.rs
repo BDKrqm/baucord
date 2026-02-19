@@ -64,6 +64,7 @@ pub struct SharedAudioState {
     pub output_level: Arc<AtomicU32>,
     pub denoised_level: Arc<AtomicU32>,
     pub speaking: Arc<AtomicBool>,
+    pub jitter_buffer_ms: Arc<AtomicU32>,
 }
 
 impl SharedAudioState {
@@ -73,6 +74,7 @@ impl SharedAudioState {
             output_level: Arc::new(AtomicU32::new(0)),
             denoised_level: Arc::new(AtomicU32::new(0)),
             speaking: Arc::new(AtomicBool::new(false)),
+            jitter_buffer_ms: Arc::new(AtomicU32::new(0)),
         }
     }
 }
@@ -194,6 +196,10 @@ fn run_voice_loop(
             shared.output_level.store(voice.output_level().to_bits(), Ordering::Relaxed);
             shared.denoised_level.store(voice.denoised_level().to_bits(), Ordering::Relaxed);
             shared.speaking.store(voice.is_speaking(), Ordering::Relaxed);
+            shared.jitter_buffer_ms.store(
+                voice.stats().jitter_buffer_occupancy_ms.load(Ordering::Relaxed) as u32,
+                Ordering::Relaxed,
+            );
 
             // Edge-triggered speaking notification
             let speaking = voice.is_speaking();

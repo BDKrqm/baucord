@@ -4,7 +4,7 @@
 //! then resamples from 48 kHz to whatever the device wants.
 
 use crate::config::PeerAudioSettings;
-use crate::jitter_buffer::AdaptiveJitterBuffer;
+use crate::jitter_buffer::{AdaptiveJitterBuffer, DecodedFrame};
 use crate::resampler::build_output_resampler;
 use crate::stats::AudioStats;
 use crate::OPUS_SAMPLE_RATE;
@@ -27,7 +27,7 @@ pub struct AudioOutput {
     device: Device,
     device_config: SupportedStreamConfig,
     stream: Option<Stream>,
-    decoder_rx: Option<Receiver<(u64, Vec<f32>)>>,
+    decoder_rx: Option<Receiver<DecodedFrame>>,
 
     ring_producer: Option<Producer<f32>>,
     ring_consumer: Option<Consumer<f32>>,
@@ -51,7 +51,7 @@ pub struct AudioOutput {
 impl AudioOutput {
     pub fn new(
         device_name: Option<&str>,
-        decoder_rx: Receiver<(u64, Vec<f32>)>,
+        decoder_rx: Receiver<DecodedFrame>,
         peer_settings: Arc<Mutex<HashMap<u64, PeerAudioSettings>>>,
         stats: Arc<AudioStats>,
         output_gain: f32,
@@ -215,7 +215,7 @@ impl AudioOutput {
 
     fn spawn_worker(
         mut ring_producer: Producer<f32>,
-        decoder_rx: Receiver<(u64, Vec<f32>)>,
+        decoder_rx: Receiver<DecodedFrame>,
         peer_settings: Arc<Mutex<HashMap<u64, PeerAudioSettings>>>,
         stats: Arc<AudioStats>,
         should_stop: Arc<AtomicBool>,
@@ -262,8 +262,8 @@ impl AudioOutput {
                 // the old batch(16) cap caused permanent starvation.
                 loop {
                     match decoder_rx.try_recv() {
-                        Ok((peer_id, samples)) => {
-                            jitter_buffer.push_decoded_audio(peer_id, samples);
+                        Ok(frame) => {
+                            jitter_buffer.push_frame(frame);
                         }
                         Err(_) => break,
                     }
@@ -344,6 +344,9 @@ impl AudioOutput {
                 stats
                     .jitter_buffer_occupancy_ms
                     .store(jitter_buffer.occupancy_ms() as usize, Ordering::Relaxed);
+                stats
+                    .jitter_buffer_target_ms
+                    .store(jitter_buffer.target_ms() as usize, Ordering::Relaxed);
                 jitter_buffer.adapt();
 
                 // Pace at 10 ms intervals

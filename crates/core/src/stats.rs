@@ -26,6 +26,8 @@ pub struct AudioStats {
 
     // ── Jitter buffer ───────────────────────────────────────────────────
     pub jitter_buffer_occupancy_ms: AtomicUsize,
+    /// Current adaptive target depth in milliseconds.
+    pub jitter_buffer_target_ms: AtomicUsize,
 
     // ── Bandwidth tracking ──────────────────────────────────────────────
     /// Total bytes of Opus data sent (excluding headers).
@@ -79,6 +81,7 @@ impl AudioStats {
             input_overruns: AtomicU64::new(0),
             output_underruns: AtomicU64::new(0),
             jitter_buffer_occupancy_ms: AtomicUsize::new(0),
+            jitter_buffer_target_ms: AtomicUsize::new(0),
             bytes_sent: AtomicU64::new(0),
             bytes_received: AtomicU64::new(0),
             last_packet_size: AtomicUsize::new(0),
@@ -160,7 +163,7 @@ impl AudioStats {
 
         format!(
             "Audio ({}s) | Sent {} Recv {} Lost {} ({:.1}%) | \
-             FEC {} PLC {} | Overruns {} Underruns {} | Jitter {}ms | \
+             FEC {} PLC {} | Overruns {} Underruns {} | Jitter {}ms (target {}ms) | \
              BW ↑{:.1}kbps ↓{:.1}kbps | Pkt {}B (avg {:.0}B) | \
              Enc {}µs Dec {}µs | Errors: enc {} dec {}",
             elapsed,
@@ -173,6 +176,7 @@ impl AudioStats {
             self.input_overruns.load(Ordering::Relaxed),
             self.output_underruns.load(Ordering::Relaxed),
             self.jitter_buffer_occupancy_ms.load(Ordering::Relaxed),
+            self.jitter_buffer_target_ms.load(Ordering::Relaxed),
             self.estimated_send_kbps(),
             self.estimated_recv_kbps(),
             self.last_packet_size.load(Ordering::Relaxed),

@@ -9,6 +9,7 @@
 
 use crate::denoise::Denoiser;
 use crate::gate::NoiseGate;
+use crate::jitter_buffer::DecodedFrame;
 use crate::resampler::build_input_resampler;
 use crate::stats::AudioStats;
 use crate::vad::VADProcessor;
@@ -25,7 +26,7 @@ use rubato::{Async, Resampler};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Sentinel SSRC used for loopback frames so they don't collide with real peers.
 pub const LOOPBACK_SSRC: u64 = u64::MAX;
@@ -38,7 +39,7 @@ pub struct AudioInput {
 
     /// Optional sender into the output path for loopback monitoring.
     /// Points to the same channel the decoder thread feeds into.
-    loopback_tx: Option<Sender<(u64, Vec<f32>)>>,
+    loopback_tx: Option<Sender<DecodedFrame>>,
     loopback_enabled: Arc<AtomicBool>,
 
     ring_producer: Option<Producer<f32>>,
@@ -68,7 +69,7 @@ impl AudioInput {
     pub fn new(
         device_name: Option<&str>,
         encoder_tx: Sender<Vec<f32>>,
-        loopback_tx: Option<Sender<(u64, Vec<f32>)>>,
+        loopback_tx: Option<Sender<DecodedFrame>>,
         stats: Arc<AudioStats>,
         noise_suppression: bool,
         input_gain: f32,
@@ -431,7 +432,13 @@ impl AudioInput {
                     // ── Loopback tap (post-pipeline: hear what others hear) ──
                     if loopback_enabled.load(Ordering::Relaxed) {
                         if let Some(ref tx) = loopback_tx {
-                            let _ = tx.try_send((LOOPBACK_SSRC, frame.clone()));
+                            let _ = tx.try_send(DecodedFrame {
+                                peer_id: LOOPBACK_SSRC,
+                                seq: 0,
+                                arrival_time: Instant::now(),
+                                samples: frame.clone(),
+                                is_concealment: false,
+                            });
                         }
                     }
 
