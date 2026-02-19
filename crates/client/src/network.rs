@@ -20,7 +20,8 @@ use crate::voice::{VoiceControl, WakeFn};
 
 const PROTOCOL_ID: u64 = 27;
 
-const VOICE_PACKET_BATCH_THRESHOLD: usize = 2;
+const VOICE_PACKET_BATCH_THRESHOLD: usize = 1;
+
 const RELIABLE_CHANNEL: u8 = 2;
 const VOICE_CHANNEL: u8 = 3;
 const VOICE_PROTOCOL_VERSION: u8 = 1;

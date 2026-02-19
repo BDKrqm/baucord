@@ -256,7 +256,8 @@ impl AdaptiveJitterBuffer {
         // exceeds target + 1 frame of headroom, discard the oldest excess
         // samples. This keeps occupancy pinned near the target without
         // affecting normal operation.
-        let headroom = self.target_samples + n; // target + 1 frame
+        //let headroom = self.target_samples + n; // target + 1 frame
+        let headroom = self.target_samples + (n * 4);
         for peer in self.buffers.values_mut() {
             if peer.samples.len() > headroom {
                 let excess = peer.samples.len() - headroom;
