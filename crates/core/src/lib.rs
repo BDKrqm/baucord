@@ -145,9 +145,6 @@ impl VoiceChat {
             self.config.gate_threshold,
         )?;
 
-        if self.config.mute_on_start {
-            input.set_muted(true);
-        }
         input.set_loopback(self.loopback_enabled.load(Ordering::Relaxed));
         input.start()?;
         self.is_speaking = input.speaking_handle();

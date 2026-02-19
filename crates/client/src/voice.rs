@@ -85,7 +85,6 @@ fn settings_to_config(s: &Settings) -> VoiceChatConfig {
     VoiceChatConfig {
         input_device: s.input_device.clone(),
         output_device: s.output_device.clone(),
-        mute_on_start: s.mute_on_start,
         gate_threshold: s.gate_threshold,
         noise_suppression: true,
         input_gain: s.input_gain,
@@ -233,9 +232,6 @@ fn handle_control(
                         event_tx.send(VoiceEvent::Error(format!("Start failed: {}", e))).ok();
                         wake();
                         return;
-                    }
-                    if settings.mute_on_start {
-                        voice.set_muted(true);
                     }
                     *our_client_id = Some(id);
                     *vc = Some(voice);

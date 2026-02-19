@@ -131,8 +131,6 @@ impl SettingsWindow {
             "Listen to your own mic (others won't hear you)",
         );
 
-        // let mute_on_start_toggle = helpers::check(&mut col, "Start muted", settings.mute_on_start);
-
         helpers::separator(&mut col);
 
         // ════════════════════════════════════════════════════════════════
