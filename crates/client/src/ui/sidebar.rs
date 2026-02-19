@@ -68,8 +68,8 @@ impl Sidebar {
         connection_status.set_align(enums::Align::Left | enums::Align::Inside);
 
         // Line 2: latency breakdown (audio | network)
-        let mut latency_label = frame::Frame::default()
-            .with_label("  \u{1f50a} --ms  \u{1f310} --ms");
+        let mut latency_label =
+            frame::Frame::default().with_label("  \u{1f50a} --ms  \u{1f310} --ms");
         status_col.fixed(&latency_label, 16);
         latency_label.set_label_color(theme::TEXT_MUTED);
         latency_label.set_label_size(10);
@@ -335,9 +335,9 @@ impl Sidebar {
     pub fn update_latency(&mut self, rtt_ms: f64, audio_latency_ms: Option<u32>) {
         // Connection status line: just the dot + "Connected"
         let status_label = if rtt_ms < 1.0 {
-            "\u{25cf} Connected".to_string()
+            "Disconnected".to_string()
         } else {
-            "\u{25cf} Connected".to_string()
+            "Connected".to_string()
         };
         self.connection_status.set_label(&status_label);
 
@@ -360,14 +360,13 @@ impl Sidebar {
             Some(ms) => format!("{}ms", ms),
             None => "--".to_string(),
         };
-        self.latency_label.set_label(
-            &format!("  \u{1f50a} {}  \u{1f310} {}", audio_str, net_str),
-        );
+        self.latency_label
+            .set_label(&format!("Audio: {} | Network: {}", audio_str, net_str));
     }
 
     pub fn handle_disconnected(&mut self) {
         self.set_connection_status(false);
-        self.latency_label.set_label("  \u{1f50a} --  \u{1f310} --");
+        self.latency_label.set_label("Audio: -- | Network: --");
         self.user_list_pack.clear();
         self.user_count_label.set_label("Users: 0");
     }

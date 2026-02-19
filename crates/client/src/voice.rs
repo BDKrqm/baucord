@@ -10,8 +10,8 @@
 
 use crossbeam_channel::{Receiver, Sender, bounded, select};
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -116,7 +116,14 @@ impl VoiceThreadHandle {
 
         let shared_clone = shared.clone();
         let join_handle = thread::spawn(move || {
-            run_voice_loop(control_rx, event_tx, network_tx, shared_clone, is_testing_mic, wake);
+            run_voice_loop(
+                control_rx,
+                event_tx,
+                network_tx,
+                shared_clone,
+                is_testing_mic,
+                wake,
+            );
         });
 
         Self {
@@ -170,8 +177,13 @@ fn run_voice_loop(
         for _ in 0..32 {
             match control_rx.try_recv() {
                 Ok(ctrl) => handle_control(
-                    ctrl, &mut vc, &mut our_client_id, &mut running,
-                    &event_tx, &mut was_speaking, &wake,
+                    ctrl,
+                    &mut vc,
+                    &mut our_client_id,
+                    &mut running,
+                    &event_tx,
+                    &mut was_speaking,
+                    &wake,
                 ),
                 Err(_) => break,
             }
@@ -192,12 +204,23 @@ fn run_voice_loop(
             }
 
             // Update shared levels for UI meters
-            shared.input_level.store(voice.input_level().to_bits(), Ordering::Relaxed);
-            shared.output_level.store(voice.output_level().to_bits(), Ordering::Relaxed);
-            shared.denoised_level.store(voice.denoised_level().to_bits(), Ordering::Relaxed);
-            shared.speaking.store(voice.is_speaking(), Ordering::Relaxed);
+            shared
+                .input_level
+                .store(voice.input_level().to_bits(), Ordering::Relaxed);
+            shared
+                .output_level
+                .store(voice.output_level().to_bits(), Ordering::Relaxed);
+            shared
+                .denoised_level
+                .store(voice.denoised_level().to_bits(), Ordering::Relaxed);
+            shared
+                .speaking
+                .store(voice.is_speaking(), Ordering::Relaxed);
             shared.jitter_buffer_ms.store(
-                voice.stats().jitter_buffer_occupancy_ms.load(Ordering::Relaxed) as u32,
+                voice
+                    .stats()
+                    .jitter_buffer_occupancy_ms
+                    .load(Ordering::Relaxed) as u32,
                 Ordering::Relaxed,
             );
 
@@ -225,12 +248,17 @@ fn handle_control(
     wake: &WakeFn,
 ) {
     match ctrl {
-        VoiceControl::Start { settings, our_client_id: id } => {
+        VoiceControl::Start {
+            settings,
+            our_client_id: id,
+        } => {
             let config = settings_to_config(&settings);
             match VoiceChat::new(config) {
                 Ok(mut voice) => {
                     if let Err(e) = voice.start() {
-                        event_tx.send(VoiceEvent::Error(format!("Start failed: {}", e))).ok();
+                        event_tx
+                            .send(VoiceEvent::Error(format!("Start failed: {}", e)))
+                            .ok();
                         wake();
                         return;
                     }
@@ -245,7 +273,9 @@ fn handle_control(
                     info!("Voice started for client {:?}", id);
                 }
                 Err(e) => {
-                    event_tx.send(VoiceEvent::Error(format!("Init failed: {}", e))).ok();
+                    event_tx
+                        .send(VoiceEvent::Error(format!("Init failed: {}", e)))
+                        .ok();
                     wake();
                 }
             }
@@ -257,28 +287,43 @@ fn handle_control(
             info!("Voice stopped");
         }
         VoiceControl::SetMuted(muted) => {
-            if let Some(v) = vc.as_ref() { v.set_muted(muted); }
+            if let Some(v) = vc.as_ref() {
+                v.set_muted(muted);
+            }
         }
         VoiceControl::SetDeafened(deafened) => {
-            if let Some(v) = vc.as_ref() { v.set_deafened(deafened); }
+            if let Some(v) = vc.as_ref() {
+                v.set_deafened(deafened);
+                v.set_muted(deafened);
+            }
         }
         VoiceControl::SetLoopback(enabled) => {
-            if let Some(v) = vc.as_ref() { v.set_loopback(enabled); }
+            if let Some(v) = vc.as_ref() {
+                v.set_loopback(enabled);
+            }
         }
         VoiceControl::SetGateThreshold(t) => {
-            if let Some(v) = vc.as_ref() { v.set_gate_threshold(t); }
+            if let Some(v) = vc.as_ref() {
+                v.set_gate_threshold(t);
+            }
         }
         VoiceControl::SetInputGain(g) => {
-            if let Some(v) = vc.as_ref() { v.set_input_gain(g); }
+            if let Some(v) = vc.as_ref() {
+                v.set_input_gain(g);
+            }
         }
         VoiceControl::SetOutputGain(g) => {
-            if let Some(v) = vc.as_ref() { v.set_output_gain(g); }
+            if let Some(v) = vc.as_ref() {
+                v.set_output_gain(g);
+            }
         }
         VoiceControl::SetInputDevice(d) => {
             if let Some(v) = vc.as_mut()
                 && let Err(e) = v.set_input_device(d.as_deref())
             {
-                event_tx.send(VoiceEvent::Error(format!("Input device: {}", e))).ok();
+                event_tx
+                    .send(VoiceEvent::Error(format!("Input device: {}", e)))
+                    .ok();
                 wake();
             }
         }
@@ -286,24 +331,35 @@ fn handle_control(
             if let Some(v) = vc.as_mut()
                 && let Err(e) = v.set_output_device(d.as_deref())
             {
-                event_tx.send(VoiceEvent::Error(format!("Output device: {}", e))).ok();
+                event_tx
+                    .send(VoiceEvent::Error(format!("Output device: {}", e)))
+                    .ok();
                 wake();
             }
         }
         VoiceControl::AddPeer(id) => {
-            if let Some(v) = vc.as_mut() { v.add_peer(id); }
+            if let Some(v) = vc.as_mut() {
+                v.add_peer(id);
+            }
         }
         VoiceControl::RemovePeer(id) => {
-            if let Some(v) = vc.as_mut() { v.remove_peer(id); }
+            if let Some(v) = vc.as_mut() {
+                v.remove_peer(id);
+            }
         }
         VoiceControl::SetPeerAudio(id, settings) => {
-            if let Some(v) = vc.as_ref() { v.set_peer_settings(id, settings); }
+            if let Some(v) = vc.as_ref() {
+                v.set_peer_settings(id, settings);
+            }
         }
         VoiceControl::IncomingVoicePacket(packet) => {
-            if let Some(v) = vc.as_ref() { v.receive_packet(packet); }
+            if let Some(v) = vc.as_ref() {
+                v.receive_packet(packet);
+            }
         }
         VoiceControl::Shutdown => {
             *running = false;
         }
     }
 }
+
