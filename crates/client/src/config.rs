@@ -1,8 +1,18 @@
 use log::info;
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
+
+/// Stable hash key for per-user audio settings.
+/// Prevents JSON injection from malicious usernames.
+pub fn user_key(username: &str) -> String {
+    let mut h = DefaultHasher::new();
+    username.hash(&mut h);
+    format!("{:016x}", h.finish())
+}
 
 /// Persisted application settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -15,9 +25,6 @@ pub struct Settings {
     pub input_gain: f32,
     pub output_gain: f32,
 
-    // Behaviour
-    pub mute_on_start: bool,
-
     // Window
     pub window_width: i32,
     pub window_height: i32,
@@ -28,7 +35,7 @@ pub struct Settings {
     pub input_device: Option<String>,
     pub output_device: Option<String>,
 
-    // Per-user audio (keyed by username for persistence across sessions)
+    // Per-user audio (keyed by hashed username)
     pub user_audio_settings: HashMap<String, UserAudioSettings>,
 }
 
@@ -37,10 +44,9 @@ impl Default for Settings {
         Settings {
             nickname: String::new(),
             last_server: "64.176.16.18:5000".to_string(),
-            gate_threshold: 0.020,
+            gate_threshold: 0.005,
             input_gain: 1.0,
             output_gain: 1.0,
-            mute_on_start: false,
             window_width: 1000,
             window_height: 700,
             window_x: None,
@@ -54,13 +60,10 @@ impl Default for Settings {
 
 impl Settings {
     fn get_settings_path() -> PathBuf {
-        let mut path = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
-        if cfg!(debug_assertions) {
-            path.push("baucord-dev");
-        } else {
-            path.push("baucord");
-        }
-        fs::create_dir_all(&path).ok();
+        let mut path = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| PathBuf::from("."));
         path.push("settings.json");
         path
     }

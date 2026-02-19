@@ -16,10 +16,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::{
-    config::{Settings, UserAudioSettings},
+    config::{user_key, Settings, UserAudioSettings},
     network::{NetworkControl, NetworkMessage, NetworkThreadHandle},
     ui::{chat::Chat, messages::UiMessage, sidebar::Sidebar},
-    voice::{SharedAudioState, VoiceControl, VoiceEvent, VoiceThreadHandle},
+    voice::{VoiceControl, VoiceEvent, VoiceThreadHandle},
 };
 use core::PeerAudioSettings;
 use ui::{helpers, theme};
@@ -108,7 +108,6 @@ impl App {
         );
 
         let settings = Settings::load();
-        let initial_mute = settings.mute_on_start;
 
         Self {
             app,
@@ -120,7 +119,7 @@ impl App {
             our_client_id: None,
             connected: false,
             settings,
-            is_muted: initial_mute,
+            is_muted: false,
             is_deafened: false,
             is_testing_mic: false,
             is_testing_mic_shared,
@@ -249,12 +248,12 @@ impl App {
             }
             NetworkMessage::VoiceData { .. } => {}
             NetworkMessage::UiUpdate => {}
-NetworkMessage::LatencyUpdate { rtt_ms } => {
-    if let Some(sidebar) = &mut self.sidebar {
-        let audio_ms = self.voice.shared.jitter_buffer_ms.load(Ordering::Relaxed);
-        sidebar.update_latency(rtt_ms, Some(audio_ms));
-    }
-}
+            NetworkMessage::LatencyUpdate { rtt_ms } => {
+                if let Some(sidebar) = &mut self.sidebar {
+                    let audio_ms = self.voice.shared.jitter_buffer_ms.load(Ordering::Relaxed);
+                    sidebar.update_latency(rtt_ms, Some(audio_ms));
+                }
+            }
         }
     }
 
@@ -340,7 +339,6 @@ NetworkMessage::LatencyUpdate { rtt_ms } => {
             }
             UiMessage::SettingsWindowClosed => {
                 self.settings_window_open = false;
-                // Stop test mic if settings window closed while testing
                 if self.is_testing_mic {
                     self.handle_test_microphone(false);
                 }
@@ -429,7 +427,7 @@ NetworkMessage::LatencyUpdate { rtt_ms } => {
                 })
                 .ok();
 
-            self.is_muted = self.settings.mute_on_start;
+            self.is_muted = false;
         }
 
         self.users.clear();
@@ -437,7 +435,7 @@ NetworkMessage::LatencyUpdate { rtt_ms } => {
             let audio = self
                 .settings
                 .user_audio_settings
-                .get(username)
+                .get(&user_key(username))
                 .cloned()
                 .unwrap_or_default();
 
@@ -447,11 +445,19 @@ NetworkMessage::LatencyUpdate { rtt_ms } => {
                     username: username.clone(),
                     is_speaking: false,
                     last_activity: Instant::now(),
-                    audio_settings: audio,
+                    audio_settings: audio.clone(),
                 },
             );
 
             self.voice.tx.send(VoiceControl::AddPeer(*id)).ok();
+
+            // Apply saved per-user audio settings to the voice engine
+            if audio.is_muted || (audio.volume - 1.0).abs() > 0.01 {
+                self.voice
+                    .tx
+                    .send(VoiceControl::SetPeerAudio(*id, to_peer_settings(&audio)))
+                    .ok();
+            }
         }
 
         if let Some(chat) = &mut self.chat {
@@ -464,7 +470,7 @@ NetworkMessage::LatencyUpdate { rtt_ms } => {
         let audio = self
             .settings
             .user_audio_settings
-            .get(&username)
+            .get(&user_key(&username))
             .cloned()
             .unwrap_or_default();
 
@@ -474,11 +480,22 @@ NetworkMessage::LatencyUpdate { rtt_ms } => {
                 username: username.clone(),
                 is_speaking: false,
                 last_activity: Instant::now(),
-                audio_settings: audio,
+                audio_settings: audio.clone(),
             },
         );
 
         self.voice.tx.send(VoiceControl::AddPeer(client_id)).ok();
+
+        // Apply saved per-user audio settings to the voice engine
+        if audio.is_muted || (audio.volume - 1.0).abs() > 0.01 {
+            self.voice
+                .tx
+                .send(VoiceControl::SetPeerAudio(
+                    client_id,
+                    to_peer_settings(&audio),
+                ))
+                .ok();
+        }
 
         if let Some(chat) = &mut self.chat {
             chat.handle_user_joined(username);
@@ -540,10 +557,11 @@ NetworkMessage::LatencyUpdate { rtt_ms } => {
     }
 
     fn handle_mute_user(&mut self, client_id: renet::ClientId, username: String, muted: bool) {
+        let key = user_key(&username);
         let settings = self
             .settings
             .user_audio_settings
-            .entry(username)
+            .entry(key)
             .or_default();
         settings.is_muted = muted;
 
@@ -568,10 +586,11 @@ NetworkMessage::LatencyUpdate { rtt_ms } => {
         username: String,
         volume: f32,
     ) {
+        let key = user_key(&username);
         let settings = self
             .settings
             .user_audio_settings
-            .entry(username)
+            .entry(key)
             .or_default();
         settings.volume = volume;
 
@@ -591,7 +610,7 @@ NetworkMessage::LatencyUpdate { rtt_ms } => {
     }
 
     fn handle_reset_user_audio(&mut self, client_id: renet::ClientId, username: String) {
-        self.settings.user_audio_settings.remove(&username);
+        self.settings.user_audio_settings.remove(&user_key(&username));
 
         if let Some(user) = self.users.get_mut(&client_id) {
             user.audio_settings = UserAudioSettings::default();

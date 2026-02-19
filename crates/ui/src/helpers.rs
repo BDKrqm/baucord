@@ -6,7 +6,7 @@
 //! the few domain-specific colours (stat readouts, muted hints, etc.).
 
 use crate::theme;
-use fltk::{enums, frame, group, input, menu, button, text, valuator, prelude::*};
+use fltk::{button, enums, frame, group, input, menu, prelude::*, text, valuator};
 
 // ── Section & field labels ──────────────────────────────────────────────
 

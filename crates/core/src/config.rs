@@ -13,8 +13,6 @@ pub struct VoiceChatConfig {
     pub input_device: Option<String>,
     /// Output device name, or `None` for system default.
     pub output_device: Option<String>,
-    /// Start muted.
-    pub mute_on_start: bool,
 
     /// Enable RNNoise-based noise suppression. Default: `true`.
     ///
@@ -64,7 +62,6 @@ impl Default for VoiceChatConfig {
         Self {
             input_device: None,
             output_device: None,
-            mute_on_start: false,
             noise_suppression: true,
             input_gain: 1.0,
             output_gain: 0.4,

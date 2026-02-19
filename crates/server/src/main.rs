@@ -9,7 +9,7 @@ use server::{ChatServer, Config};
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Path to configuration file
-    #[arg(short, long, default_value = "config.yaml")]
+    #[arg(short, long, default_value = "server.yaml")]
     config: String,
     /// Override host from config
     #[arg(long)]
