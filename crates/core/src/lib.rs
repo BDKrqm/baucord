@@ -41,6 +41,7 @@ use std::time::Instant;
 
 use cpal::traits::{DeviceTrait, HostTrait};
 use input::AudioInput;
+use jitter_buffer::DecodedFrame;
 use output::AudioOutput;
 
 /// Internal pipeline sample rate (Opus native).
@@ -71,7 +72,7 @@ pub struct VoiceChat {
     audio_to_encoder: (Sender<Vec<f32>>, Receiver<Vec<f32>>),
     encoder_to_network: (Sender<AudioPacket>, Receiver<AudioPacket>),
     network_to_decoder: (Sender<AudioPacket>, Receiver<AudioPacket>),
-    decoder_to_audio: (Sender<(u64, Vec<f32>)>, Receiver<(u64, Vec<f32>)>),
+    decoder_to_audio: (Sender<DecodedFrame>, Receiver<DecodedFrame>),
 
     encoder_thread: Option<thread::JoinHandle<()>>,
     decoder_dispatcher_thread: Option<thread::JoinHandle<()>>,
@@ -133,10 +134,11 @@ impl VoiceChat {
     }
 
     fn start_input(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let loopback_tx = self.decoder_to_audio.0.clone();
         let mut input = AudioInput::new(
             self.config.input_device.as_deref(),
             self.audio_to_encoder.0.clone(),
-            Some(self.decoder_to_audio.0.clone()),
+            Some(loopback_tx),
             self.stats.clone(),
             self.config.noise_suppression,
             self.config.input_gain,
@@ -328,6 +330,10 @@ impl VoiceChat {
                         break;
                     }
 
+                    // Stamp arrival time NOW — before any decode work.
+                    // This is the critical timing point for jitter estimation.
+                    let arrival_time = Instant::now();
+
                     let ssrc = packet.header.ssrc;
 
                     // ── Check if peer was removed ───────────────────────
@@ -372,7 +378,13 @@ impl VoiceChat {
                             for j in 0..(gap - 1) {
                                 match decoder.decode_float(&[], &mut frame_buffer, false) {
                                     Ok(n) => {
-                                        let _ = tx.send((ssrc, frame_buffer[..n].to_vec()));
+                                        let _ = tx.send(DecodedFrame {
+                                            peer_id: ssrc,
+                                            seq: expect.wrapping_add(j as u32),
+                                            arrival_time,
+                                            samples: frame_buffer[..n].to_vec(),
+                                            is_concealment: true,
+                                        });
                                         stats.plc_frames.fetch_add(1, Ordering::Relaxed);
                                     }
                                     Err(e) => {
@@ -388,12 +400,24 @@ impl VoiceChat {
                         // FEC for the last missing frame
                         match decoder.decode_float(&packet.opus_data, &mut frame_buffer, true) {
                             Ok(n) => {
-                                let _ = tx.send((ssrc, frame_buffer[..n].to_vec()));
+                                let _ = tx.send(DecodedFrame {
+                                    peer_id: ssrc,
+                                    seq: curr.wrapping_sub(1),
+                                    arrival_time,
+                                    samples: frame_buffer[..n].to_vec(),
+                                    is_concealment: true,
+                                });
                                 stats.fec_recoveries.fetch_add(1, Ordering::Relaxed);
                             }
                             Err(_) => {
                                 if let Ok(n) = decoder.decode_float(&[], &mut frame_buffer, false) {
-                                    let _ = tx.send((ssrc, frame_buffer[..n].to_vec()));
+                                    let _ = tx.send(DecodedFrame {
+                                        peer_id: ssrc,
+                                        seq: curr.wrapping_sub(1),
+                                        arrival_time,
+                                        samples: frame_buffer[..n].to_vec(),
+                                        is_concealment: true,
+                                    });
                                     stats.plc_frames.fetch_add(1, Ordering::Relaxed);
                                 }
                             }
@@ -411,7 +435,13 @@ impl VoiceChat {
                                 .last_decode_us
                                 .store(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
                             stats.record_packet_received(packet.opus_data.len());
-                            if tx.send((ssrc, frame_buffer[..n].to_vec())).is_err() {
+                            if tx.send(DecodedFrame {
+                                peer_id: ssrc,
+                                seq: curr,
+                                arrival_time,
+                                samples: frame_buffer[..n].to_vec(),
+                                is_concealment: false,
+                            }).is_err() {
                                 break;
                             }
                             last_seq.insert(ssrc, curr);
@@ -420,7 +450,13 @@ impl VoiceChat {
                             error!("Decode error for peer {}: {}", ssrc, e);
                             stats.decode_errors.fetch_add(1, Ordering::Relaxed);
                             if let Ok(n) = decoder.decode_float(&[], &mut frame_buffer, false) {
-                                let _ = tx.send((ssrc, frame_buffer[..n].to_vec()));
+                                let _ = tx.send(DecodedFrame {
+                                    peer_id: ssrc,
+                                    seq: curr,
+                                    arrival_time,
+                                    samples: frame_buffer[..n].to_vec(),
+                                    is_concealment: true,
+                                });
                                 stats.plc_frames.fetch_add(1, Ordering::Relaxed);
                             }
                             last_seq.insert(ssrc, curr);

@@ -249,11 +249,12 @@ impl App {
             }
             NetworkMessage::VoiceData { .. } => {}
             NetworkMessage::UiUpdate => {}
-            NetworkMessage::LatencyUpdate { rtt_ms } => {
-                if let Some(sidebar) = &mut self.sidebar {
-                    sidebar.update_latency(rtt_ms);
-                }
-            }
+NetworkMessage::LatencyUpdate { rtt_ms } => {
+    if let Some(sidebar) = &mut self.sidebar {
+        let audio_ms = self.voice.shared.jitter_buffer_ms.load(Ordering::Relaxed);
+        sidebar.update_latency(rtt_ms, Some(audio_ms));
+    }
+}
         }
     }
 

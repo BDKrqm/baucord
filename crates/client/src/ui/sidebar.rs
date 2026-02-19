@@ -16,6 +16,7 @@ pub struct Sidebar {
     user_list_scroll: group::Scroll,
     user_list_pack: group::Pack,
     connection_status: frame::Frame,
+    latency_label: frame::Frame,
     mute_btn: button::Button,
     deafen_btn: button::Button,
 }
@@ -54,12 +55,27 @@ impl Sidebar {
         // Spacer
         sidebar.add(&frame::Frame::default());
 
-        // Connection status
+        // ── Connection status panel ────────────────────────────────
+        let mut status_col = group::Flex::default().column();
+        status_col.set_spacing(2);
+        sidebar.fixed(&status_col, 50);
+
+        // Line 1: connection dot + status text
         let mut connection_status = frame::Frame::default().with_label("\u{25cf} Connected");
-        sidebar.fixed(&connection_status, 25);
+        status_col.fixed(&connection_status, 20);
         connection_status.set_label_color(theme::SUCCESS);
         connection_status.set_label_size(12);
         connection_status.set_align(enums::Align::Left | enums::Align::Inside);
+
+        // Line 2: latency breakdown (audio | network)
+        let mut latency_label = frame::Frame::default()
+            .with_label("  \u{1f50a} --ms  \u{1f310} --ms");
+        status_col.fixed(&latency_label, 16);
+        latency_label.set_label_color(theme::TEXT_MUTED);
+        latency_label.set_label_size(10);
+        latency_label.set_align(enums::Align::Left | enums::Align::Inside);
+
+        status_col.end();
 
         // Mute / Deafen row
         let mut audio_row = group::Flex::default().row();
@@ -109,6 +125,7 @@ impl Sidebar {
             user_list_scroll,
             user_list_pack,
             connection_status,
+            latency_label,
             mute_btn,
             deafen_btn,
         }
@@ -315,15 +332,16 @@ impl Sidebar {
         }
     }
 
-    pub fn update_latency(&mut self, rtt_ms: f64) {
-        // RTT is round-trip; show half for one-way feel, but label as RTT
-        let label = if rtt_ms < 1.0 {
-            "\u{25cf} Connected - <1ms".to_string()
+    pub fn update_latency(&mut self, rtt_ms: f64, audio_latency_ms: Option<u32>) {
+        // Connection status line: just the dot + "Connected"
+        let status_label = if rtt_ms < 1.0 {
+            "\u{25cf} Connected".to_string()
         } else {
-            format!("\u{25cf} Connected - {:.0}ms", rtt_ms)
+            "\u{25cf} Connected".to_string()
         };
-        self.connection_status.set_label(&label);
-        // Color-code: green <80ms, yellow <150ms, red >150ms
+        self.connection_status.set_label(&status_label);
+
+        // Color-code by network RTT
         if rtt_ms < 80.0 {
             self.connection_status.set_label_color(theme::SUCCESS);
         } else if rtt_ms < 150.0 {
@@ -331,10 +349,25 @@ impl Sidebar {
         } else {
             self.connection_status.set_label_color(theme::DANGER);
         }
+
+        // Latency detail line
+        let net_str = if rtt_ms < 1.0 {
+            "<1ms".to_string()
+        } else {
+            format!("{:.0}ms", rtt_ms)
+        };
+        let audio_str = match audio_latency_ms {
+            Some(ms) => format!("{}ms", ms),
+            None => "--".to_string(),
+        };
+        self.latency_label.set_label(
+            &format!("  \u{1f50a} {}  \u{1f310} {}", audio_str, net_str),
+        );
     }
 
     pub fn handle_disconnected(&mut self) {
         self.set_connection_status(false);
+        self.latency_label.set_label("  \u{1f50a} --  \u{1f310} --");
         self.user_list_pack.clear();
         self.user_count_label.set_label("Users: 0");
     }
@@ -343,9 +376,11 @@ impl Sidebar {
         if muted {
             self.mute_btn.set_label("Unmute");
             self.mute_btn.set_color(theme::DANGER);
+            self.mute_btn.set_label_color(enums::Color::White);
         } else {
             self.mute_btn.set_label("Mute");
             self.mute_btn.set_color(theme::BG_TERTIARY);
+            self.mute_btn.set_label_color(theme::TEXT_PRIMARY);
         }
     }
 
@@ -353,9 +388,11 @@ impl Sidebar {
         if deafened {
             self.deafen_btn.set_label("Undeafen");
             self.deafen_btn.set_color(theme::WARNING);
+            self.deafen_btn.set_label_color(enums::Color::White);
         } else {
             self.deafen_btn.set_label("Deafen");
             self.deafen_btn.set_color(theme::BG_TERTIARY);
+            self.deafen_btn.set_label_color(theme::TEXT_PRIMARY);
         }
     }
 }

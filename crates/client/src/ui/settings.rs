@@ -234,11 +234,13 @@ impl SettingsWindow {
             if is_testing {
                 btn.set_label("\u{1f534}  Stop Testing");
                 btn.set_color(theme::DANGER);
+                btn.set_label_color(enums::Color::White);
                 info_lbl.set_label("Listening to your mic... others can't hear you");
                 info_lbl.set_label_color(theme::WARNING);
             } else {
                 btn.set_label("\u{1f3a4}  Test Microphone");
                 btn.set_color(theme::BG_TERTIARY);
+                btn.set_label_color(theme::TEXT_PRIMARY);
                 info_lbl.set_label("Listen to your own mic (others won't hear you)");
                 info_lbl.set_label_color(theme::TEXT_MUTED);
             }
