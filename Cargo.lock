@@ -1507,9 +1507,9 @@ checksum = "2b15c43186be67a4fd63bee50d0303afffcef381492ebe2c5d87f324e1b8815c"
 
 [[package]]
 name = "renet"
-version = "1.1.0"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "639816fa1a50f8a3a20e823a0c63a3481295c2d4bf7b0606e84d7a46820ce5e9"
+checksum = "2c3784a36baf3db87eb738af59a2d57cd54b2d09088499eaab300440f81fd41a"
 dependencies = [
  "bytes",
  "log",
@@ -1518,9 +1518,9 @@ dependencies = [
 
 [[package]]
 name = "renet_netcode"
-version = "1.1.0"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63860bdfd2bd7db57690a78b941e535cce9a87058c05407d5f37a92ae83c4143"
+checksum = "7d73ffa79c2081fe93286acac186a20d49657b93b8cfa4e0e8b79b1f3ee81241"
 dependencies = [
  "log",
  "renet",

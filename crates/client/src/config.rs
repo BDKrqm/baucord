@@ -37,7 +37,7 @@ impl Default for Settings {
         Settings {
             nickname: String::new(),
             last_server: "64.176.16.18:5000".to_string(),
-            gate_threshold: 0.020,
+            gate_threshold: 0.005,
             input_gain: 1.0,
             output_gain: 1.0,
             mute_on_start: false,
@@ -53,17 +53,14 @@ impl Default for Settings {
 }
 
 impl Settings {
-    fn get_settings_path() -> PathBuf {
-        let mut path = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
-        if cfg!(debug_assertions) {
-            path.push("baucord-dev");
-        } else {
-            path.push("baucord");
-        }
-        fs::create_dir_all(&path).ok();
-        path.push("settings.json");
-        path
-    }
+   fn get_settings_path() -> PathBuf {
+    let mut path = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."));
+    path.push("settings.json");
+    path
+} 
 
     pub fn load() -> Self {
         let path = Self::get_settings_path();
