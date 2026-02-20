@@ -24,7 +24,7 @@ jobs:
             suffix: macos-arm64
             # Apple Silicon is one architecture — native is fine here.
             rustflags: "-C target-cpu=native"
-          - os: macos-latest
+          - os: macos-13
             target: x86_64-apple-darwin
             suffix: macos-x64
             rustflags: "-C target-cpu=x86-64-v2"
@@ -56,23 +56,12 @@ jobs:
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
-        run: |
-          brew install opus cmake
-          if [ "${{ matrix.target }}" = "x86_64-apple-darwin" ]; then
-            brew fetch --force --bottle-tag=ventura opus
-            brew reinstall $(brew --cache --bottle-tag=ventura opus)
-          fi
+        run: brew install opus
 
       - name: Build
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
-        run: cargo build --profile deploy --target ${{ matrix.target }}
-
-      - name: Build
-        env:
-          # Overrides .cargo/config.toml's target-cpu=native
-          RUSTFLAGS: ${{ matrix.rustflags }}
         run: cargo build --profile deploy --target ${{ matrix.target }}
 
       - name: Package (Unix)
