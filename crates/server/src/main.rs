@@ -2,8 +2,10 @@ use clap::Parser;
 use log::{error, info};
 use std::thread;
 use std::time::Duration;
+mod config;
 mod server;
-use server::{ChatServer, Config};
+use config::Config;
+use server::ChatServer;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -22,9 +24,14 @@ struct Args {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let mut config = Config::from_file(&args.config).unwrap_or_else(|e| {
-        eprintln!("Failed to load config from {}: {}", args.config, e);
-        eprintln!("Using default configuration");
-        create_default_config()
+        eprintln!("Failed to load config from {}: {e}", args.config);
+        let config = Config::default();
+        if let Err(save_err) = config.save_to_file(&args.config) {
+            eprintln!("Could not save default config to {}: {save_err}", args.config);
+        } else {
+            eprintln!("Default configuration saved to {}", args.config);
+        }
+        config
     });
 
     if let Some(host) = args.host {
@@ -35,7 +42,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     env_logger::Builder::new()
-        .filter_level(parse_log_level(&config.logging.level))
+        .filter_level(
+            config
+                .logging
+                .level
+                .parse()
+                .unwrap_or(log::LevelFilter::Info),
+        )
         .init();
 
     info!("Starting {}", config.server.name);
@@ -44,7 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Server listening on:");
     for addr in server.addresses() {
-        info!("  {}", addr);
+        info!("  {addr}");
     }
     info!("Press Ctrl+C to stop");
 
@@ -62,44 +75,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // update() returns immediately when there's nothing to process.
     loop {
         if let Err(e) = server.update() {
-            error!("Server error: {}", e);
+            error!("Server error: {e}");
         }
         thread::sleep(Duration::from_millis(1));
-    }
-}
-
-fn parse_log_level(level: &str) -> log::LevelFilter {
-    match level.to_lowercase().as_str() {
-        "trace" => log::LevelFilter::Trace,
-        "debug" => log::LevelFilter::Debug,
-        "info" => log::LevelFilter::Info,
-        "warn" => log::LevelFilter::Warn,
-        "error" => log::LevelFilter::Error,
-        _ => log::LevelFilter::Info,
-    }
-}
-
-fn create_default_config() -> Config {
-    Config {
-        server: server::ServerSettings {
-            name: "Baucord Server".to_string(),
-            host: "0.0.0.0".to_string(),
-            port: 5000,
-            greeting_message: "Welcome to the server!".to_string(),
-        },
-        network: server::NetworkSettings {
-            max_clients: 64,
-            protocol_id: 27,
-        },
-        channels: server::ChannelSettings {
-            reliable_channel_id: 2,
-            voice_channel_id: 3,
-            voice_buffer_size_mb: 5,
-        },
-        logging: server::LoggingSettings {
-            level: "info".to_string(),
-            stats_interval_secs: 30,
-        },
-        authentication: server::AuthSettings { enabled: false },
     }
 }

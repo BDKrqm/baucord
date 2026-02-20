@@ -10,7 +10,7 @@ authors = ["x@mpw.sh"]
 # ── Shared lints (inherited by crates via `[lints] workspace = true`) ────
 [workspace.lints.rust]
 future-incompatible = "warn"
-nonstandard_style = "deny"
+nonstandard_style = { level = "deny", priority = -1 }
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = 10 }

@@ -6,62 +6,13 @@ use renet_netcode::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
 use std::net::{SocketAddr, UdpSocket};
-use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
-#[derive(Debug, Deserialize)]
-pub struct Config {
-    pub server: ServerSettings,
-    pub network: NetworkSettings,
-    pub channels: ChannelSettings,
-    pub logging: LoggingSettings,
-    pub authentication: AuthSettings,
-}
+use crate::config::{ChannelSettings, Config};
 
-#[derive(Debug, Deserialize)]
-pub struct ServerSettings {
-    pub name: String,
-    pub host: String,
-    pub port: u16,
-    pub greeting_message: String,
-}
+// ── Protocol types ──────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
-pub struct NetworkSettings {
-    pub max_clients: usize,
-    pub protocol_id: u64,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ChannelSettings {
-    pub reliable_channel_id: u8,
-    pub voice_channel_id: u8,
-    pub voice_buffer_size_mb: usize,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct LoggingSettings {
-    pub level: String,
-    pub stats_interval_secs: u64,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct AuthSettings {
-    pub enabled: bool,
-}
-
-impl Config {
-    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
-        let contents = fs::read_to_string(path)?;
-        Ok(serde_yaml::from_str(&contents)?)
-    }
-
-    pub fn socket_addr(&self) -> String {
-        format!("{}:{}", self.server.host, self.server.port)
-    }
-}
 const VOICE_PROTOCOL_VERSION: u8 = 1;
 const VOICE_MTU_BUDGET: usize = 1000;
 const MAX_FRAMES_PER_PACKET: usize = 2;
@@ -120,6 +71,8 @@ enum ServerMessage {
     },
 }
 
+// ── Stats ───────────────────────────────────────────────────────────────
+
 #[derive(Default)]
 struct VoiceStats {
     packets_received: u64,
@@ -130,6 +83,31 @@ struct VoiceStats {
     total_frames: u64,
     avg_frames_per_packet: f32,
 }
+
+#[derive(Default)]
+struct ServerStats {
+    messages_count: u64,
+    voice_packets_count: u64,
+    bytes_sent: u64,
+    bytes_received: u64,
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────
+
+/// Extract a UTF-8 username from renet's fixed-size user data buffer.
+fn username_from_user_data(user_data: &[u8; NETCODE_USER_DATA_BYTES]) -> String {
+    let len = (user_data[0] as usize).min(NETCODE_USER_DATA_BYTES - 1);
+    String::from_utf8_lossy(&user_data[1..=len]).into_owned()
+}
+
+/// Serialize a `ServerMessage` via bincode, logging on failure.
+fn encode_message(msg: &ServerMessage) -> Option<Vec<u8>> {
+    bincode::options().serialize(msg).map_err(|e| {
+        warn!("Failed to serialize message: {e}");
+    }).ok()
+}
+
+// ── ChatServer ──────────────────────────────────────────────────────────
 
 pub struct ChatServer {
     config: Config,
@@ -142,24 +120,14 @@ pub struct ChatServer {
     voice_stats: VoiceStats,
 }
 
-#[derive(Default)]
-struct ServerStats {
-    messages_count: u64,
-    voice_packets_count: u64,
-    bytes_sent: u64,
-    bytes_received: u64,
-}
-
 impl ChatServer {
     pub fn new(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
-        // Set the socket to non-blocking so recv doesn't stall the loop.
-        // renet_netcode handles the actual I/O, but the underlying socket
-        // must be non-blocking for our tight poll loop to work.
-        let socket = UdpSocket::bind(config.socket_addr())?;
+        let addr = config.socket_addr()?;
+        let socket = UdpSocket::bind(addr)?;
         socket.set_nonblocking(true)?;
         let public_addr = socket.local_addr()?;
 
-        info!("{} starting on {}", config.server.name, public_addr);
+        info!("{} starting on {public_addr}", config.server.name);
 
         let server_config = ServerConfig {
             current_time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?,
@@ -247,6 +215,8 @@ impl ChatServer {
         Ok(())
     }
 
+    // ── Event handling ──────────────────────────────────────────────
+
     fn process_events(&mut self) {
         while let Some(event) = self.server.get_event() {
             match event {
@@ -264,56 +234,56 @@ impl ChatServer {
         let username = self
             .transport
             .user_data(client_id)
-            .map(|user_data: [u8; 256]| {
-                <std::string::String as Username>::from_user_data(&user_data)
-            })
-            .unwrap_or_else(|| format!("User{}", client_id));
+            .map_or_else(|| format!("User{client_id}"), |data| username_from_user_data(&data));
 
-        info!("{} ({}) connected", username, client_id);
+        info!("{username} ({client_id}) connected");
         self.usernames.insert(client_id, username.clone());
 
-        let init_message = ServerMessage::InitClient {
+        // Send init with the full user list to the new client
+        let init_msg = ServerMessage::InitClient {
             usernames: self.usernames.clone(),
             server_name: self.config.server.name.clone(),
             greeting: self.config.server.greeting_message.clone(),
         };
 
-        let encoded = bincode::options()
-            .serialize(&init_message)
-            .expect("Failed to serialize init message");
+        if let Some(encoded) = encode_message(&init_msg) {
+            self.server.send_message(
+                client_id,
+                self.config.channels.reliable_channel_id,
+                encoded,
+            );
+        }
 
-        self.server
-            .send_message(client_id, self.config.channels.reliable_channel_id, encoded);
-
+        // Notify everyone else
         let connected_msg = ServerMessage::ClientConnected {
             client_id,
-            username: username.clone(),
+            username,
         };
 
-        let encoded = bincode::options()
-            .serialize(&connected_msg)
-            .expect("Failed to serialize connected message");
-
-        self.server.broadcast_message_except(
-            client_id,
-            self.config.channels.reliable_channel_id,
-            encoded,
-        );
+        if let Some(encoded) = encode_message(&connected_msg) {
+            self.server.broadcast_message_except(
+                client_id,
+                self.config.channels.reliable_channel_id,
+                encoded,
+            );
+        }
     }
 
     fn handle_client_disconnected(&mut self, client_id: ClientId, reason: renet::DisconnectReason) {
         if let Some(username) = self.usernames.remove(&client_id) {
-            info!("{} ({}) disconnected: {}", username, client_id, reason);
+            info!("{username} ({client_id}) disconnected: {reason}");
         }
 
-        let message = ServerMessage::ClientDisconnected { client_id };
-        let encoded = bincode::options()
-            .serialize(&message)
-            .expect("Failed to serialize disconnect message");
-
-        self.server
-            .broadcast_message(self.config.channels.reliable_channel_id, encoded);
+        let msg = ServerMessage::ClientDisconnected { client_id };
+        if let Some(encoded) = encode_message(&msg) {
+            self.server.broadcast_message(
+                self.config.channels.reliable_channel_id,
+                encoded,
+            );
+        }
     }
+
+    // ── Reliable messages ───────────────────────────────────────────
 
     fn process_reliable_messages(&mut self) {
         let channel_id = self.config.channels.reliable_channel_id;
@@ -333,36 +303,38 @@ impl ChatServer {
         match message {
             ClientMessage::Text(text) => {
                 let username = self.get_username(client_id);
-                info!("[{}]: {}", username, text);
+                info!("[{username}]: {text}");
                 self.stats.messages_count += 1;
 
                 let msg = ServerMessage::ClientMessage(Message { client_id, text });
-                let encoded = bincode::options()
-                    .serialize(&msg)
-                    .expect("Failed to serialize text message");
-
-                self.stats.bytes_sent +=
-                    encoded.len() as u64 * self.server.connected_clients() as u64;
-                self.server
-                    .broadcast_message(self.config.channels.reliable_channel_id, encoded);
+                if let Some(encoded) = encode_message(&msg) {
+                    self.stats.bytes_sent +=
+                        encoded.len() as u64 * self.server.connected_clients() as u64;
+                    self.server.broadcast_message(
+                        self.config.channels.reliable_channel_id,
+                        encoded,
+                    );
+                }
             }
             ClientMessage::Speaking(is_speaking) => {
                 let msg = ServerMessage::Speaking {
                     client_id,
                     is_speaking,
                 };
-                let encoded = bincode::options()
-                    .serialize(&msg)
-                    .expect("Failed to serialize speaking message");
-
-                self.server
-                    .broadcast_message(self.config.channels.reliable_channel_id, encoded);
+                if let Some(encoded) = encode_message(&msg) {
+                    self.server.broadcast_message(
+                        self.config.channels.reliable_channel_id,
+                        encoded,
+                    );
+                }
             }
             ClientMessage::VoiceData(_) => {
-                warn!("Voice data received on reliable channel from {}", client_id);
+                warn!("Voice data received on reliable channel from {client_id}");
             }
         }
     }
+
+    // ── Voice relay ─────────────────────────────────────────────────
 
     fn process_voice_messages(&mut self) {
         let channel_id = self.config.channels.voice_channel_id;
@@ -382,9 +354,8 @@ impl ChatServer {
                 if message.len() > VOICE_MTU_BUDGET {
                     self.voice_stats.packets_dropped_oversize += 1;
                     warn!(
-                        "Dropping oversize packet: {} bytes from {}",
+                        "Dropping oversize packet: {} bytes from {client_id}",
                         message.len(),
-                        client_id
                     );
                     continue;
                 }
@@ -392,7 +363,7 @@ impl ChatServer {
                 // Validate protocol version
                 if message[0] != VOICE_PROTOCOL_VERSION {
                     self.voice_stats.packets_dropped_version += 1;
-                    warn!("Invalid protocol version {} from {}", message[0], client_id);
+                    warn!("Invalid protocol version {} from {client_id}", message[0]);
                     continue;
                 }
 
@@ -413,7 +384,7 @@ impl ChatServer {
                 // Validate frame count
                 if frame_count == 0 || frame_count > MAX_FRAMES_PER_PACKET {
                     self.voice_stats.packets_dropped_malformed += 1;
-                    warn!("Invalid frame count {} from {}", frame_count, client_id);
+                    warn!("Invalid frame count {frame_count} from {client_id}");
                     continue;
                 }
 
@@ -422,8 +393,7 @@ impl ChatServer {
                 // so this is purely informational.
                 if hdr_client_id != *client_id {
                     debug!(
-                        "Header client_id {} != sender {} (stale session?)",
-                        hdr_client_id, client_id
+                        "Header client_id {hdr_client_id} != sender {client_id} (stale session?)",
                     );
                 }
 
@@ -445,7 +415,7 @@ impl ChatServer {
                     validation_offset += 2;
 
                     if len == 0 || len > 512 {
-                        debug!("Invalid frame {} size: {} bytes from {}", i, len, client_id);
+                        debug!("Invalid frame {i} size: {len} bytes from {client_id}");
                         valid = false;
                         break;
                     }
@@ -466,23 +436,25 @@ impl ChatServer {
                 if validation_offset != message.len() {
                     self.voice_stats.packets_dropped_malformed += 1;
                     debug!(
-                        "Trailing bytes: expected {}, got {} from {}",
-                        validation_offset,
+                        "Trailing bytes: expected {validation_offset}, got {} from {client_id}",
                         message.len(),
-                        client_id,
                     );
                     continue;
                 }
 
                 // Stats (EMA, not running mean)
                 self.voice_stats.total_frames += frame_count as u64;
-                self.voice_stats.avg_frames_per_packet =
-                    self.voice_stats.avg_frames_per_packet * 0.95 + frame_count as f32 * 0.05;
+                #[allow(clippy::cast_precision_loss)] // frame_count ≤ MAX_FRAMES_PER_PACKET (2)
+                {
+                    self.voice_stats.avg_frames_per_packet =
+                        self.voice_stats.avg_frames_per_packet * 0.95 + frame_count as f32 * 0.05;
+                }
 
-                // Forward raw bytes — renet takes ownership via into(),
-                // so we hand off the Bytes directly. No clone needed:
-                // receive_message already gave us an owned buffer.
+                // Forward raw bytes to all other clients.
+                // Capture len before move — broadcast_message_except takes ownership.
                 let recipients = clients.len().saturating_sub(1);
+                let msg_len = message.len();
+
                 self.server.broadcast_message_except(
                     *client_id,
                     channel_id,
@@ -491,19 +463,21 @@ impl ChatServer {
 
                 self.voice_stats.packets_forwarded += 1;
                 self.stats.voice_packets_count += 1;
-                self.stats.bytes_sent += (VoiceHeader::SIZE as u64 + validation_offset as u64)
-                    * recipients as u64;
+                self.stats.bytes_sent += msg_len as u64 * recipients as u64;
             }
         }
     }
+
+    // ── Utilities ───────────────────────────────────────────────────
 
     fn get_username(&self, client_id: ClientId) -> String {
         self.usernames
             .get(&client_id)
             .cloned()
-            .unwrap_or_else(|| format!("User{}", client_id))
+            .unwrap_or_else(|| format!("User{client_id}"))
     }
 
+    #[allow(clippy::cast_precision_loss)] // display-only stats, precision irrelevant
     fn print_stats(&self) {
         info!("=== {} Statistics ===", self.config.server.name);
         info!("Connected clients: {}", self.server.connected_clients());
@@ -515,18 +489,17 @@ impl ChatServer {
         );
 
         if self.voice_stats.packets_received > 0 {
-            let drop_rate = (self.voice_stats.packets_dropped_malformed
+            let total_dropped = self.voice_stats.packets_dropped_malformed
                 + self.voice_stats.packets_dropped_oversize
-                + self.voice_stats.packets_dropped_version) as f32
-                / self.voice_stats.packets_received as f32
-                * 100.0;
+                + self.voice_stats.packets_dropped_version;
+            let drop_rate =
+                total_dropped as f32 / self.voice_stats.packets_received as f32 * 100.0;
 
             info!(
-                "Voice drops: {} malformed, {} oversize, {} bad version ({:.1}% total)",
+                "Voice drops: {} malformed, {} oversize, {} bad version ({drop_rate:.1}% total)",
                 self.voice_stats.packets_dropped_malformed,
                 self.voice_stats.packets_dropped_oversize,
                 self.voice_stats.packets_dropped_version,
-                drop_rate
             );
         }
 
@@ -549,18 +522,5 @@ impl ChatServer {
 
     pub fn addresses(&self) -> Vec<SocketAddr> {
         self.transport.addresses()
-    }
-}
-
-trait Username {
-    fn from_user_data(user_data: &[u8; NETCODE_USER_DATA_BYTES]) -> String;
-}
-
-impl Username for String {
-    fn from_user_data(user_data: &[u8; NETCODE_USER_DATA_BYTES]) -> String {
-        let len = (user_data[0] as usize).min(NETCODE_USER_DATA_BYTES - 1);
-        let data = &user_data[1..=len];
-
-        String::from_utf8_lossy(data).into_owned()
     }
 }
