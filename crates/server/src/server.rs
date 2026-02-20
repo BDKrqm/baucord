@@ -44,6 +44,7 @@ enum ClientMessage {
     Text(String),
     VoiceData(Vec<u8>),
     Speaking(bool),
+    AudioState { muted: bool, deafened: bool },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -68,6 +69,11 @@ enum ServerMessage {
     Speaking {
         client_id: ClientId,
         is_speaking: bool,
+    },
+    AudioState {
+        client_id: ClientId,
+        muted: bool,
+        deafened: bool,
     },
 }
 
@@ -102,9 +108,12 @@ fn username_from_user_data(user_data: &[u8; NETCODE_USER_DATA_BYTES]) -> String 
 
 /// Serialize a `ServerMessage` via bincode, logging on failure.
 fn encode_message(msg: &ServerMessage) -> Option<Vec<u8>> {
-    bincode::options().serialize(msg).map_err(|e| {
-        warn!("Failed to serialize message: {e}");
-    }).ok()
+    bincode::options()
+        .serialize(msg)
+        .map_err(|e| {
+            warn!("Failed to serialize message: {e}");
+        })
+        .ok()
 }
 
 // ── ChatServer ──────────────────────────────────────────────────────────
@@ -231,10 +240,10 @@ impl ChatServer {
     }
 
     fn handle_client_connected(&mut self, client_id: ClientId) {
-        let username = self
-            .transport
-            .user_data(client_id)
-            .map_or_else(|| format!("User{client_id}"), |data| username_from_user_data(&data));
+        let username = self.transport.user_data(client_id).map_or_else(
+            || format!("User{client_id}"),
+            |data| username_from_user_data(&data),
+        );
 
         info!("{username} ({client_id}) connected");
         self.usernames.insert(client_id, username.clone());
@@ -247,11 +256,8 @@ impl ChatServer {
         };
 
         if let Some(encoded) = encode_message(&init_msg) {
-            self.server.send_message(
-                client_id,
-                self.config.channels.reliable_channel_id,
-                encoded,
-            );
+            self.server
+                .send_message(client_id, self.config.channels.reliable_channel_id, encoded);
         }
 
         // Notify everyone else
@@ -276,10 +282,8 @@ impl ChatServer {
 
         let msg = ServerMessage::ClientDisconnected { client_id };
         if let Some(encoded) = encode_message(&msg) {
-            self.server.broadcast_message(
-                self.config.channels.reliable_channel_id,
-                encoded,
-            );
+            self.server
+                .broadcast_message(self.config.channels.reliable_channel_id, encoded);
         }
     }
 
@@ -310,10 +314,8 @@ impl ChatServer {
                 if let Some(encoded) = encode_message(&msg) {
                     self.stats.bytes_sent +=
                         encoded.len() as u64 * self.server.connected_clients() as u64;
-                    self.server.broadcast_message(
-                        self.config.channels.reliable_channel_id,
-                        encoded,
-                    );
+                    self.server
+                        .broadcast_message(self.config.channels.reliable_channel_id, encoded);
                 }
             }
             ClientMessage::Speaking(is_speaking) => {
@@ -322,7 +324,19 @@ impl ChatServer {
                     is_speaking,
                 };
                 if let Some(encoded) = encode_message(&msg) {
-                    self.server.broadcast_message(
+                    self.server
+                        .broadcast_message(self.config.channels.reliable_channel_id, encoded);
+                }
+            }
+            ClientMessage::AudioState { muted, deafened } => {
+                let msg = ServerMessage::AudioState {
+                    client_id,
+                    muted,
+                    deafened,
+                };
+                if let Some(encoded) = encode_message(&msg) {
+                    self.server.broadcast_message_except(
+                        client_id,
                         self.config.channels.reliable_channel_id,
                         encoded,
                     );
@@ -456,9 +470,7 @@ impl ChatServer {
                 let msg_len = message.len();
 
                 self.server.broadcast_message_except(
-                    *client_id,
-                    channel_id,
-                    message, // moved, not cloned
+                    *client_id, channel_id, message, // moved, not cloned
                 );
 
                 self.voice_stats.packets_forwarded += 1;
@@ -492,8 +504,7 @@ impl ChatServer {
             let total_dropped = self.voice_stats.packets_dropped_malformed
                 + self.voice_stats.packets_dropped_oversize
                 + self.voice_stats.packets_dropped_version;
-            let drop_rate =
-                total_dropped as f32 / self.voice_stats.packets_received as f32 * 100.0;
+            let drop_rate = total_dropped as f32 / self.voice_stats.packets_received as f32 * 100.0;
 
             info!(
                 "Voice drops: {} malformed, {} oversize, {} bad version ({drop_rate:.1}% total)",

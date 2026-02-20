@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::{
-    config::{user_key, Settings, UserAudioSettings},
+    config::{Settings, UserAudioSettings, user_key},
     network::{NetworkControl, NetworkMessage, NetworkThreadHandle},
     ui::{chat::Chat, messages::UiMessage, sidebar::Sidebar},
     voice::{VoiceControl, VoiceEvent, VoiceThreadHandle},
@@ -33,6 +33,10 @@ pub struct UserState {
     pub is_speaking: bool,
     pub last_activity: Instant,
     pub audio_settings: UserAudioSettings,
+    /// Remote user's self-reported mute state (distinct from local per-user mute).
+    pub is_self_muted: bool,
+    /// Remote user's self-reported deafen state.
+    pub is_self_deafened: bool,
 }
 
 // ── Conversion helper ──────────────────────────────────────────────────
@@ -244,6 +248,17 @@ impl App {
                 if let Some(user) = self.users.get_mut(&client_id) {
                     user.is_speaking = is_speaking;
                     user.last_activity = Instant::now();
+                }
+                self.update_user_list();
+            }
+            NetworkMessage::UserAudioState {
+                client_id,
+                muted,
+                deafened,
+            } => {
+                if let Some(user) = self.users.get_mut(&client_id) {
+                    user.is_self_muted = muted;
+                    user.is_self_deafened = deafened;
                 }
                 self.update_user_list();
             }
@@ -468,6 +483,8 @@ impl App {
                     is_speaking: false,
                     last_activity: Instant::now(),
                     audio_settings: audio.clone(),
+                    is_self_muted: false,
+                    is_self_deafened: false,
                 },
             );
 
@@ -502,6 +519,8 @@ impl App {
                 is_speaking: false,
                 last_activity: Instant::now(),
                 audio_settings: audio.clone(),
+                is_self_muted: false,
+                is_self_deafened: false,
             },
         );
 
@@ -550,6 +569,9 @@ impl App {
                 .send(NetworkControl::SendSpeakingStatus(false))
                 .ok();
         }
+
+        self.update_own_audio_state();
+        self.broadcast_audio_state();
     }
 
     fn handle_toggle_deafen(&mut self) {
@@ -561,6 +583,33 @@ impl App {
 
         if let Some(sidebar) = &mut self.sidebar {
             sidebar.set_deafen_state(self.is_deafened);
+        }
+
+        self.update_own_audio_state();
+        self.broadcast_audio_state();
+    }
+
+    /// Update our own UserState so the sidebar shows mute/deafen icons on our row too.
+    fn update_own_audio_state(&mut self) {
+        if let Some(id) = self.our_client_id {
+            if let Some(user) = self.users.get_mut(&id) {
+                user.is_self_muted = self.is_muted;
+                user.is_self_deafened = self.is_deafened;
+            }
+        }
+        self.update_user_list();
+    }
+
+    /// Notify the server (and all other clients) of our current mute/deafen state.
+    fn broadcast_audio_state(&self) {
+        if self.connected {
+            self.network
+                .tx
+                .send(NetworkControl::SendAudioState {
+                    muted: self.is_muted,
+                    deafened: self.is_deafened,
+                })
+                .ok();
         }
     }
 
@@ -578,11 +627,7 @@ impl App {
 
     fn handle_mute_user(&mut self, client_id: renet::ClientId, username: String, muted: bool) {
         let key = user_key(&username);
-        let settings = self
-            .settings
-            .user_audio_settings
-            .entry(key)
-            .or_default();
+        let settings = self.settings.user_audio_settings.entry(key).or_default();
         settings.is_muted = muted;
 
         if let Some(user) = self.users.get_mut(&client_id) {
@@ -607,11 +652,7 @@ impl App {
         volume: f32,
     ) {
         let key = user_key(&username);
-        let settings = self
-            .settings
-            .user_audio_settings
-            .entry(key)
-            .or_default();
+        let settings = self.settings.user_audio_settings.entry(key).or_default();
         settings.volume = volume;
 
         if let Some(user) = self.users.get_mut(&client_id) {
@@ -630,7 +671,9 @@ impl App {
     }
 
     fn handle_reset_user_audio(&mut self, client_id: renet::ClientId, username: String) {
-        self.settings.user_audio_settings.remove(&user_key(&username));
+        self.settings
+            .user_audio_settings
+            .remove(&user_key(&username));
 
         if let Some(user) = self.users.get_mut(&client_id) {
             user.audio_settings = UserAudioSettings::default();
