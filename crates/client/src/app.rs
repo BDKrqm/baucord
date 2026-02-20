@@ -788,9 +788,10 @@ impl App {
         // of letting FLTK hide the window silently (which used to leave
         // worker threads running with no UI to control them).
         let sender = self.sender;
-        wind.set_callback(move |_w| {
+        wind.set_callback(move |w| {
             if app::event() == enums::Event::Close {
                 sender.send(UiMessage::Shutdown);
+                w.hide();
             }
         });
 
@@ -825,9 +826,10 @@ impl App {
         wind.end();
 
         let sender = self.sender;
-        wind.set_callback(move |_w| {
+        wind.set_callback(move |w| {
             if app::event() == enums::Event::Close {
                 sender.send(UiMessage::Shutdown);
+                w.hide();
             }
         });
 
@@ -880,7 +882,7 @@ impl App {
     /// 2. Stop voice engine (drops audio devices, closes internal threads)
     /// 3. Disconnect network (sends goodbye to server)
     /// 4. Signal both worker threads to exit
-    /// 5. Join with timeout — never hang forever
+    /// 5. Join with hard timeout — never hang forever
     fn shutdown(&mut self) {
         info!("Shutting down");
 
@@ -906,17 +908,26 @@ impl App {
         self.voice.tx.send(VoiceControl::Shutdown).ok();
         self.network.tx.send(NetworkControl::Shutdown).ok();
 
-        // 5. Join with timeout — take handles so Drop won't try again.
-        //    We can't do a timed join in std, but since we sent Stop +
-        //    Shutdown the threads should exit within milliseconds.
-        //    Taking the handle prevents the Drop impl from deadlocking.
-        if let Some(handle) = self.voice.join_handle.take() {
-            let _ = handle.join();
-        }
-        if let Some(handle) = self.network.join_handle.take() {
-            let _ = handle.join();
-        }
+        // 5. Join with hard timeout — take handles so Drop won't try again.
+        //    If a thread is stuck (cpal deadlock, etc.), we bail after 2s
+        //    and let the OS clean up on process exit.
+        let voice_handle = self.voice.join_handle.take();
+        let network_handle = self.network.join_handle.take();
 
-        info!("Shutdown complete");
+        let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+        std::thread::spawn(move || {
+            if let Some(h) = voice_handle {
+                let _ = h.join();
+            }
+            if let Some(h) = network_handle {
+                let _ = h.join();
+            }
+            let _ = done_tx.send(());
+        });
+
+        match done_rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(()) => info!("Shutdown complete"),
+            Err(_) => warn!("Shutdown timed out — threads still running, exiting anyway"),
+        }
     }
 }

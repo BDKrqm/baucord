@@ -578,6 +578,10 @@ impl AudioInput {
 impl Drop for AudioInput {
     fn drop(&mut self) {
         self.should_stop.store(true, Ordering::Relaxed);
+        // Drop the cpal stream FIRST — stops CoreAudio callbacks so they
+        // can't deadlock trying to push into the ring buffer while the
+        // worker thread is being joined.
+        self.stream.take();
         if let Some(thread) = self.worker_thread.take() {
             let _ = thread.join();
         }

@@ -28,4 +28,9 @@ fn main() {
 
     let mut app = App::new();
     app.run();
+
+    // Force exit. If any threads are stuck (cpal deadlock, etc.),
+    // normal return from main() would hang waiting for them.
+    // Settings are already saved by this point.
+    std::process::exit(0);
 }

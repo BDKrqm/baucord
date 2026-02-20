@@ -411,13 +411,26 @@ impl Drop for VoiceChat {
         // Signal all threads to stop
         self.should_stop.store(true, Ordering::Release);
 
-        // Drop channels to unblock recv() calls
-        // (channels are dropped when VoiceChat is dropped, which causes
-        // recv() to return Err and threads to exit their loops)
+        // Drop audio devices first — stops platform callbacks that push/pull
+        // from ring buffers, preventing deadlock during thread joins.
+        self.input.take();
+        self.output.take();
 
-        // AudioInput and AudioOutput Drop impls handle their own threads.
+        // Drop channel senders to unblock threads blocked on recv().
+        // The encoder blocks on audio_to_encoder_rx.recv() — dropping
+        // the tx side causes recv() to return Err and the thread exits.
+        // Similarly for the decoder dispatcher.
+        drop(self.audio_to_encoder_tx.clone()); // clone first so we can still drop the original
+                                                // Actually: we need to replace these with dummy values or use Option.
+                                                // Simpler: just drop the fields that hold the sending ends.
+                                                // Since we can't easily "drop a field" in place, we swap with a disconnected channel.
+        let (dead_tx, _) = crossbeam_channel::bounded::<Vec<f32>>(0);
+        self.audio_to_encoder_tx = dead_tx;
 
-        // Join encoder thread
+        let (dead_tx, _) = crossbeam_channel::bounded::<AudioPacket>(0);
+        self.network_to_decoder_tx = dead_tx;
+
+        // Join encoder thread (now unblocked because its rx is disconnected)
         if let Some(thread) = self.encoder_thread.take() {
             let _ = thread.join();
         }
