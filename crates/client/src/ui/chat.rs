@@ -97,33 +97,31 @@ impl Chat {
         let mut input_clone = message_input.clone();
         let mut count_clone = char_count.clone();
 
-        message_input.handle(move |input, event| {
-            match event {
-                enums::Event::KeyUp | enums::Event::KeyDown => {
-                    let len = input.value().len();
-                    count_clone.set_label(&format!("{len}/400"));
+        message_input.handle(move |input, event| match event {
+            enums::Event::KeyUp | enums::Event::KeyDown => {
+                let len = input.value().len();
+                count_clone.set_label(&format!("{len}/400"));
 
-                    if len > 380 {
-                        count_clone.set_label_color(theme::WARNING);
-                    } else {
+                if len > 380 {
+                    count_clone.set_label_color(theme::WARNING);
+                } else {
+                    count_clone.set_label_color(theme::TEXT_MUTED);
+                }
+
+                if event == enums::Event::KeyDown && app::event_key() == enums::Key::Enter {
+                    let text = input.value();
+                    if !text.trim().is_empty() && text.len() <= 400 {
+                        s.send(UiMessage::SendChatMessage(text));
+                        input.set_value("");
+                        count_clone.set_label("0/400");
                         count_clone.set_label_color(theme::TEXT_MUTED);
                     }
-
-                    if event == enums::Event::KeyDown && app::event_key() == enums::Key::Enter {
-                        let text = input.value();
-                        if !text.trim().is_empty() && text.len() <= 400 {
-                            s.send(UiMessage::SendChatMessage(text));
-                            input.set_value("");
-                            count_clone.set_label("0/400");
-                            count_clone.set_label_color(theme::TEXT_MUTED);
-                        }
-                        return true;
-                    }
-
-                    false
+                    return true;
                 }
-                _ => false,
+
+                false
             }
+            _ => false,
         });
 
         // Send button
@@ -213,3 +211,4 @@ impl Chat {
             .scroll(self.chat_display.count_lines(0, length, true), 0);
     }
 }
+
