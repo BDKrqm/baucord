@@ -142,6 +142,163 @@ impl VoiceThreadHandle {
     }
 }
 
+impl Drop for VoiceThreadHandle {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+// ── Thread loop state ───────────────────────────────────────────────────
+
+struct VoiceLoopState {
+    vc: Option<VoiceChat>,
+    our_client_id: Option<u64>,
+    was_speaking: bool,
+    /// Explicit mute set by the user (independent of deafen).
+    user_muted: bool,
+    running: bool,
+}
+
+impl VoiceLoopState {
+    fn new() -> Self {
+        Self {
+            vc: None,
+            our_client_id: None,
+            was_speaking: false,
+            user_muted: false,
+            running: true,
+        }
+    }
+
+    /// Whether the mic should be muted — true if either user-muted or deafened.
+    fn effective_mute(&self) -> bool {
+        if let Some(v) = &self.vc {
+            self.user_muted || v.is_deafened()
+        } else {
+            self.user_muted
+        }
+    }
+
+    fn handle_control(&mut self, ctrl: VoiceControl, event_tx: &Sender<VoiceEvent>, wake: &WakeFn) {
+        match ctrl {
+            VoiceControl::Start {
+                settings,
+                our_client_id: id,
+            } => {
+                let config = settings_to_config(&settings);
+                match VoiceChat::new(config) {
+                    Ok(mut voice) => {
+                        if let Err(e) = voice.start() {
+                            event_tx
+                                .send(VoiceEvent::Error(format!("Start failed: {e}")))
+                                .ok();
+                            wake();
+                            return;
+                        }
+                        self.our_client_id = Some(id);
+                        self.vc = Some(voice);
+                        self.was_speaking = false;
+                        self.user_muted = false;
+                        event_tx.send(VoiceEvent::Started).ok();
+                        wake();
+                        info!("Voice started for client {id:?}");
+                    }
+                    Err(e) => {
+                        event_tx
+                            .send(VoiceEvent::Error(format!("Init failed: {e}")))
+                            .ok();
+                        wake();
+                    }
+                }
+            }
+            VoiceControl::Stop => {
+                self.vc = None;
+                self.our_client_id = None;
+                self.was_speaking = false;
+                self.user_muted = false;
+                info!("Voice stopped");
+            }
+            VoiceControl::SetMuted(muted) => {
+                self.user_muted = muted;
+                if let Some(v) = &self.vc {
+                    v.set_muted(self.effective_mute());
+                }
+            }
+            VoiceControl::SetDeafened(deafened) => {
+                if let Some(v) = &self.vc {
+                    v.set_deafened(deafened);
+                    // Recompute effective mute — deafen implies mute,
+                    // but undeafen restores the user's explicit mute state.
+                    v.set_muted(self.effective_mute());
+                }
+            }
+            VoiceControl::SetLoopback(enabled) => {
+                if let Some(v) = &self.vc {
+                    v.set_loopback(enabled);
+                }
+            }
+            VoiceControl::SetGateThreshold(t) => {
+                if let Some(v) = &self.vc {
+                    v.set_gate_threshold(t);
+                }
+            }
+            VoiceControl::SetInputGain(g) => {
+                if let Some(v) = &self.vc {
+                    v.set_input_gain(g);
+                }
+            }
+            VoiceControl::SetOutputGain(g) => {
+                if let Some(v) = &self.vc {
+                    v.set_output_gain(g);
+                }
+            }
+            VoiceControl::SetInputDevice(d) => {
+                if let Some(v) = self.vc.as_mut()
+                    && let Err(e) = v.set_input_device(d.as_deref())
+                {
+                    event_tx
+                        .send(VoiceEvent::Error(format!("Input device: {e}")))
+                        .ok();
+                    wake();
+                }
+            }
+            VoiceControl::SetOutputDevice(d) => {
+                if let Some(v) = self.vc.as_mut()
+                    && let Err(e) = v.set_output_device(d.as_deref())
+                {
+                    event_tx
+                        .send(VoiceEvent::Error(format!("Output device: {e}")))
+                        .ok();
+                    wake();
+                }
+            }
+            VoiceControl::AddPeer(id) => {
+                if let Some(v) = self.vc.as_mut() {
+                    v.add_peer(id);
+                }
+            }
+            VoiceControl::RemovePeer(id) => {
+                if let Some(v) = self.vc.as_mut() {
+                    v.remove_peer(id);
+                }
+            }
+            VoiceControl::SetPeerAudio(id, settings) => {
+                if let Some(v) = &self.vc {
+                    v.set_peer_settings(id, settings);
+                }
+            }
+            VoiceControl::IncomingVoicePacket(packet) => {
+                if let Some(v) = &self.vc {
+                    v.receive_packet(packet);
+                }
+            }
+            VoiceControl::Shutdown => {
+                self.running = false;
+            }
+        }
+    }
+}
+
 // ── Thread loop ─────────────────────────────────────────────────────────
 
 fn run_voice_loop(
@@ -152,21 +309,15 @@ fn run_voice_loop(
     is_testing_mic: Arc<AtomicBool>,
     wake: WakeFn,
 ) {
-    let mut vc: Option<VoiceChat> = None;
-    let mut our_client_id: Option<u64> = None;
-    let mut was_speaking = false;
-    let mut running = true;
+    let mut state = VoiceLoopState::new();
 
-    while running {
+    while state.running {
         // Block until a message arrives or 5ms timeout (for polling outgoing packets)
         select! {
             recv(control_rx) -> msg => {
                 match msg {
-                    Ok(ctrl) => handle_control(
-                        ctrl, &mut vc, &mut our_client_id, &mut running,
-                        &event_tx, &mut was_speaking, &wake,
-                    ),
-                    Err(_) => { running = false; }
+                    Ok(ctrl) => state.handle_control(ctrl, &event_tx, &wake),
+                    Err(_) => { state.running = false; }
                 }
             }
             default(Duration::from_millis(5)) => {}
@@ -175,23 +326,15 @@ fn run_voice_loop(
         // Drain any queued control messages
         for _ in 0..32 {
             match control_rx.try_recv() {
-                Ok(ctrl) => handle_control(
-                    ctrl,
-                    &mut vc,
-                    &mut our_client_id,
-                    &mut running,
-                    &event_tx,
-                    &mut was_speaking,
-                    &wake,
-                ),
+                Ok(ctrl) => state.handle_control(ctrl, &event_tx, &wake),
                 Err(_) => break,
             }
         }
 
         // Poll outgoing packets and update shared state
-        if let Some(voice) = vc.as_ref() {
+        if let Some(voice) = state.vc.as_ref() {
             // Forward encoded packets to network (or drain in test mode)
-            if let Some(id) = our_client_id {
+            if let Some(id) = state.our_client_id {
                 if !is_testing_mic.load(Ordering::Relaxed) {
                     for mut packet in voice.take_outgoing_packets() {
                         packet.header.ssrc = id;
@@ -225,8 +368,8 @@ fn run_voice_loop(
 
             // Edge-triggered speaking notification
             let speaking = voice.is_speaking();
-            if speaking != was_speaking {
-                was_speaking = speaking;
+            if speaking != state.was_speaking {
+                state.was_speaking = speaking;
                 let _ = network_tx.try_send(NetworkControl::SendSpeakingStatus(speaking));
                 let _ = event_tx.try_send(VoiceEvent::SpeakingChanged(speaking));
                 wake();
@@ -234,128 +377,3 @@ fn run_voice_loop(
         }
     }
 }
-
-// ── Control dispatch ────────────────────────────────────────────────────
-
-fn handle_control(
-    ctrl: VoiceControl,
-    vc: &mut Option<VoiceChat>,
-    our_client_id: &mut Option<u64>,
-    running: &mut bool,
-    event_tx: &Sender<VoiceEvent>,
-    was_speaking: &mut bool,
-    wake: &WakeFn,
-) {
-    match ctrl {
-        VoiceControl::Start {
-            settings,
-            our_client_id: id,
-        } => {
-            let config = settings_to_config(&settings);
-            match VoiceChat::new(config) {
-                Ok(mut voice) => {
-                    if let Err(e) = voice.start() {
-                        event_tx
-                            .send(VoiceEvent::Error(format!("Start failed: {}", e)))
-                            .ok();
-                        wake();
-                        return;
-                    }
-                    *our_client_id = Some(id);
-                    *vc = Some(voice);
-                    *was_speaking = false;
-                    event_tx.send(VoiceEvent::Started).ok();
-                    wake();
-                    info!("Voice started for client {:?}", id);
-                }
-                Err(e) => {
-                    event_tx
-                        .send(VoiceEvent::Error(format!("Init failed: {}", e)))
-                        .ok();
-                    wake();
-                }
-            }
-        }
-        VoiceControl::Stop => {
-            *vc = None;
-            *our_client_id = None;
-            *was_speaking = false;
-            info!("Voice stopped");
-        }
-        VoiceControl::SetMuted(muted) => {
-            if let Some(v) = vc.as_ref() {
-                v.set_muted(muted);
-            }
-        }
-        VoiceControl::SetDeafened(deafened) => {
-            if let Some(v) = vc.as_ref() {
-                v.set_deafened(deafened);
-                v.set_muted(deafened);
-            }
-        }
-        VoiceControl::SetLoopback(enabled) => {
-            if let Some(v) = vc.as_ref() {
-                v.set_loopback(enabled);
-            }
-        }
-        VoiceControl::SetGateThreshold(t) => {
-            if let Some(v) = vc.as_ref() {
-                v.set_gate_threshold(t);
-            }
-        }
-        VoiceControl::SetInputGain(g) => {
-            if let Some(v) = vc.as_ref() {
-                v.set_input_gain(g);
-            }
-        }
-        VoiceControl::SetOutputGain(g) => {
-            if let Some(v) = vc.as_ref() {
-                v.set_output_gain(g);
-            }
-        }
-        VoiceControl::SetInputDevice(d) => {
-            if let Some(v) = vc.as_mut()
-                && let Err(e) = v.set_input_device(d.as_deref())
-            {
-                event_tx
-                    .send(VoiceEvent::Error(format!("Input device: {}", e)))
-                    .ok();
-                wake();
-            }
-        }
-        VoiceControl::SetOutputDevice(d) => {
-            if let Some(v) = vc.as_mut()
-                && let Err(e) = v.set_output_device(d.as_deref())
-            {
-                event_tx
-                    .send(VoiceEvent::Error(format!("Output device: {}", e)))
-                    .ok();
-                wake();
-            }
-        }
-        VoiceControl::AddPeer(id) => {
-            if let Some(v) = vc.as_mut() {
-                v.add_peer(id);
-            }
-        }
-        VoiceControl::RemovePeer(id) => {
-            if let Some(v) = vc.as_mut() {
-                v.remove_peer(id);
-            }
-        }
-        VoiceControl::SetPeerAudio(id, settings) => {
-            if let Some(v) = vc.as_ref() {
-                v.set_peer_settings(id, settings);
-            }
-        }
-        VoiceControl::IncomingVoicePacket(packet) => {
-            if let Some(v) = vc.as_ref() {
-                v.receive_packet(packet);
-            }
-        }
-        VoiceControl::Shutdown => {
-            *running = false;
-        }
-    }
-}
-

@@ -4,7 +4,7 @@
 // users join or leave. Speaking indicators, mute state, and volume badges
 // are updated in-place on existing widgets, preserving scroll position.
 
-use fltk::{enums::Font, prelude::*, *};
+use fltk::{enums::Font, image::SvgImage, prelude::*, *};
 use renet::ClientId;
 use std::collections::HashMap;
 
@@ -13,12 +13,28 @@ use crate::ui::messages::UiMessage;
 use ui::theme;
 use ui::widgets::controls;
 
+// ── Embedded SVG icons for remote user mute/deafen state ────────────────
+
+const SVG_SELF_MUTED: &str = include_str!("../../../../assets/mic-muted.svg");
+const SVG_SELF_DEAFENED: &str = include_str!("../../../../assets/headphones-off.svg");
+
+/// Create a scaled SVG image from embedded data.
+fn svg_icon(data: &str, size: i32) -> Option<SvgImage> {
+    SvgImage::from_data(data).ok().map(|mut img| {
+        img.scale(size, size, true, true);
+        img
+    })
+}
+
 /// Handles for a single user row — kept around to update in-place.
 struct UserRow {
     client_id: ClientId,
     container: group::Flex,
     indicator: frame::Frame,
     name_label: frame::Frame,
+    /// Icon frame between name and `…` button — shows muted/deafened SVG.
+    /// `None` for our own row (we never see our own broadcast).
+    status_icon: Option<frame::Frame>,
     is_us: bool,
 }
 
@@ -154,9 +170,7 @@ impl Sidebar {
 
     fn close_audio_popup(&mut self) {
         if let Some(mut w) = self.audio_popup.take() {
-            if w.shown() {
-                w.hide();
-            }
+            w.hide();
         }
     }
 
@@ -211,8 +225,8 @@ impl Sidebar {
         slider.set_step(0.05, 1);
         slider.set_selection_color(theme::ACCENT);
 
-        let mut pct_label = frame::Frame::default()
-            .with_label(&format!("{}%", (current_volume * 100.0) as i32));
+        let mut pct_label =
+            frame::Frame::default().with_label(&format!("{}%", (current_volume * 100.0) as i32));
         pct_label.set_label_color(theme::TEXT_SECONDARY);
         pct_label.set_label_size(11);
         slider_row.fixed(&pct_label, 36);
@@ -331,7 +345,14 @@ impl Sidebar {
         click_x: i32,
         click_y: i32,
     ) {
-        self.open_audio_popup(client_id, username, current_volume, is_muted, click_x, click_y);
+        self.open_audio_popup(
+            client_id,
+            username,
+            current_volume,
+            is_muted,
+            click_x,
+            click_y,
+        );
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -365,16 +386,7 @@ impl Sidebar {
         self.user_rows.clear();
 
         let mut sorted_users: Vec<_> = users.iter().collect();
-        sorted_users.sort_by(|(id_a, state_a), (id_b, state_b)| {
-            let is_us_a = Some(**id_a) == our_id;
-            let is_us_b = Some(**id_b) == our_id;
-
-            match (is_us_a, is_us_b) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => state_a.username.cmp(&state_b.username),
-            }
-        });
+        sorted_users.sort_by(|(_, state_a), (_, state_b)| state_a.username.cmp(&state_b.username));
 
         let item_height = 35;
         let total_height = sorted_users.len() as i32 * item_height;
@@ -405,7 +417,7 @@ impl Sidebar {
         self.group.redraw();
     }
 
-    /// In-place update — only changes labels and colors, preserving layout and scroll.
+    /// In-place update — only changes labels, colors, and icons, preserving layout and scroll.
     fn refresh_user_rows(&mut self, users: &HashMap<ClientId, UserState>) {
         for row in &mut self.user_rows {
             let Some(state) = users.get(&row.client_id) else {
@@ -424,10 +436,8 @@ impl Sidebar {
                 row.indicator.set_label_color(theme::TEXT_MUTED);
             }
 
-            // Display name (volume badge)
-            let display_name = if row.is_us {
-                format!("{} (you)", state.username)
-            } else if (state.audio_settings.volume - 1.0).abs() > 0.01 {
+            // Display name (volume badge for non-default volume)
+            let display_name = if !row.is_us && (state.audio_settings.volume - 1.0).abs() > 0.01 {
                 format!(
                     "{} ({}%)",
                     state.username,
@@ -454,6 +464,22 @@ impl Sidebar {
                 row.container.set_color(enums::Color::from_rgb(40, 40, 50));
             } else {
                 row.container.set_color(theme::BG_SECONDARY);
+            }
+
+            // Remote user self-muted / self-deafened icon
+            if let Some(icon_frame) = &mut row.status_icon {
+                if state.is_self_deafened {
+                    if let Some(img) = svg_icon(SVG_SELF_DEAFENED, 14) {
+                        icon_frame.set_image(Some(img));
+                    }
+                } else if state.is_self_muted {
+                    if let Some(img) = svg_icon(SVG_SELF_MUTED, 14) {
+                        icon_frame.set_image(Some(img));
+                    }
+                } else {
+                    icon_frame.set_image(None::<SvgImage>);
+                }
+                icon_frame.redraw();
             }
         }
 
@@ -503,9 +529,7 @@ impl Sidebar {
         }
 
         // Username label — takes remaining space
-        let display_name = if is_us {
-            format!("{} (you)", state.username)
-        } else if (state.audio_settings.volume - 1.0).abs() > 0.01 {
+        let display_name = if !is_us && (state.audio_settings.volume - 1.0).abs() > 0.01 {
             format!(
                 "{} ({}%)",
                 state.username,
@@ -526,6 +550,23 @@ impl Sidebar {
             name_label.set_label_color(theme::TEXT_PRIMARY);
         }
         name_label.set_label_size(13);
+
+        // Status icon frame — shows self-muted/deafened SVG.
+        // Sits between the name label and the `…` button (or end of row for self).
+        let mut icon_frm = frame::Frame::default();
+        user_item.fixed(&icon_frm, 18);
+
+        if state.is_self_deafened {
+            if let Some(img) = svg_icon(SVG_SELF_DEAFENED, 14) {
+                icon_frm.set_image(Some(img));
+            }
+        } else if state.is_self_muted {
+            if let Some(img) = svg_icon(SVG_SELF_MUTED, 14) {
+                icon_frm.set_image(Some(img));
+            }
+        }
+
+        let status_icon = Some(icon_frm);
 
         // [...] button + hover effect for non-self users
         if !is_us {
@@ -615,6 +656,7 @@ impl Sidebar {
             container: user_item,
             indicator,
             name_label,
+            status_icon,
             is_us,
         });
     }
