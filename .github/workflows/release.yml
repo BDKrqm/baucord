@@ -56,7 +56,18 @@ jobs:
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
-        run: brew install opus
+        run: |
+          brew install opus cmake
+          if [ "${{ matrix.target }}" = "x86_64-apple-darwin" ]; then
+            brew fetch --force --bottle-tag=ventura opus
+            brew reinstall $(brew --cache --bottle-tag=ventura opus)
+          fi
+
+      - name: Build
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+        run: cargo build --profile deploy --target ${{ matrix.target }}
 
       - name: Build
         env:
