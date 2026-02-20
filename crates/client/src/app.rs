@@ -316,6 +316,24 @@ impl App {
                     self.show_settings_window();
                 }
             }
+            UiMessage::OpenUserAudioPopup {
+                client_id,
+                username,
+                click_x,
+                click_y,
+            } => {
+                let (volume, muted) = self
+                    .users
+                    .get(&client_id)
+                    .map(|u| (u.audio_settings.volume, u.audio_settings.is_muted))
+                    .unwrap_or((1.0, false));
+
+                if let Some(sidebar) = &mut self.sidebar {
+                    sidebar.handle_open_audio_popup(
+                        client_id, &username, volume, muted, click_x, click_y,
+                    );
+                }
+            }
             UiMessage::SaveSettings => {
                 self.settings.save();
             }

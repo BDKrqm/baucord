@@ -43,6 +43,14 @@ pub enum UiMessage {
     ResetSettings,
     SettingsWindowClosed,
 
+    // ── Per-user audio popup ────────────────────────────────────────
+    OpenUserAudioPopup {
+        client_id: ClientId,
+        username: String,
+        click_x: i32,
+        click_y: i32,
+    },
+
     // ── Device management ───────────────────────────────────────────
     SetInputDevice(Option<String>),
     SetOutputDevice(Option<String>),

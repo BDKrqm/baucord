@@ -1,4 +1,9 @@
 // ui/sidebar.rs
+//
+// The user list updates incrementally: a full rebuild only happens when
+// users join or leave. Speaking indicators, mute state, and volume badges
+// are updated in-place on existing widgets, preserving scroll position.
+
 use fltk::{enums::Font, prelude::*, *};
 use renet::ClientId;
 use std::collections::HashMap;
@@ -7,6 +12,15 @@ use crate::app::UserState;
 use crate::ui::messages::UiMessage;
 use ui::theme;
 use ui::widgets::controls;
+
+/// Handles for a single user row — kept around to update in-place.
+struct UserRow {
+    client_id: ClientId,
+    container: group::Flex,
+    indicator: frame::Frame,
+    name_label: frame::Frame,
+    is_us: bool,
+}
 
 pub struct Sidebar {
     sender: app::Sender<UiMessage>,
@@ -20,6 +34,12 @@ pub struct Sidebar {
     latency_label: frame::Frame,
     mute_btn: button::Button,
     deafen_btn: button::Button,
+
+    /// Live user row widgets, keyed by client ID for in-place updates.
+    user_rows: Vec<UserRow>,
+
+    /// Currently open per-user audio popup (if any).
+    audio_popup: Option<window::Window>,
 }
 
 impl Sidebar {
@@ -38,7 +58,7 @@ impl Sidebar {
         user_count_label.set_label_color(theme::TEXT_SECONDARY);
         user_count_label.set_label_size(13);
 
-        // User list scroll area
+        // User list scroll area — fills the space between header and status panel
         let mut user_list_scroll = group::Scroll::default();
         user_list_scroll.set_type(group::ScrollType::None);
         user_list_scroll.set_color(theme::BG_SECONDARY);
@@ -51,9 +71,6 @@ impl Sidebar {
 
         user_list_scroll.end();
         user_list_scroll.resizable(&user_list_pack);
-
-        // Spacer
-        sidebar.add(&frame::Frame::default());
 
         // ── Connection status panel ─────────────────────────────────
         let mut status_col = group::Flex::default().column();
@@ -126,6 +143,8 @@ impl Sidebar {
             latency_label,
             mute_btn,
             deafen_btn,
+            user_rows: Vec::new(),
+            audio_popup: None,
         }
     }
 
@@ -133,13 +152,218 @@ impl Sidebar {
         self.group.clone()
     }
 
-    pub fn update_users(&mut self, users: &HashMap<ClientId, UserState>, our_id: Option<ClientId>) {
-        self.user_list_pack.clear();
+    fn close_audio_popup(&mut self) {
+        if let Some(mut w) = self.audio_popup.take() {
+            if w.shown() {
+                w.hide();
+            }
+        }
+    }
 
+    fn open_audio_popup(
+        &mut self,
+        client_id: ClientId,
+        username: &str,
+        current_volume: f32,
+        is_muted: bool,
+        click_x: i32,
+        click_y: i32,
+    ) {
+        self.close_audio_popup();
+
+        let sender = self.sender;
+        let popup_w = 200;
+        let popup_h = 130;
+
+        // Position above the click point
+        let x = click_x;
+        let y = click_y.saturating_sub(popup_h);
+
+        let mut wind = window::Window::default()
+            .with_size(popup_w, popup_h)
+            .with_pos(x, y);
+        wind.set_border(false);
+        wind.set_color(theme::BG_PRIMARY);
+        wind.set_frame(enums::FrameType::FlatBox);
+
+        let mut col = group::Flex::default_fill().column();
+        col.set_margins(12, 8, 12, 8);
+        col.set_spacing(4);
+
+        // User Volume header
+        let mut vol_header = frame::Frame::default()
+            .with_label("User Volume")
+            .with_align(enums::Align::Left | enums::Align::Inside);
+        vol_header.set_label_color(theme::TEXT_PRIMARY);
+        vol_header.set_label_size(12);
+        vol_header.set_label_font(enums::Font::HelveticaBold);
+        col.fixed(&vol_header, 18);
+
+        // Slider + percentage
+        let mut slider_row = group::Flex::default().row();
+        slider_row.set_spacing(6);
+        col.fixed(&slider_row, 22);
+
+        let mut slider = valuator::HorSlider::default();
+        slider.set_minimum(0.0);
+        slider.set_maximum(2.0);
+        slider.set_value(current_volume as f64);
+        slider.set_step(0.05, 1);
+        slider.set_selection_color(theme::ACCENT);
+
+        let mut pct_label = frame::Frame::default()
+            .with_label(&format!("{}%", (current_volume * 100.0) as i32));
+        pct_label.set_label_color(theme::TEXT_SECONDARY);
+        pct_label.set_label_size(11);
+        slider_row.fixed(&pct_label, 36);
+
+        slider_row.end();
+
+        // Separator
+        let mut sep = frame::Frame::default();
+        sep.set_frame(enums::FrameType::FlatBox);
+        sep.set_color(theme::BG_TERTIARY);
+        col.fixed(&sep, 1);
+
+        // Mute / Unmute button
+        let mute_label = if is_muted { "Unmute" } else { "Mute" };
+        let mut mute_btn = if is_muted {
+            controls::accent_button(mute_label, theme::DANGER)
+        } else {
+            controls::button(mute_label)
+        };
+        col.fixed(&mute_btn, 26);
+
+        // Separator
+        let mut sep2 = frame::Frame::default();
+        sep2.set_frame(enums::FrameType::FlatBox);
+        sep2.set_color(theme::BG_TERTIARY);
+        col.fixed(&sep2, 1);
+
+        // Reset button
+        let mut reset_btn = controls::button("Reset Audio");
+        col.fixed(&reset_btn, 26);
+
+        col.end();
+        wind.end();
+        wind.show();
+
+        // ── Callbacks ───────────────────────────────────────────────
+
+        // Slider — update label live while dragging
+        let mut pct_lbl = pct_label.clone();
+        slider.set_callback(move |s| {
+            let vol = s.value() as f32;
+            pct_lbl.set_label(&format!("{}%", (vol * 100.0) as i32));
+        });
+
+        // Slider — on mouse release, commit volume and close
+        let username_slide = username.to_string();
+        let mut wind_slide = wind.clone();
+        let slider_release = slider.clone();
+        slider.handle(move |_, ev| {
+            if ev == enums::Event::Released {
+                let vol = slider_release.value() as f32;
+                sender.send(UiMessage::SetUserVolume {
+                    client_id,
+                    username: username_slide.clone(),
+                    volume: vol,
+                });
+                wind_slide.hide();
+                true
+            } else {
+                false
+            }
+        });
+
+        // Mute / Unmute — toggle and close
+        let username_mute = username.to_string();
+        let mut wind_mute = wind.clone();
+        mute_btn.set_callback(move |_| {
+            sender.send(UiMessage::MuteUser {
+                client_id,
+                username: username_mute.clone(),
+                muted: !is_muted,
+            });
+            wind_mute.hide();
+        });
+
+        // Reset — reset audio and close
+        let username_reset = username.to_string();
+        let mut wind_reset = wind.clone();
+        reset_btn.set_callback(move |_| {
+            sender.send(UiMessage::ResetUserAudio {
+                client_id,
+                username: username_reset.clone(),
+            });
+            wind_reset.hide();
+        });
+
+        // Click outside (Unfocus) — save slider if changed, close
+        let username_close = username.to_string();
+        let slider_close = slider.clone();
+        wind.handle(move |w, ev| {
+            if ev == enums::Event::Unfocus {
+                let vol = slider_close.value() as f32;
+                if (vol - current_volume).abs() > 0.001 {
+                    sender.send(UiMessage::SetUserVolume {
+                        client_id,
+                        username: username_close.clone(),
+                        volume: vol,
+                    });
+                }
+                w.hide();
+                true
+            } else {
+                false
+            }
+        });
+
+        self.audio_popup = Some(wind);
+    }
+
+    pub fn handle_open_audio_popup(
+        &mut self,
+        client_id: ClientId,
+        username: &str,
+        current_volume: f32,
+        is_muted: bool,
+        click_x: i32,
+        click_y: i32,
+    ) {
+        self.open_audio_popup(client_id, username, current_volume, is_muted, click_x, click_y);
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    //  USER LIST — incremental updates
+    // ════════════════════════════════════════════════════════════════════
+
+    pub fn update_users(&mut self, users: &HashMap<ClientId, UserState>, our_id: Option<ClientId>) {
         self.user_count_label
             .set_label(&format!("Users: {}", users.len()));
 
-        // Sort: ourselves first, then alphabetically
+        // Check if the user set changed (join/leave)
+        let mut current_ids: Vec<ClientId> = users.keys().copied().collect();
+        current_ids.sort();
+        let mut existing_ids: Vec<ClientId> = self.user_rows.iter().map(|r| r.client_id).collect();
+        existing_ids.sort();
+
+        if current_ids != existing_ids {
+            self.rebuild_user_list(users, our_id);
+        } else {
+            self.refresh_user_rows(users);
+        }
+    }
+
+    /// Full rebuild — only called when users join or leave.
+    fn rebuild_user_list(
+        &mut self,
+        users: &HashMap<ClientId, UserState>,
+        our_id: Option<ClientId>,
+    ) {
+        self.user_list_pack.clear();
+        self.user_rows.clear();
+
         let mut sorted_users: Vec<_> = users.iter().collect();
         sorted_users.sort_by(|(id_a, state_a), (id_b, state_b)| {
             let is_us_a = Some(**id_a) == our_id;
@@ -179,6 +403,61 @@ impl Sidebar {
         self.user_list_pack.redraw();
         self.user_list_scroll.redraw();
         self.group.redraw();
+    }
+
+    /// In-place update — only changes labels and colors, preserving layout and scroll.
+    fn refresh_user_rows(&mut self, users: &HashMap<ClientId, UserState>) {
+        for row in &mut self.user_rows {
+            let Some(state) = users.get(&row.client_id) else {
+                continue;
+            };
+
+            // Speaking indicator
+            if state.audio_settings.is_muted {
+                row.indicator.set_label("\u{2298}");
+                row.indicator.set_label_color(theme::TEXT_MUTED);
+            } else if state.is_speaking {
+                row.indicator.set_label("\u{25cf}");
+                row.indicator.set_label_color(theme::SUCCESS);
+            } else {
+                row.indicator.set_label("\u{25cb}");
+                row.indicator.set_label_color(theme::TEXT_MUTED);
+            }
+
+            // Display name (volume badge)
+            let display_name = if row.is_us {
+                format!("{} (you)", state.username)
+            } else if (state.audio_settings.volume - 1.0).abs() > 0.01 {
+                format!(
+                    "{} ({}%)",
+                    state.username,
+                    (state.audio_settings.volume * 100.0) as i32
+                )
+            } else {
+                state.username.clone()
+            };
+            row.name_label.set_label(&display_name);
+
+            // Name color
+            if row.is_us {
+                row.name_label.set_label_color(theme::ACCENT);
+            } else if state.audio_settings.is_muted {
+                row.name_label.set_label_color(theme::DANGER);
+            } else {
+                row.name_label.set_label_color(theme::TEXT_PRIMARY);
+            }
+
+            // Row background tint
+            if state.audio_settings.is_muted {
+                row.container.set_color(enums::Color::from_rgb(50, 30, 30));
+            } else if (state.audio_settings.volume - 1.0).abs() > 0.01 {
+                row.container.set_color(enums::Color::from_rgb(40, 40, 50));
+            } else {
+                row.container.set_color(theme::BG_SECONDARY);
+            }
+        }
+
+        self.user_list_pack.redraw();
     }
 
     fn create_user_item(
@@ -223,7 +502,7 @@ impl Sidebar {
             indicator.set_label_color(theme::TEXT_MUTED);
         }
 
-        // Username label
+        // Username label — takes remaining space
         let display_name = if is_us {
             format!("{} (you)", state.username)
         } else if (state.audio_settings.volume - 1.0).abs() > 0.01 {
@@ -248,32 +527,96 @@ impl Sidebar {
         }
         name_label.set_label_size(13);
 
-        // Right-click → audio control popup
+        // [...] button + hover effect for non-self users
         if !is_us {
+            // Button is always in the layout but "invisible" by default —
+            // its label and background match the row. On hover we reveal it.
+            let mut options_btn = button::Button::default().with_label("\u{2026}");
+            options_btn.set_frame(enums::FrameType::FlatBox);
+            options_btn.set_color(theme::BG_SECONDARY);
+            options_btn.set_label_color(theme::BG_SECONDARY); // hidden: label matches bg
+            options_btn.set_label_size(16);
+            user_item.fixed(&options_btn, 24);
+
             let sender = self.sender;
             let username = state.username.clone();
             let client_id_copy = client_id;
-            let is_muted = state.audio_settings.is_muted;
-            let current_volume = state.audio_settings.volume;
 
-            user_item.handle(move |_, ev| {
-                if ev == enums::Event::Push && app::event_button() == 3 {
-                    show_user_audio_popup(
-                        sender,
-                        client_id_copy,
-                        &username,
-                        current_volume,
-                        is_muted,
-                    );
-                    true
-                } else {
-                    false
+            options_btn.set_callback(move |_| {
+                sender.send(UiMessage::OpenUserAudioPopup {
+                    client_id: client_id_copy,
+                    username: username.clone(),
+                    click_x: app::event_x_root(),
+                    click_y: app::event_y_root(),
+                });
+            });
+
+            // Hover state: reveal button + tint background
+            // Right-click on the row also opens the popup
+            let mut btn_clone = options_btn.clone();
+            let mut container = user_item.clone();
+            let base_color = user_item.color();
+            let hover_color = enums::Color::from_rgb(55, 55, 65);
+            let was_hovering = std::rc::Rc::new(std::cell::RefCell::new(false));
+            let hovering = was_hovering.clone();
+
+            let sender_rc = self.sender;
+            let client_id_rc = client_id;
+            let username_rc = state.username.clone();
+
+            user_item.handle(move |w, ev| {
+                match ev {
+                    enums::Event::Enter | enums::Event::Move => {
+                        if !*hovering.borrow() {
+                            *hovering.borrow_mut() = true;
+                            btn_clone.set_label_color(theme::TEXT_PRIMARY);
+                            btn_clone.set_color(hover_color);
+                            btn_clone.redraw();
+                            container.set_color(hover_color);
+                            container.redraw();
+                        }
+                        true
+                    }
+                    enums::Event::Leave => {
+                        let mx = app::event_x();
+                        let my = app::event_y();
+                        let wx = w.x();
+                        let wy = w.y();
+                        if mx < wx || mx > wx + w.w() || my < wy || my > wy + w.h() {
+                            *hovering.borrow_mut() = false;
+                            btn_clone.set_label_color(base_color);
+                            btn_clone.set_color(base_color);
+                            btn_clone.redraw();
+                            container.set_color(base_color);
+                            container.redraw();
+                        }
+                        true
+                    }
+                    // Right-click also opens audio popup
+                    enums::Event::Push if app::event_button() == 3 => {
+                        sender_rc.send(UiMessage::OpenUserAudioPopup {
+                            client_id: client_id_rc,
+                            username: username_rc.clone(),
+                            click_x: app::event_x_root(),
+                            click_y: app::event_y_root(),
+                        });
+                        true
+                    }
+                    _ => false,
                 }
             });
         }
 
         user_item.end();
         self.user_list_pack.add(&user_item);
+
+        self.user_rows.push(UserRow {
+            client_id,
+            container: user_item,
+            indicator,
+            name_label,
+            is_us,
+        });
     }
 
     pub fn set_connection_status(&mut self, connected: bool) {
@@ -316,9 +659,11 @@ impl Sidebar {
     }
 
     pub fn handle_disconnected(&mut self) {
+        self.close_audio_popup();
         self.set_connection_status(false);
         self.latency_label.set_label("Audio: -- | Network: --");
         self.user_list_pack.clear();
+        self.user_rows.clear();
         self.user_count_label.set_label("Users: 0");
     }
 
@@ -344,174 +689,5 @@ impl Sidebar {
             self.deafen_btn.set_color(theme::BG_TERTIARY);
             self.deafen_btn.set_label_color(theme::TEXT_PRIMARY);
         }
-    }
-}
-
-/// Right-click popup for per-user audio controls.
-///
-/// Discord-style vertical layout: volume slider, mute toggle, reset.
-/// All actions close the popup. Clicking outside also closes it.
-fn show_user_audio_popup(
-    sender: app::Sender<UiMessage>,
-    client_id: ClientId,
-    username: &str,
-    current_volume: f32,
-    is_muted: bool,
-) {
-    let popup_w = 200;
-    let popup_h = 155;
-
-    let x = app::event_x_root();
-    let y = app::event_y_root();
-
-    let mut popup = window::Window::default()
-        .with_size(popup_w, popup_h)
-        .with_pos(x, y);
-    popup.set_border(false);
-    popup.set_color(theme::BG_PRIMARY);
-    popup.set_frame(enums::FrameType::FlatBox);
-
-    let mut col = group::Flex::default_fill().column();
-    col.set_margins(12, 8, 12, 8);
-    col.set_spacing(4);
-
-    // ── User Volume ─────────────────────────────────────────────────
-
-    let mut vol_header = frame::Frame::default()
-        .with_label("User Volume")
-        .with_align(enums::Align::Left | enums::Align::Inside);
-    vol_header.set_label_color(theme::TEXT_PRIMARY);
-    vol_header.set_label_size(12);
-    vol_header.set_label_font(enums::Font::HelveticaBold);
-    col.fixed(&vol_header, 18);
-
-    let mut slider_row = group::Flex::default().row();
-    slider_row.set_spacing(6);
-    col.fixed(&slider_row, 22);
-
-    let mut slider = valuator::HorSlider::default();
-    slider.set_minimum(0.0);
-    slider.set_maximum(2.0);
-    slider.set_value(current_volume as f64);
-    slider.set_step(0.05, 1);
-    slider.set_selection_color(theme::ACCENT);
-
-    let mut pct_label = frame::Frame::default()
-        .with_label(&format!("{}%", (current_volume * 100.0) as i32));
-    pct_label.set_label_color(theme::TEXT_SECONDARY);
-    pct_label.set_label_size(11);
-    slider_row.fixed(&pct_label, 36);
-
-    slider_row.end();
-
-    // ── Separator ───────────────────────────────────────────────────
-
-    let mut sep = frame::Frame::default();
-    sep.set_frame(enums::FrameType::FlatBox);
-    sep.set_color(theme::BG_TERTIARY);
-    col.fixed(&sep, 1);
-
-    // ── Mute button ─────────────────────────────────────────────────
-
-    let mute_label = if is_muted { "Unmute" } else { "Mute" };
-    let mut mute_btn = button::Button::default().with_label(mute_label);
-    mute_btn.set_frame(enums::FrameType::FlatBox);
-    mute_btn.set_label_size(12);
-    mute_btn.set_align(enums::Align::Left | enums::Align::Inside);
-    if is_muted {
-        mute_btn.set_color(theme::BG_PRIMARY);
-        mute_btn.set_label_color(theme::DANGER);
-    } else {
-        mute_btn.set_color(theme::BG_PRIMARY);
-        mute_btn.set_label_color(theme::TEXT_PRIMARY);
-    }
-    col.fixed(&mute_btn, 26);
-
-    // ── Separator ───────────────────────────────────────────────────
-
-    let mut sep2 = frame::Frame::default();
-    sep2.set_frame(enums::FrameType::FlatBox);
-    sep2.set_color(theme::BG_TERTIARY);
-    col.fixed(&sep2, 1);
-
-    // ── Reset button ────────────────────────────────────────────────
-
-    let mut reset_btn = button::Button::default().with_label("Reset Audio");
-    reset_btn.set_frame(enums::FrameType::FlatBox);
-    reset_btn.set_label_size(12);
-    reset_btn.set_label_color(theme::TEXT_SECONDARY);
-    reset_btn.set_color(theme::BG_PRIMARY);
-    reset_btn.set_align(enums::Align::Left | enums::Align::Inside);
-    col.fixed(&reset_btn, 26);
-
-    col.end();
-    popup.end();
-    popup.show();
-
-    // ── Callbacks ───────────────────────────────────────────────────
-
-    // Volume slider — sends live as you drag
-    let mut pct_lbl = pct_label.clone();
-    let username_vol = username.to_string();
-    slider.set_callback(move |s| {
-        let vol = s.value() as f32;
-        pct_lbl.set_label(&format!("{}%", (vol * 100.0) as i32));
-        sender.send(UiMessage::SetUserVolume {
-            client_id,
-            username: username_vol.clone(),
-            volume: vol,
-        });
-    });
-
-    // Mute / Unmute — send toggled state, close popup
-    let username_mute = username.to_string();
-    let mut popup_mute = popup.clone();
-    mute_btn.set_callback(move |_| {
-        sender.send(UiMessage::MuteUser {
-            client_id,
-            username: username_mute.clone(),
-            muted: !is_muted,
-        });
-        popup_mute.hide();
-    });
-
-    // Reset — unmute + reset volume, close popup
-    let username_reset = username.to_string();
-    let mut popup_reset = popup.clone();
-    reset_btn.set_callback(move |_| {
-        sender.send(UiMessage::ResetUserAudio {
-            client_id,
-            username: username_reset.clone(),
-        });
-        popup_reset.hide();
-    });
-
-    // ── Modal loop — close on outside click ─────────────────────────
-
-    while popup.shown() {
-        app::wait();
-
-        // Close if user clicks outside the popup bounds
-        if app::event() == enums::Event::Push {
-            let ex = app::event_x_root();
-            let ey = app::event_y_root();
-            let px = popup.x();
-            let py = popup.y();
-            if ex < px || ex > px + popup.w() || ey < py || ey > py + popup.h() {
-                popup.hide();
-            }
-        }
-    }
-
-    // Always send the final slider value on close — ensures the volume
-    // persists even if clicking in the sidebar triggers a user list
-    // rebuild before the live slider messages are processed.
-    let final_vol = slider.value() as f32;
-    if (final_vol - current_volume).abs() > 0.001 {
-        sender.send(UiMessage::SetUserVolume {
-            client_id,
-            username: username.to_string(),
-            volume: final_vol,
-        });
     }
 }
