@@ -20,6 +20,7 @@
 //! - **Still mixes whatever is available** (no hard gate on target depth).
 
 use crate::config::PeerAudioSettings;
+use crate::limiter::Limiter;
 use crate::FRAME_SIZE;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -56,6 +57,8 @@ struct PeerBuffer {
     /// How many consecutive ticks this peer has had excess samples.
     /// Used to avoid draining burst arrivals prematurely.
     excess_ticks: u32,
+    /// Per-peer output limiter — protects listeners from loud transients.
+    limiter: Limiter,
 }
 
 impl PeerBuffer {
@@ -66,6 +69,7 @@ impl PeerBuffer {
             last_arrival: None,
             jitter_estimate: 0.002, // start at 2ms — optimistic, will rise if needed
             excess_ticks: 0,
+            limiter: Limiter::new(),
         }
     }
 }
@@ -115,8 +119,8 @@ impl AdaptiveJitterBuffer {
         Self {
             sample_rate,
             target_samples: (initial_target_ms * sample_rate) / 1000,
-            min_samples: (2 * sample_rate) / 1000,   // 2ms floor
-            max_samples: (200 * sample_rate) / 1000,  // 200ms ceiling (was 120ms)
+            min_samples: (2 * sample_rate) / 1000, // 2ms floor
+            max_samples: (200 * sample_rate) / 1000, // 200ms ceiling (was 120ms)
             buffers: HashMap::new(),
             peer_settings,
             stable_ticks: 0,
@@ -139,7 +143,9 @@ impl AdaptiveJitterBuffer {
     pub fn push_frame(&mut self, frame: DecodedFrame) {
         // Check mute
         {
-            let settings = self.peer_settings.lock().unwrap();
+            let Ok(settings) = self.peer_settings.lock() else {
+                return;
+            };
             if let Some(s) = settings.get(&frame.peer_id) {
                 if s.is_muted {
                     // Clear any buffered audio for this peer
@@ -161,7 +167,8 @@ impl AdaptiveJitterBuffer {
         // and would pollute the jitter estimate.
         if !frame.is_concealment {
             if let Some(last_arrival) = peer.last_arrival {
-                let arrival_delta = frame.arrival_time
+                let arrival_delta = frame
+                    .arrival_time
                     .duration_since(last_arrival)
                     .as_secs_f32();
                 let expected_delta = FRAME_SIZE as f32 / self.sample_rate as f32;
@@ -176,8 +183,7 @@ impl AdaptiveJitterBuffer {
                 } else {
                     0.02
                 };
-                peer.jitter_estimate =
-                    peer.jitter_estimate * (1.0 - coeff) + jitter_sample * coeff;
+                peer.jitter_estimate = peer.jitter_estimate * (1.0 - coeff) + jitter_sample * coeff;
             }
             peer.last_arrival = Some(frame.arrival_time);
         }
@@ -232,10 +238,7 @@ impl AdaptiveJitterBuffer {
     /// Used for loopback and other paths where we don't have packet metadata.
     /// Does NOT update jitter estimation (no arrival time available).
     pub fn push_decoded_audio(&mut self, peer_id: u64, samples: Vec<f32>) {
-        let peer = self
-            .buffers
-            .entry(peer_id)
-            .or_insert_with(PeerBuffer::new);
+        let peer = self.buffers.entry(peer_id).or_insert_with(PeerBuffer::new);
         peer.samples.extend(samples);
 
         let hard_cap = self.max_samples * 3;
@@ -255,8 +258,14 @@ impl AdaptiveJitterBuffer {
         debug_assert_eq!(out.len(), n);
         out.iter_mut().for_each(|s| *s = 0.0);
 
-        let settings = self.peer_settings.lock().unwrap();
+        let Ok(settings) = self.peer_settings.lock() else {
+            return;
+        };
         let mut contributing_peers = 0u32;
+
+        // Temp buffer for per-peer limiting (reused across peers).
+        // Allocated once on the stack for typical frame sizes.
+        let mut peer_buf = vec![0.0f32; n];
 
         for (peer_id, peer) in self.buffers.iter_mut() {
             let peer_settings = settings.get(peer_id).cloned().unwrap_or_default();
@@ -269,14 +278,24 @@ impl AdaptiveJitterBuffer {
                 continue;
             }
 
+            // Drain samples into temp buffer and apply volume
             let available = peer.samples.len().min(n);
+            for i in 0..n {
+                peer_buf[i] = if i < available {
+                    peer.samples.pop_front().unwrap_or(0.0) * peer_settings.volume
+                } else {
+                    0.0
+                };
+            }
+
+            // Apply per-peer limiter (hearing protection)
+            peer.limiter.process(&mut peer_buf[..available]);
+
+            // Sum into output mix and track energy
             let mut peer_energy = 0.0f32;
             for i in 0..available {
-                if let Some(sample) = peer.samples.pop_front() {
-                    let scaled = sample * peer_settings.volume;
-                    out[i] += scaled;
-                    peer_energy += scaled * scaled;
-                }
+                out[i] += peer_buf[i];
+                peer_energy += peer_buf[i] * peer_buf[i];
             }
 
             // Only count peers with meaningful audio (not silence/DTX residue).
@@ -356,7 +375,7 @@ impl AdaptiveJitterBuffer {
         let jitter_target_ms = if jitter_values.is_empty() {
             0.0
         } else {
-            jitter_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            jitter_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             let p75_idx = (jitter_values.len() * 3) / 4;
             let p75_jitter = jitter_values[p75_idx.min(jitter_values.len() - 1)];
             // Target = 2× p75 jitter — enough headroom without being excessive

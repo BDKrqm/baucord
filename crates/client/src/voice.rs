@@ -98,7 +98,7 @@ pub struct VoiceThreadHandle {
     pub tx: Sender<VoiceControl>,
     pub event_rx: Receiver<VoiceEvent>,
     pub shared: SharedAudioState,
-    join_handle: Option<thread::JoinHandle<()>>,
+    pub(crate) join_handle: Option<thread::JoinHandle<()>>,
 }
 
 impl VoiceThreadHandle {

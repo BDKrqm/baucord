@@ -317,10 +317,24 @@ impl AudioOutput {
                         resampler_output[0].resize(expected, 0.0);
 
                         let in_adapter =
-                            SequentialSliceOfVecs::new(&resampler_input, 1, needed).unwrap();
-                        let mut out_adapter =
-                            SequentialSliceOfVecs::new_mut(&mut resampler_output, 1, expected)
-                                .unwrap();
+                            match SequentialSliceOfVecs::new(&resampler_input, 1, needed) {
+                                Ok(a) => a,
+                                Err(e) => {
+                                    error!("Output resampler adapter error: {e}");
+                                    continue;
+                                }
+                            };
+                        let mut out_adapter = match SequentialSliceOfVecs::new_mut(
+                            &mut resampler_output,
+                            1,
+                            expected,
+                        ) {
+                            Ok(a) => a,
+                            Err(e) => {
+                                error!("Output resampler output adapter error: {e}");
+                                continue;
+                            }
+                        };
 
                         match r.process_into_buffer(&in_adapter, &mut out_adapter, None) {
                             Ok((_in_len, _out_len)) => {

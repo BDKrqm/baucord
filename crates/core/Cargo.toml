@@ -4,6 +4,9 @@ version = "0.3.0"
 edition = "2021"
 description = "core components for baucord"
 
+[features]
+serde = ["dep:serde"]
+
 [dependencies]
 # Audio I/O
 cpal = "0.15"
@@ -25,8 +28,9 @@ audioadapter-buffers = "2.0"
 # Noise suppression (Mozilla RNNoise, pure Rust)
 nnnoiseless = "0.5"
 
-# VAD (WebRTC port, pure Rust, no_std compatible)
-earshot = "0.1"
+earshot = { git = "https://github.com/mpwsh/earshot" }
+serde = { version = "1", features = ["derive"], optional = true }
+
 
 # Logging
 log = "0.4"

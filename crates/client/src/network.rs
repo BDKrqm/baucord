@@ -644,7 +644,7 @@ pub enum NetworkControl {
 pub struct NetworkThreadHandle {
     pub tx: Sender<NetworkControl>,
     pub msg_rx: Receiver<NetworkMessage>,
-    join_handle: Option<thread::JoinHandle<()>>,
+    pub(crate) join_handle: Option<thread::JoinHandle<()>>,
 }
 
 impl NetworkThreadHandle {
@@ -757,6 +757,9 @@ fn run_network_loop(
                         }
                     }
                     NetworkControl::Shutdown => {
+                        if let Some(mut c) = client.take() {
+                            c.disconnect();
+                        }
                         running = false;
                     }
                 },

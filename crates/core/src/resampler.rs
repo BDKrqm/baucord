@@ -5,8 +5,7 @@
 
 use log::info;
 use rubato::{
-    Async, FixedAsync, Resampler, SincInterpolationParameters,
-    SincInterpolationType, WindowFunction,
+    Async, FixedAsync, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
 
 /// Build an async resampler with fixed input size for input (device rate → 48 kHz).
