@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::{
-    config::{Settings, UserAudioSettings, user_key},
+    config::{Settings, peer_key},
     network::{NetworkControl, NetworkMessage, NetworkThreadHandle},
     ui::{chat::Chat, messages::UiMessage, sidebar::Sidebar},
     voice::{VoiceControl, VoiceEvent, VoiceThreadHandle},
@@ -32,20 +32,11 @@ pub struct UserState {
     pub username: String,
     pub is_speaking: bool,
     pub last_activity: Instant,
-    pub audio_settings: UserAudioSettings,
+    pub audio_settings: PeerAudioSettings,
     /// Remote user's self-reported mute state (distinct from local per-user mute).
     pub is_self_muted: bool,
     /// Remote user's self-reported deafen state.
     pub is_self_deafened: bool,
-}
-
-// ── Conversion helper ──────────────────────────────────────────────────
-
-fn to_peer_settings(s: &UserAudioSettings) -> PeerAudioSettings {
-    PeerAudioSettings {
-        volume: s.volume,
-        is_muted: s.is_muted,
-    }
 }
 
 // ── App ────────────────────────────────────────────────────────────────
@@ -174,6 +165,7 @@ impl App {
             }
         }
 
+        // FLTK loop exited (all windows closed or app.quit() called).
         self.shutdown();
     }
 
@@ -323,7 +315,7 @@ impl App {
                 client_id,
                 username,
             } => {
-                self.handle_reset_user_audio(client_id, username);
+                self.handle_reset_peer_audio(client_id, username);
             }
             UiMessage::OpenSettings => {
                 if !self.settings_window_open {
@@ -379,7 +371,8 @@ impl App {
                 self.settings.save();
             }
             UiMessage::Shutdown => {
-                self.shutdown();
+                // Just quit FLTK — actual cleanup happens after the event
+                // loop exits in run(), which calls shutdown().
                 self.app.quit();
             }
         }
@@ -409,16 +402,10 @@ impl App {
     }
 
     fn handle_connection_established(&mut self) {
-        if self.connected {
-            return;
-        }
         self.connected = true;
-
-        if let Some(mut wind) = self.connection_window.take() {
-            wind.hide();
+        if let Some(frame) = &mut self.error_frame {
+            frame.set_label("");
         }
-
-        self.show_main_screen();
     }
 
     fn handle_init_client(
@@ -427,34 +414,37 @@ impl App {
         server_name: String,
         greeting: String,
     ) {
-        let our_nick = &self.settings.nickname;
-        self.our_client_id = None;
-
-        // Exact match first, then prefix match, then fallback to highest ID.
-        // The server may append a discriminator (e.g. "nick#2") if the name
-        // is already taken, so exact match can fail.
-        for (id, name) in &users {
-            if name == our_nick {
-                self.our_client_id = Some(*id);
-                break;
-            }
+        if let Some(mut w) = self.connection_window.take() {
+            w.hide();
         }
 
-        if self.our_client_id.is_none() {
-            for (id, name) in &users {
-                if name.starts_with(our_nick) || our_nick.starts_with(name) {
-                    self.our_client_id = Some(*id);
-                }
-            }
-        }
+        self.show_main_screen();
 
-        if self.our_client_id.is_none() {
-            if let Some((&id, _)) = users.iter().max_by_key(|(id, _)| *id) {
+        // Find our own client ID from the user list
+        for (&id, name) in &users {
+            let is_us = name == &self.settings.nickname;
+            self.users.insert(
+                id,
+                UserState {
+                    username: name.clone(),
+                    is_speaking: false,
+                    last_activity: Instant::now(),
+                    audio_settings: self
+                        .settings
+                        .peer_settings
+                        .get(&peer_key(name))
+                        .cloned()
+                        .unwrap_or_default(),
+                    is_self_muted: false,
+                    is_self_deafened: false,
+                },
+            );
+            if is_us {
                 self.our_client_id = Some(id);
-                warn!("Could not match nickname, assuming client {id}");
             }
         }
 
+        // Start voice engine
         if let Some(id) = self.our_client_id {
             self.voice
                 .tx
@@ -463,43 +453,19 @@ impl App {
                     our_client_id: id,
                 })
                 .ok();
-
-            self.is_muted = false;
         }
 
-        self.users.clear();
-        for (id, username) in &users {
-            let audio = self
-                .settings
-                .user_audio_settings
-                .get(&user_key(username))
-                .cloned()
-                .unwrap_or_default();
-
-            self.users.insert(
-                *id,
-                UserState {
-                    username: username.clone(),
-                    is_speaking: false,
-                    last_activity: Instant::now(),
-                    audio_settings: audio.clone(),
-                    is_self_muted: false,
-                    is_self_deafened: false,
-                },
-            );
-
-            self.voice.tx.send(VoiceControl::AddPeer(*id)).ok();
-
-            if audio.is_muted || (audio.volume - 1.0).abs() > 0.01 {
-                self.voice
-                    .tx
-                    .send(VoiceControl::SetPeerAudio(*id, to_peer_settings(&audio)))
-                    .ok();
-            }
+        // Sync per-user audio settings to voice engine
+        for (&id, user) in &self.users {
+            self.voice.tx.send(VoiceControl::AddPeer(id)).ok();
+            self.voice
+                .tx
+                .send(VoiceControl::SetPeerAudio(id, user.audio_settings.clone()))
+                .ok();
         }
 
         if let Some(chat) = &mut self.chat {
-            chat.handle_init(server_name, greeting);
+            chat.handle_connected(server_name, greeting);
         }
         self.update_user_list();
     }
@@ -507,10 +473,16 @@ impl App {
     fn handle_user_joined(&mut self, client_id: renet::ClientId, username: String) {
         let audio = self
             .settings
-            .user_audio_settings
-            .get(&user_key(&username))
+            .peer_settings
+            .get(&peer_key(&username))
             .cloned()
             .unwrap_or_default();
+
+        self.voice.tx.send(VoiceControl::AddPeer(client_id)).ok();
+        self.voice
+            .tx
+            .send(VoiceControl::SetPeerAudio(client_id, audio.clone()))
+            .ok();
 
         self.users.insert(
             client_id,
@@ -518,23 +490,11 @@ impl App {
                 username: username.clone(),
                 is_speaking: false,
                 last_activity: Instant::now(),
-                audio_settings: audio.clone(),
+                audio_settings: audio,
                 is_self_muted: false,
                 is_self_deafened: false,
             },
         );
-
-        self.voice.tx.send(VoiceControl::AddPeer(client_id)).ok();
-
-        if audio.is_muted || (audio.volume - 1.0).abs() > 0.01 {
-            self.voice
-                .tx
-                .send(VoiceControl::SetPeerAudio(
-                    client_id,
-                    to_peer_settings(&audio),
-                ))
-                .ok();
-        }
 
         if let Some(chat) = &mut self.chat {
             chat.handle_user_joined(username);
@@ -543,8 +503,8 @@ impl App {
     }
 
     fn handle_user_left(&mut self, client_id: renet::ClientId, username: String) {
-        self.users.remove(&client_id);
         self.voice.tx.send(VoiceControl::RemovePeer(client_id)).ok();
+        self.users.remove(&client_id);
 
         if let Some(chat) = &mut self.chat {
             chat.handle_user_left(username);
@@ -558,20 +518,17 @@ impl App {
             .tx
             .send(VoiceControl::SetMuted(self.is_muted))
             .ok();
+        self.network
+            .tx
+            .send(NetworkControl::SendAudioState {
+                muted: self.is_muted,
+                deafened: self.is_deafened,
+            })
+            .ok();
 
         if let Some(sidebar) = &mut self.sidebar {
             sidebar.set_mute_state(self.is_muted);
         }
-
-        if self.is_muted {
-            self.network
-                .tx
-                .send(NetworkControl::SendSpeakingStatus(false))
-                .ok();
-        }
-
-        self.update_own_audio_state();
-        self.broadcast_audio_state();
     }
 
     fn handle_toggle_deafen(&mut self) {
@@ -580,65 +537,62 @@ impl App {
             .tx
             .send(VoiceControl::SetDeafened(self.is_deafened))
             .ok();
+        self.network
+            .tx
+            .send(NetworkControl::SendAudioState {
+                muted: self.is_muted,
+                deafened: self.is_deafened,
+            })
+            .ok();
 
         if let Some(sidebar) = &mut self.sidebar {
             sidebar.set_deafen_state(self.is_deafened);
-        }
-
-        self.update_own_audio_state();
-        self.broadcast_audio_state();
-    }
-
-    /// Update our own UserState so the sidebar shows mute/deafen icons on our row too.
-    fn update_own_audio_state(&mut self) {
-        if let Some(id) = self.our_client_id {
-            if let Some(user) = self.users.get_mut(&id) {
-                user.is_self_muted = self.is_muted;
-                user.is_self_deafened = self.is_deafened;
-            }
-        }
-        self.update_user_list();
-    }
-
-    /// Notify the server (and all other clients) of our current mute/deafen state.
-    fn broadcast_audio_state(&self) {
-        if self.connected {
-            self.network
-                .tx
-                .send(NetworkControl::SendAudioState {
-                    muted: self.is_muted,
-                    deafened: self.is_deafened,
-                })
-                .ok();
         }
     }
 
     fn handle_test_microphone(&mut self, enabled: bool) {
         self.is_testing_mic = enabled;
         self.is_testing_mic_shared.store(enabled, Ordering::Relaxed);
-        self.voice.tx.send(VoiceControl::SetLoopback(enabled)).ok();
+
         if enabled {
-            self.network
-                .tx
-                .send(NetworkControl::SendSpeakingStatus(false))
-                .ok();
+            if self.vc_is_none() {
+                self.voice
+                    .tx
+                    .send(VoiceControl::Start {
+                        settings: self.settings.clone(),
+                        our_client_id: 0,
+                    })
+                    .ok();
+            }
+            self.voice.tx.send(VoiceControl::SetLoopback(true)).ok();
+        } else {
+            self.voice.tx.send(VoiceControl::SetLoopback(false)).ok();
+            if !self.connected {
+                self.voice.tx.send(VoiceControl::Stop).ok();
+            }
         }
     }
 
-    fn handle_mute_user(&mut self, client_id: renet::ClientId, username: String, muted: bool) {
-        let key = user_key(&username);
-        let settings = self.settings.user_audio_settings.entry(key).or_default();
-        settings.is_muted = muted;
+    fn vc_is_none(&self) -> bool {
+        !self.connected && !self.is_testing_mic
+    }
 
+    fn handle_mute_user(&mut self, client_id: renet::ClientId, username: String, muted: bool) {
         if let Some(user) = self.users.get_mut(&client_id) {
             user.audio_settings.is_muted = muted;
+            self.settings
+                .peer_settings
+                .insert(peer_key(&username), user.audio_settings.clone());
         }
 
         self.voice
             .tx
             .send(VoiceControl::SetPeerAudio(
                 client_id,
-                to_peer_settings(settings),
+                self.users
+                    .get(&client_id)
+                    .map(|u| u.audio_settings.clone())
+                    .unwrap_or_default(),
             ))
             .ok();
         self.settings.save();
@@ -651,39 +605,38 @@ impl App {
         username: String,
         volume: f32,
     ) {
-        let key = user_key(&username);
-        let settings = self.settings.user_audio_settings.entry(key).or_default();
-        settings.volume = volume;
-
         if let Some(user) = self.users.get_mut(&client_id) {
             user.audio_settings.volume = volume;
+            self.settings
+                .peer_settings
+                .insert(peer_key(&username), user.audio_settings.clone());
         }
 
         self.voice
             .tx
             .send(VoiceControl::SetPeerAudio(
                 client_id,
-                to_peer_settings(settings),
+                self.users
+                    .get(&client_id)
+                    .map(|u| u.audio_settings.clone())
+                    .unwrap_or_default(),
             ))
             .ok();
         self.settings.save();
-        self.update_user_list();
     }
 
-    fn handle_reset_user_audio(&mut self, client_id: renet::ClientId, username: String) {
-        self.settings
-            .user_audio_settings
-            .remove(&user_key(&username));
+    fn handle_reset_peer_audio(&mut self, client_id: renet::ClientId, username: String) {
+        self.settings.peer_settings.remove(&peer_key(&username));
 
         if let Some(user) = self.users.get_mut(&client_id) {
-            user.audio_settings = UserAudioSettings::default();
+            user.audio_settings = PeerAudioSettings::default();
         }
 
         self.voice
             .tx
             .send(VoiceControl::SetPeerAudio(
                 client_id,
-                to_peer_settings(&UserAudioSettings::default()),
+                PeerAudioSettings::default(),
             ))
             .ok();
         self.settings.save();
@@ -750,7 +703,9 @@ impl App {
     }
 
     fn set_window_icon(wind: &mut window::Window) {
-        if let Ok(icon) = fltk::image::PngImage::from_data(include_bytes!("../assets/icon.png")) {
+        if let Ok(icon) =
+            fltk::image::PngImage::from_data(include_bytes!("../../../assets/icon.png"))
+        {
             wind.set_icon(Some(icon));
         }
     }
@@ -829,6 +784,17 @@ impl App {
             }
         });
 
+        // Intercept window close — route through our shutdown path instead
+        // of letting FLTK hide the window silently (which used to leave
+        // worker threads running with no UI to control them).
+        let sender = self.sender;
+        wind.set_callback(move |w| {
+            if app::event() == enums::Event::Close {
+                sender.send(UiMessage::Shutdown);
+                w.hide();
+            }
+        });
+
         self.connection_window = Some(wind);
     }
 
@@ -860,9 +826,10 @@ impl App {
         wind.end();
 
         let sender = self.sender;
-        wind.set_callback(move |_w| {
+        wind.set_callback(move |w| {
             if app::event() == enums::Event::Close {
                 sender.send(UiMessage::Shutdown);
+                w.hide();
             }
         });
 
@@ -908,9 +875,18 @@ impl App {
         });
     }
 
+    /// Clean shutdown: signal threads, join with timeout, save settings.
+    ///
+    /// Order matters:
+    /// 1. Save settings (while windows still exist for geometry)
+    /// 2. Stop voice engine (drops audio devices, closes internal threads)
+    /// 3. Disconnect network (sends goodbye to server)
+    /// 4. Signal both worker threads to exit
+    /// 5. Join with hard timeout — never hang forever
     fn shutdown(&mut self) {
         info!("Shutting down");
 
+        // 1. Save window geometry while the window still exists
         if let Some(ref w) = self.main_window {
             self.settings.window_width = w.w();
             self.settings.window_height = w.h();
@@ -919,7 +895,39 @@ impl App {
         }
         self.settings.save();
 
-        self.network.tx.send(NetworkControl::Shutdown).ok();
+        // 2. Stop the voice engine (releases audio devices + internal threads)
+        self.voice.tx.send(VoiceControl::Stop).ok();
+
+        // 3. Disconnect from server cleanly
+        self.network.tx.send(NetworkControl::Disconnect).ok();
+
+        // Small delay to let the disconnect packet go out
+        std::thread::sleep(Duration::from_millis(50));
+
+        // 4. Signal both threads to exit their loops
         self.voice.tx.send(VoiceControl::Shutdown).ok();
+        self.network.tx.send(NetworkControl::Shutdown).ok();
+
+        // 5. Join with hard timeout — take handles so Drop won't try again.
+        //    If a thread is stuck (cpal deadlock, etc.), we bail after 2s
+        //    and let the OS clean up on process exit.
+        let voice_handle = self.voice.join_handle.take();
+        let network_handle = self.network.join_handle.take();
+
+        let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+        std::thread::spawn(move || {
+            if let Some(h) = voice_handle {
+                let _ = h.join();
+            }
+            if let Some(h) = network_handle {
+                let _ = h.join();
+            }
+            let _ = done_tx.send(());
+        });
+
+        match done_rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(()) => info!("Shutdown complete"),
+            Err(_) => warn!("Shutdown timed out — threads still running, exiting anyway"),
+        }
     }
 }

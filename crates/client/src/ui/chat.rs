@@ -5,15 +5,13 @@ use ui::theme;
 use ui::widgets::{controls, style};
 
 pub struct Chat {
-    sender: app::Sender<UiMessage>,
-
-    // UI elements
+    // UI elements kept alive for method access.
+    // sender, message_input, and char_count are captured by closures
+    // in new() and don't need to live on the struct.
     group: group::Flex,
     chat_display: text::TextDisplay,
     chat_buffer: text::TextBuffer,
     style_buffer: text::TextBuffer,
-    message_input: input::Input,
-    char_count: frame::Frame,
 }
 
 impl Chat {
@@ -31,7 +29,7 @@ impl Chat {
         chat_display.wrap_mode(text::WrapMode::AtBounds, 0);
         style::style_text_display(&mut chat_display);
 
-        // Style table: A=timestamp, B=username, C=message, D=system, E=join/leave
+        // Style table: A=timestamp, B=username, C=message, D=system
         let style_table = vec![
             text::StyleTableEntryExt {
                 color: theme::TEXT_MUTED,
@@ -61,13 +59,6 @@ impl Chat {
                 attr: text::TextAttr::None,
                 bgcolor: theme::SURFACE,
             },
-            text::StyleTableEntryExt {
-                color: theme::SUCCESS,
-                font: enums::Font::HelveticaBold,
-                size: 13,
-                attr: text::TextAttr::None,
-                bgcolor: theme::SURFACE,
-            },
         ];
 
         chat_display.set_highlight_data_ext(style_buffer.clone(), style_table);
@@ -93,7 +84,6 @@ impl Chat {
         chat_col.end();
 
         // Update character counter + send on Enter
-        let s = sender;
         let mut input_clone = message_input.clone();
         let mut count_clone = char_count.clone();
 
@@ -111,7 +101,7 @@ impl Chat {
                 if event == enums::Event::KeyDown && app::event_key() == enums::Key::Enter {
                     let text = input.value();
                     if !text.trim().is_empty() && text.len() <= 400 {
-                        s.send(UiMessage::SendChatMessage(text));
+                        sender.send(UiMessage::SendChatMessage(text));
                         input.set_value("");
                         count_clone.set_label("0/400");
                         count_clone.set_label_color(theme::TEXT_MUTED);
@@ -125,24 +115,20 @@ impl Chat {
         });
 
         // Send button
-        let s = sender;
         send_btn.set_callback(move |_| {
             let text = input_clone.value();
             if !text.trim().is_empty() && text.len() <= 400 {
-                s.send(UiMessage::SendChatMessage(text));
+                sender.send(UiMessage::SendChatMessage(text));
                 input_clone.set_value("");
                 input_clone.do_callback();
             }
         });
 
         Self {
-            sender,
             group: chat_col,
             chat_display,
             chat_buffer,
             style_buffer,
-            message_input,
-            char_count,
         }
     }
 
@@ -150,16 +136,12 @@ impl Chat {
         self.group.clone()
     }
 
-    pub fn handle_init(&mut self, _server_name: String, greeting: String) {
+    pub fn handle_connected(&mut self, server_name: String, greeting: String) {
         self.chat_buffer.set_text("");
         self.style_buffer.set_text("");
 
-        let greeting_msg = format!("{greeting}\n\n");
-        self.append_system_message(&greeting_msg);
-        self.scroll_to_bottom();
-    }
-
-    pub fn handle_connected(&mut self) {
+        let msg = format!("{server_name}: {greeting}\n");
+        self.append_system_message(&msg);
         self.scroll_to_bottom();
     }
 
@@ -211,4 +193,3 @@ impl Chat {
             .scroll(self.chat_display.count_lines(0, length, true), 0);
     }
 }
-

@@ -20,7 +20,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig, SupportedStreamConfig};
 use crossbeam_channel::{Sender, TrySendError};
 use dasp_sample::{FromSample, Sample as DaspSample, ToSample};
-use log::{error, info, warn};
+use log::{error, info};
 use rtrb::{Consumer, Producer, RingBuffer};
 use rubato::{Async, Resampler};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -346,11 +346,24 @@ impl AudioInput {
                         let expected = r.output_frames_next();
                         resampler_output[0].resize(expected, 0.0);
 
-                        let in_adapter =
-                            SequentialSliceOfVecs::new(&resampler_input, 1, n).unwrap();
-                        let mut out_adapter =
-                            SequentialSliceOfVecs::new_mut(&mut resampler_output, 1, expected)
-                                .unwrap();
+                        let in_adapter = match SequentialSliceOfVecs::new(&resampler_input, 1, n) {
+                            Ok(a) => a,
+                            Err(e) => {
+                                error!("Input resampler adapter error: {e}");
+                                continue;
+                            }
+                        };
+                        let mut out_adapter = match SequentialSliceOfVecs::new_mut(
+                            &mut resampler_output,
+                            1,
+                            expected,
+                        ) {
+                            Ok(a) => a,
+                            Err(e) => {
+                                error!("Input resampler output adapter error: {e}");
+                                continue;
+                            }
+                        };
 
                         match r.process_into_buffer(&in_adapter, &mut out_adapter, None) {
                             Ok((_in_len, out_len)) if out_len > 0 => {
@@ -565,6 +578,10 @@ impl AudioInput {
 impl Drop for AudioInput {
     fn drop(&mut self) {
         self.should_stop.store(true, Ordering::Relaxed);
+        // Drop the cpal stream FIRST — stops CoreAudio callbacks so they
+        // can't deadlock trying to push into the ring buffer while the
+        // worker thread is being joined.
+        self.stream.take();
         if let Some(thread) = self.worker_thread.take() {
             let _ = thread.join();
         }

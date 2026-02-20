@@ -9,17 +9,12 @@
 //! # Quick start
 //!
 //! ```no_run
-//! use fltk::{prelude::*, *};
-//!
-//! fn main() {
-//!     let app = app::App::default();
-//!     ui::theme::apply();
-//!     // ... build your window ...
-//! }
+//! let app = fltk::app::App::default();
+//! ui::theme::apply();
+//! // ... build your window ...
 //! ```
 
 #![deny(missing_docs)]
 
 pub mod theme;
 pub mod widgets;
-

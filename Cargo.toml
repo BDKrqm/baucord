@@ -21,14 +21,14 @@ redundant_clone = { level = "deny", priority = 9 }
 [profile.release]
 opt-level = 3
 lto = "thin"
-codegen-units = 1        # better optimization, slower compile
-panic = "abort"          # ~10% smaller binary, no unwind overhead
+codegen-units = 1 # better optimization, slower compile
+panic = "abort"   # ~10% smaller binary, no unwind overhead
 
 # ── Deploy: ship to users ──────────────────────────────────────────────
 [profile.deploy]
 inherits = "release"
 strip = "symbols"
-lto = "fat"              # squeeze out the last few % at link time
+lto = "fat"          # squeeze out the last few % at link time
 
 # ── Debug-opt: release speed with debug symbols ────────────────────────
 [profile.debug-opt]
@@ -47,3 +47,4 @@ opt-level = 1
 # and unoptimized audio/codec code is unusably slow.
 [profile.dev.package."*"]
 opt-level = 3
+

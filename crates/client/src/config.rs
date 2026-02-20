@@ -1,14 +1,16 @@
 use log::info;
 use serde::{Deserialize, Serialize};
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
-/// Stable hash key for per-user audio settings.
+use core::PeerAudioSettings;
+
+/// Stable hash key for per-peer audio settings.
 /// Prevents JSON injection from malicious usernames.
-pub fn user_key(username: &str) -> String {
+pub fn peer_key(username: &str) -> String {
     let mut h = DefaultHasher::new();
     username.hash(&mut h);
     format!("{:016x}", h.finish())
@@ -35,8 +37,8 @@ pub struct Settings {
     pub input_device: Option<String>,
     pub output_device: Option<String>,
 
-    // Per-user audio (keyed by hashed username)
-    pub user_audio_settings: HashMap<String, UserAudioSettings>,
+    // Per-peer audio (keyed by hashed username)
+    pub peer_settings: HashMap<String, PeerAudioSettings>,
 }
 
 impl Default for Settings {
@@ -53,7 +55,7 @@ impl Default for Settings {
             window_y: None,
             input_device: None,
             output_device: None,
-            user_audio_settings: HashMap::new(),
+            peer_settings: HashMap::new(),
         }
     }
 }
@@ -100,21 +102,5 @@ impl Settings {
     pub fn reset(&mut self) {
         *self = Settings::default();
         self.save();
-    }
-}
-
-/// Per-user audio settings (persisted by username).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UserAudioSettings {
-    pub volume: f32,
-    pub is_muted: bool,
-}
-
-impl Default for UserAudioSettings {
-    fn default() -> Self {
-        UserAudioSettings {
-            volume: 1.0,
-            is_muted: false,
-        }
     }
 }
