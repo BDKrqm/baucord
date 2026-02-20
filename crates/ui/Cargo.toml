@@ -7,3 +7,12 @@ description = "Shared FLTK widgets and theming for voice-chat-core examples and 
 [dependencies]
 fltk = { version = "1.5", features = ["fltk-bundled"] }
 fltk-theme = "0.7"
+
+[lints.rust]
+future-incompatible = "warn"
+nonstandard_style = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = 10 }
+redundant_clone = { level = "deny", priority = 9 }
+pedantic = { level = "warn", priority = 3 }

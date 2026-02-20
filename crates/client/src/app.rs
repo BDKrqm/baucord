@@ -22,7 +22,8 @@ use crate::{
     voice::{VoiceControl, VoiceEvent, VoiceThreadHandle},
 };
 use core::PeerAudioSettings;
-use ui::{helpers, theme};
+use ui::theme;
+use ui::widgets::{controls, style};
 
 // ── Public types ────────────────────────────────────────────────────────
 
@@ -396,6 +397,9 @@ impl App {
         let our_nick = &self.settings.nickname;
         self.our_client_id = None;
 
+        // Exact match first, then prefix match, then fallback to highest ID.
+        // The server may append a discriminator (e.g. "nick#2") if the name
+        // is already taken, so exact match can fail.
         for (id, name) in &users {
             if name == our_nick {
                 self.our_client_id = Some(*id);
@@ -414,7 +418,7 @@ impl App {
         if self.our_client_id.is_none() {
             if let Some((&id, _)) = users.iter().max_by_key(|(id, _)| *id) {
                 self.our_client_id = Some(id);
-                warn!("Could not match nickname, assuming client {}", id);
+                warn!("Could not match nickname, assuming client {id}");
             }
         }
 
@@ -451,7 +455,6 @@ impl App {
 
             self.voice.tx.send(VoiceControl::AddPeer(*id)).ok();
 
-            // Apply saved per-user audio settings to the voice engine
             if audio.is_muted || (audio.volume - 1.0).abs() > 0.01 {
                 self.voice
                     .tx
@@ -486,7 +489,6 @@ impl App {
 
         self.voice.tx.send(VoiceControl::AddPeer(client_id)).ok();
 
-        // Apply saved per-user audio settings to the voice engine
         if audio.is_muted || (audio.volume - 1.0).abs() > 0.01 {
             self.voice
                 .tx
@@ -627,17 +629,14 @@ impl App {
         self.update_user_list();
     }
 
-    fn handle_disconnect(&mut self) {
+    /// Shared teardown for both user-initiated and server-initiated disconnects.
+    fn teardown_connection(&mut self) {
         self.connected = false;
         self.is_testing_mic = false;
-        self.network.tx.send(NetworkControl::Disconnect).ok();
         self.voice.tx.send(VoiceControl::Stop).ok();
 
         if let Some(sidebar) = &mut self.sidebar {
             sidebar.handle_disconnected();
-        }
-        if let Some(chat) = &mut self.chat {
-            chat.handle_disconnected("User disconnected".to_string());
         }
 
         self.users.clear();
@@ -648,27 +647,25 @@ impl App {
         if let Some(mut w) = self.main_window.take() {
             w.hide();
         }
+    }
+
+    fn handle_disconnect(&mut self) {
+        self.network.tx.send(NetworkControl::Disconnect).ok();
+
+        if let Some(chat) = &mut self.chat {
+            chat.handle_disconnected("User disconnected".to_string());
+        }
+
+        self.teardown_connection();
         self.show_connection_screen();
     }
 
     fn handle_disconnect_event(&mut self, reason: &str) {
-        self.connected = false;
-        self.is_testing_mic = false;
-        self.voice.tx.send(VoiceControl::Stop).ok();
-
-        if let Some(sidebar) = &mut self.sidebar {
-            sidebar.handle_disconnected();
-        }
         if let Some(chat) = &mut self.chat {
             chat.handle_disconnected(reason.to_string());
         }
 
-        self.users.clear();
-        self.our_client_id = None;
-
-        if let Some(mut w) = self.main_window.take() {
-            w.hide();
-        }
+        self.teardown_connection();
         self.show_connection_screen();
         self.show_error(reason);
     }
@@ -732,7 +729,7 @@ impl App {
 
         let mut nick_input = input::Input::default();
         nick_input.set_value(&self.settings.nickname);
-        helpers::style_input(&mut nick_input);
+        style::style_input(&mut nick_input);
         col.fixed(&nick_input, 35);
 
         let mut addr_frame = frame::Frame::default()
@@ -744,7 +741,7 @@ impl App {
 
         let mut addr_input = input::Input::default();
         addr_input.set_value(&self.settings.last_server);
-        helpers::style_input(&mut addr_input);
+        style::style_input(&mut addr_input);
         col.fixed(&addr_input, 35);
 
         let mut error_frame = frame::Frame::default().with_align(enums::Align::Center);
@@ -753,7 +750,7 @@ impl App {
         col.fixed(&error_frame, 25);
         self.error_frame = Some(error_frame);
 
-        let mut connect_btn = helpers::accent_button("Connect", theme::ACCENT);
+        let mut connect_btn = controls::accent_button("Connect", theme::ACCENT);
         col.fixed(&connect_btn, 40);
 
         col.end();
@@ -819,8 +816,12 @@ impl App {
         use crate::ui::settings::SettingsWindow;
         use core::VoiceChat;
 
-        let input_devices = VoiceChat::list_input_devices().unwrap_or_default();
-        let output_devices = VoiceChat::list_output_devices().unwrap_or_default();
+        let input_devices = VoiceChat::list_input_devices()
+            .inspect_err(|e| warn!("Failed to list input devices: {e}"))
+            .unwrap_or_default();
+        let output_devices = VoiceChat::list_output_devices()
+            .inspect_err(|e| warn!("Failed to list output devices: {e}"))
+            .unwrap_or_default();
 
         SettingsWindow::show(
             self.sender,

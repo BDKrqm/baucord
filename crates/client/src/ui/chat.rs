@@ -1,7 +1,8 @@
 // ui/chat.rs
 use crate::ui::messages::UiMessage;
 use fltk::{prelude::*, *};
-use ui::{helpers, theme};
+use ui::theme;
+use ui::widgets::{controls, style};
 
 pub struct Chat {
     sender: app::Sender<UiMessage>,
@@ -28,7 +29,7 @@ impl Chat {
 
         chat_display.set_buffer(chat_buffer.clone());
         chat_display.wrap_mode(text::WrapMode::AtBounds, 0);
-        helpers::style_text_display(&mut chat_display);
+        style::style_text_display(&mut chat_display);
 
         // Style table: A=timestamp, B=username, C=message, D=system, E=join/leave
         let style_table = vec![
@@ -78,30 +79,29 @@ impl Chat {
 
         let mut message_input = input::Input::default();
         message_input.set_maximum_size(400);
-        helpers::style_input(&mut message_input);
+        style::style_input(&mut message_input);
 
         let mut char_count = frame::Frame::default().with_label("0/400");
         input_row.fixed(&char_count, 60);
         char_count.set_label_color(theme::TEXT_MUTED);
         char_count.set_label_size(11);
 
-        let mut send_btn = helpers::accent_button("Send", theme::ACCENT);
+        let mut send_btn = controls::accent_button("Send", theme::ACCENT);
         input_row.fixed(&send_btn, 80);
 
         input_row.end();
         chat_col.end();
 
-        // Set up callbacks
+        // Update character counter + send on Enter
         let s = sender;
         let mut input_clone = message_input.clone();
         let mut count_clone = char_count.clone();
 
-        // Update character counter
         message_input.handle(move |input, event| {
             match event {
                 enums::Event::KeyUp | enums::Event::KeyDown => {
                     let len = input.value().len();
-                    count_clone.set_label(&format!("{}/400", len));
+                    count_clone.set_label(&format!("{len}/400"));
 
                     if len > 380 {
                         count_clone.set_label_color(theme::WARNING);
@@ -109,7 +109,6 @@ impl Chat {
                         count_clone.set_label_color(theme::TEXT_MUTED);
                     }
 
-                    // Send on Enter
                     if event == enums::Event::KeyDown && app::event_key() == enums::Key::Enter {
                         let text = input.value();
                         if !text.trim().is_empty() && text.len() <= 400 {
@@ -134,7 +133,7 @@ impl Chat {
             if !text.trim().is_empty() && text.len() <= 400 {
                 s.send(UiMessage::SendChatMessage(text));
                 input_clone.set_value("");
-                input_clone.do_callback(); // Update char counter
+                input_clone.do_callback();
             }
         });
 
@@ -157,7 +156,7 @@ impl Chat {
         self.chat_buffer.set_text("");
         self.style_buffer.set_text("");
 
-        let greeting_msg = format!("{}\n\n", greeting);
+        let greeting_msg = format!("{greeting}\n\n");
         self.append_system_message(&greeting_msg);
         self.scroll_to_bottom();
     }
@@ -167,30 +166,29 @@ impl Chat {
     }
 
     pub fn handle_disconnected(&mut self, reason: String) {
-        let msg = format!("Disconnected: {}\n", reason);
+        let msg = format!("Disconnected: {reason}\n");
         self.append_system_message(&msg);
         self.scroll_to_bottom();
     }
 
     pub fn handle_user_joined(&mut self, username: String) {
-        let msg = format!("{} joined\n", username);
+        let msg = format!("{username} joined\n");
         self.append_system_message(&msg);
         self.scroll_to_bottom();
     }
 
     pub fn handle_user_left(&mut self, username: String) {
-        let msg = format!("{} left\n", username);
+        let msg = format!("{username} left\n");
         self.append_system_message(&msg);
         self.scroll_to_bottom();
     }
 
     pub fn handle_text_message(&mut self, username: String, text: String) {
         let timestamp = chrono::Local::now().format("%H:%M");
-        let timestamp_str = format!("[{}] ", timestamp);
-        let username_str = format!("{}: ", username);
-        let message_str = format!("{}\n", text);
+        let timestamp_str = format!("[{timestamp}] ");
+        let username_str = format!("{username}: ");
+        let message_str = format!("{text}\n");
 
-        // Append with styles
         self.chat_buffer.append(&timestamp_str);
         self.style_buffer.append(&"A".repeat(timestamp_str.len()));
 

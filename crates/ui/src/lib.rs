@@ -3,10 +3,8 @@
 //! This crate provides:
 //!
 //! - **[`theme`]** — one-call dark theme backed by [`fltk_theme`].
-//! - **[`vu_meter`]** — colour-coded audio level bar.
-//! - **[`gate_bar`]** — post-denoise level with threshold marker.
-//! - **[`helpers`]** — section headers, stat labels, sliders, device
-//!   choosers, and other layout primitives.
+//! - **[`widgets`]** — reusable UI primitives: labels, controls, meters,
+//!   layout helpers, and styling utilities.
 //!
 //! # Quick start
 //!
@@ -20,7 +18,7 @@
 //! }
 //! ```
 
-pub mod gate_bar;
-pub mod helpers;
+#![deny(missing_docs)]
+
 pub mod theme;
-pub mod vu_meter;
+pub mod widgets;
