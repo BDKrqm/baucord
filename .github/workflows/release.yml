@@ -24,10 +24,10 @@ jobs:
             suffix: macos-arm64
             # Apple Silicon is one architecture — native is fine here.
             rustflags: "-C target-cpu=native"
-          - os: macos-13
-            target: x86_64-apple-darwin
-            suffix: macos-x64
-            rustflags: "-C target-cpu=x86-64-v2"
+          #- os: macos-13
+          #  target: x86_64-apple-darwin
+          #  suffix: macos-x64
+          #  rustflags: "-C target-cpu=x86-64-v2"
 
     runs-on: ${{ matrix.os }}
 
