@@ -18,13 +18,16 @@ const VERSION_URL: &str = "https://baucord.mpw.sh/version";
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Platform-specific download URL.
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 pub const DOWNLOAD_URL: &str = "https://baucord.mpw.sh/baucord-win-x64.zip";
 
-#[cfg(target_os = "macos")]
-pub const DOWNLOAD_URL: &str = "https://baucord.mpw.sh/baucord-arm64-macos.zip";
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub const DOWNLOAD_URL: &str = "https://baucord.mpw.sh/baucord-macos-arm64.zip";
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+pub const DOWNLOAD_URL: &str = "https://baucord.mpw.sh/baucord-macos-intel.zip";
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub const DOWNLOAD_URL: &str = "https://baucord.mpw.sh/baucord-linux-x64.zip";
 
 /// Handles returned to App.
@@ -45,10 +48,7 @@ pub fn show(sender: app::Sender<UiMessage>) -> SplashHandles {
     let mut wind = window::Window::default()
         .with_size(w, h)
         .with_label("baucord");
-    wind.set_pos(
-        ((screen_w as i32) - w) / 2,
-        ((screen_h as i32) - h) / 2,
-    );
+    wind.set_pos(((screen_w as i32) - w) / 2, ((screen_h as i32) - h) / 2);
     wind.make_resizable(false);
     wind.set_color(theme::BG_PRIMARY);
     crate::ui::set_window_icon(&mut wind);
@@ -102,10 +102,7 @@ pub fn show_update_prompt(
     let mut wind = window::Window::default()
         .with_size(w, h)
         .with_label("baucord — Update Available");
-    wind.set_pos(
-        ((screen_w as i32) - w) / 2,
-        ((screen_h as i32) - h) / 2,
-    );
+    wind.set_pos(((screen_w as i32) - w) / 2, ((screen_h as i32) - h) / 2);
     wind.make_resizable(false);
     wind.set_color(theme::BG_PRIMARY);
     crate::ui::set_window_icon(&mut wind);
@@ -121,9 +118,7 @@ pub fn show_update_prompt(
     title.set_label_color(theme::TEXT_PRIMARY);
     col.fixed(&title, 30);
 
-    let msg = format!(
-        "Your version: {CURRENT_VERSION}\nLatest version: {remote_version}"
-    );
+    let msg = format!("Your version: {CURRENT_VERSION}\nLatest version: {remote_version}");
     let mut info = frame::Frame::default()
         .with_label(&msg)
         .with_align(enums::Align::Center | enums::Align::Inside);

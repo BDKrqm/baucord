@@ -11,8 +11,8 @@
 
 use std::io::Read;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use fltk::{prelude::*, *};
 use log::{info, warn};
@@ -33,11 +33,8 @@ pub fn show(sender: app::Sender<UiMessage>, remote_version: &str) -> window::Win
 
     let mut wind = window::Window::default()
         .with_size(w, h)
-        .with_label("baucord — Updating");
-    wind.set_pos(
-        ((screen_w as i32) - w) / 2,
-        ((screen_h as i32) - h) / 2,
-    );
+        .with_label("Updating");
+    wind.set_pos(((screen_w as i32) - w) / 2, ((screen_h as i32) - h) / 2);
     wind.make_resizable(false);
     wind.set_color(theme::BG_PRIMARY);
     crate::ui::set_window_icon(&mut wind);
@@ -73,7 +70,11 @@ pub fn show(sender: app::Sender<UiMessage>, remote_version: &str) -> window::Win
         let filled = (bar_w as f32 * val) as i32;
 
         if filled > 0 {
-            let color = if val >= 1.0 { theme::SUCCESS } else { theme::ACCENT };
+            let color = if val >= 1.0 {
+                theme::SUCCESS
+            } else {
+                theme::ACCENT
+            };
             draw::set_draw_color(color);
             draw::draw_rectf(frm.x() + 2, frm.y() + 3, filled, frm.h() - 6);
         }
@@ -198,11 +199,8 @@ pub fn show_complete(
 
     let mut wind = window::Window::default()
         .with_size(w, h)
-        .with_label("baucord — Update Ready");
-    wind.set_pos(
-        ((screen_w as i32) - w) / 2,
-        ((screen_h as i32) - h) / 2,
-    );
+        .with_label("Update Ready");
+    wind.set_pos(((screen_w as i32) - w) / 2, ((screen_h as i32) - h) / 2);
     wind.make_resizable(false);
     wind.set_color(theme::BG_PRIMARY);
     crate::ui::set_window_icon(&mut wind);
@@ -293,11 +291,8 @@ pub fn show_error(
 
     let mut wind = window::Window::default()
         .with_size(w, h)
-        .with_label("baucord — Update Failed");
-    wind.set_pos(
-        ((screen_w as i32) - w) / 2,
-        ((screen_h as i32) - h) / 2,
-    );
+        .with_label("Update Failed");
+    wind.set_pos(((screen_w as i32) - w) / 2, ((screen_h as i32) - h) / 2);
     wind.make_resizable(false);
     wind.set_color(theme::BG_PRIMARY);
     crate::ui::set_window_icon(&mut wind);
@@ -417,8 +412,7 @@ fn download_zip(
             break;
         }
 
-        std::io::Write::write_all(&mut file, &buf[..n])
-            .map_err(|e| format!("Write error: {e}"))?;
+        std::io::Write::write_all(&mut file, &buf[..n]).map_err(|e| format!("Write error: {e}"))?;
 
         downloaded += n as u64;
 
@@ -433,3 +427,4 @@ fn download_zip(
 
     Ok(dest)
 }
+
