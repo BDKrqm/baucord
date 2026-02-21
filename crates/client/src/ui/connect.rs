@@ -19,7 +19,7 @@ pub fn show(
 ) -> (window::Window, frame::Frame) {
     let mut wind = window::Window::default()
         .with_size(600, 480)
-        .with_label("baucord - Connect");
+        .with_label("Connect");
     wind.make_resizable(false);
     wind.set_color(theme::BG_PRIMARY);
     super::set_window_icon(&mut wind);

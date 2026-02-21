@@ -217,7 +217,7 @@ pub fn show_complete(
     col.fixed(&title, 30);
 
     let mut info = frame::Frame::default()
-        .with_label("Close baucord and extract the zip to update.")
+        .with_label("Close and extract the zip to update.")
         .with_align(enums::Align::Center | enums::Align::Inside);
     info.set_label_size(12);
     info.set_label_color(theme::TEXT_SECONDARY);

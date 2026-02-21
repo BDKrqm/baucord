@@ -84,6 +84,12 @@ pub enum UiMessage {
     ShowError(String),
     ClearError,
 
+    // ── Keybinds ────────────────────────────────────────────────────
+    SetKeybind {
+        action: crate::config::BindableAction,
+        bind: String,
+    },
+
     // ── Application lifecycle ───────────────────────────────────────
     Shutdown,
 }

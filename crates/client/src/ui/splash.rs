@@ -101,7 +101,7 @@ pub fn show_update_prompt(
 
     let mut wind = window::Window::default()
         .with_size(w, h)
-        .with_label("baucord — Update Available");
+        .with_label("Update Available");
     wind.set_pos(((screen_w as i32) - w) / 2, ((screen_h as i32) - h) / 2);
     wind.make_resizable(false);
     wind.set_color(theme::BG_PRIMARY);

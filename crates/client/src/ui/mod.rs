@@ -1,9 +1,9 @@
 // ui/mod.rs
 pub mod chat;
+pub mod sidebar;
 pub mod connect;
 pub mod messages;
 pub mod settings;
-pub mod sidebar;
 pub mod splash;
 pub mod update;
 use fltk::prelude::*;

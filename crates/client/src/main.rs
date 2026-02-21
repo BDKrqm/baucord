@@ -3,6 +3,7 @@
 
 mod app;
 mod config;
+mod hotkeys;
 mod network;
 mod ui;
 mod voice;

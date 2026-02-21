@@ -16,12 +16,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::{
-    config::{Settings, peer_key},
+    config::{BindableAction, Settings, peer_key},
+    hotkeys::HotkeyManager,
     network::{NetworkControl, NetworkMessage, NetworkThreadHandle},
     ui::{chat::Chat, messages::UiMessage, sidebar::Sidebar},
     voice::{VoiceControl, VoiceEvent, VoiceThreadHandle},
 };
 use core::PeerAudioSettings;
+use core::SoundType;
 use ui::theme;
 
 // ── Public types ────────────────────────────────────────────────────────
@@ -68,6 +70,7 @@ pub struct App {
     chat: Option<Chat>,
     error_frame: Option<frame::Frame>,
     settings_window_open: bool,
+    hotkeys: Option<HotkeyManager>,
 }
 
 impl App {
@@ -128,10 +131,14 @@ impl App {
             chat: None,
             error_frame: None,
             settings_window_open: false,
+            hotkeys: None,
         }
     }
 
     pub fn run(&mut self) {
+        // Register global hotkeys on the main thread (required by the OS).
+        self.hotkeys = Some(HotkeyManager::new(&self.settings));
+
         let handles = crate::ui::splash::show(self.sender);
         self.splash_window = Some(handles.window);
 
@@ -139,6 +146,28 @@ impl App {
             // UI messages
             while let Some(msg) = self.receiver.recv() {
                 self.handle_ui_message(msg);
+            }
+
+            // Global hotkeys — collect first, then handle (avoids borrow conflict)
+            let mut hotkey_actions = Vec::new();
+            if let Some(ref hotkeys) = self.hotkeys {
+                while let Some(action) = hotkeys.poll() {
+                    hotkey_actions.push(action);
+                }
+            }
+            for action in hotkey_actions {
+                match action {
+                    BindableAction::ToggleMute => {
+                        if self.connected {
+                            self.handle_toggle_mute();
+                        }
+                    }
+                    BindableAction::ToggleDeafen => {
+                        if self.connected {
+                            self.handle_toggle_deafen();
+                        }
+                    }
+                }
             }
 
             // Network messages (bounded drain)
@@ -181,10 +210,7 @@ impl App {
         match evt {
             VoiceEvent::Started => {
                 info!("Voice engine ready");
-                self.voice
-                    .tx
-                    .send(VoiceControl::PlaySound(core::SoundType::UserJoined))
-                    .ok();
+                self.voice.tx.send(VoiceControl::PlaySound(SoundType::UserJoined)).ok();
             }
             VoiceEvent::Error(e) => {
                 self.show_error(&e);
@@ -240,10 +266,7 @@ impl App {
                 if let Some(chat) = &mut self.chat {
                     chat.handle_text_message(username, text);
                 }
-                self.voice
-                    .tx
-                    .send(VoiceControl::PlaySound(core::SoundType::UserChat))
-                    .ok();
+                self.voice.tx.send(VoiceControl::PlaySound(SoundType::UserChat)).ok();
             }
             NetworkMessage::UserSpeaking {
                 client_id,
@@ -443,6 +466,12 @@ impl App {
                 }
                 self.settings.save();
             }
+            UiMessage::SetKeybind { action, bind } => {
+                self.settings.set_bind(action, bind);
+                if let Some(ref mut hotkeys) = self.hotkeys {
+                    hotkeys.update(&self.settings);
+                }
+            }
             UiMessage::Shutdown => {
                 // Just quit FLTK — actual cleanup happens after the event
                 // loop exits in run(), which calls shutdown().
@@ -572,10 +601,7 @@ impl App {
         if let Some(chat) = &mut self.chat {
             chat.handle_user_joined(username);
         }
-        self.voice
-            .tx
-            .send(VoiceControl::PlaySound(core::SoundType::UserJoined))
-            .ok();
+        self.voice.tx.send(VoiceControl::PlaySound(SoundType::UserJoined)).ok();
         self.update_user_list();
     }
 
@@ -586,10 +612,7 @@ impl App {
         if let Some(chat) = &mut self.chat {
             chat.handle_user_left(username);
         }
-        self.voice
-            .tx
-            .send(VoiceControl::PlaySound(core::SoundType::UserLeft))
-            .ok();
+        self.voice.tx.send(VoiceControl::PlaySound(SoundType::UserLeft)).ok();
         self.update_user_list();
     }
 
@@ -803,10 +826,9 @@ impl App {
     }
 
     fn show_main_screen(&mut self) {
-        let title = format!("baucord v{}", env!("CARGO_PKG_VERSION"));
         let mut wind = window::Window::default()
             .with_size(self.settings.window_width, self.settings.window_height)
-            .with_label(&title);
+            .with_label("baucord");
         wind.make_resizable(true);
         wind.set_color(theme::BG_PRIMARY);
         crate::ui::set_window_icon(&mut wind);
@@ -856,15 +878,26 @@ impl App {
             .inspect_err(|e| warn!("Failed to list output devices: {e}"))
             .unwrap_or_default();
 
+        // Center settings window on the main window
+        let (px, py, pw, ph) = if let Some(ref w) = self.main_window {
+            (w.x(), w.y(), w.w(), w.h())
+        } else {
+            let (sw, sh) = app::screen_size();
+            (0, 0, sw as i32, sh as i32)
+        };
+
         SettingsWindow::show(
             self.sender,
             self.settings.clone(),
             input_devices,
             output_devices,
-            self.voice.shared.input_level.clone(),
             self.voice.shared.output_level.clone(),
             self.voice.shared.denoised_level.clone(),
             self.voice.shared.speaking.clone(),
+            px,
+            py,
+            pw,
+            ph,
         );
     }
 
