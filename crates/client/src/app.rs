@@ -23,7 +23,6 @@ use crate::{
 };
 use core::PeerAudioSettings;
 use ui::theme;
-use ui::widgets::{controls, style};
 
 // ── Public types ────────────────────────────────────────────────────────
 
@@ -61,6 +60,8 @@ pub struct App {
     is_testing_mic_shared: Arc<AtomicBool>,
 
     // UI
+    splash_window: Option<window::Window>,
+    update_window: Option<window::Window>,
     connection_window: Option<window::Window>,
     main_window: Option<window::Window>,
     sidebar: Option<Sidebar>,
@@ -94,7 +95,7 @@ impl App {
             wake.clone(),
         );
 
-        let network = NetworkThreadHandle::spawn_with_channels(
+        let network = NetworkThreadHandle::spawn(
             network_tx,
             network_control_rx,
             network_msg_tx,
@@ -119,6 +120,8 @@ impl App {
             is_deafened: false,
             is_testing_mic: false,
             is_testing_mic_shared,
+            splash_window: None,
+            update_window: None,
             connection_window: None,
             main_window: None,
             sidebar: None,
@@ -129,7 +132,8 @@ impl App {
     }
 
     pub fn run(&mut self) {
-        self.show_connection_screen();
+        let handles = crate::ui::splash::show(self.sender);
+        self.splash_window = Some(handles.window);
 
         while self.app.wait() {
             // UI messages
@@ -355,6 +359,67 @@ impl App {
                 self.settings.output_device = d.clone();
                 self.voice.tx.send(VoiceControl::SetOutputDevice(d)).ok();
             }
+
+            // ── Update flow ─────────────────────────────────────────
+            UiMessage::VersionCheckComplete(result) => {
+                use crate::ui::messages::VersionCheckResult;
+                match result {
+                    VersionCheckResult::UpdateAvailable { remote_version } => {
+                        if let Some(splash) = &mut self.splash_window {
+                            let prompt = crate::ui::splash::show_update_prompt(
+                                self.sender,
+                                &remote_version,
+                                splash,
+                            );
+                            // The splash is now hidden; track the prompt as the new splash
+                            self.splash_window = Some(prompt);
+                        }
+                    }
+                    VersionCheckResult::UpToDate => {
+                        self.dismiss_update_flow_and_connect();
+                    }
+                }
+            }
+            UiMessage::SkipUpdate => {
+                self.dismiss_update_flow_and_connect();
+            }
+            UiMessage::StartDownload(remote_version) => {
+                if let Some(mut w) = self.splash_window.take() {
+                    w.end();   // end any active group context
+                    w.hide();
+                }
+                let wind = crate::ui::update::show(self.sender, &remote_version);
+                self.update_window = Some(wind);
+            }
+            UiMessage::DownloadComplete(path) => {
+                if let Some(wind) = &mut self.update_window {
+                    let complete = crate::ui::update::show_complete(self.sender, &path, wind);
+                    self.update_window = Some(complete);
+                }
+            }
+            UiMessage::DownloadFailed(error) => {
+                if let Some(wind) = &mut self.update_window {
+                    let err_wind = crate::ui::update::show_error(self.sender, &error, wind);
+                    self.update_window = Some(err_wind);
+                }
+            }
+            UiMessage::DownloadCancelled => {
+                self.dismiss_update_flow_and_connect();
+            }
+            UiMessage::OpenUpdateAndQuit(path) => {
+                // Open the containing folder so the user can drag/drop
+                if let Some(parent) = std::path::Path::new(&path).parent() {
+                    if let Err(e) = open::that(parent) {
+                        warn!("Failed to open folder: {e}");
+                    }
+                }
+                // Open the zip itself in the system zip handler
+                if let Err(e) = open::that(&path) {
+                    warn!("Failed to open {path}: {e}");
+                }
+                self.app.quit();
+            }
+
             UiMessage::ShowError(e) => {
                 self.show_error(&e);
             }
@@ -702,99 +767,22 @@ impl App {
         }
     }
 
-    fn set_window_icon(wind: &mut window::Window) {
-        if let Ok(icon) =
-            fltk::image::PngImage::from_data(include_bytes!("../../../assets/icon.png"))
-        {
-            wind.set_icon(Some(icon));
+    /// Dismiss any update-flow windows (splash or update) and show connect.
+    fn dismiss_update_flow_and_connect(&mut self) {
+        if let Some(mut w) = self.splash_window.take() {
+            w.hide();
+        }
+        if let Some(mut w) = self.update_window.take() {
+            w.hide();
+        }
+        if self.connection_window.is_none() {
+            self.show_connection_screen();
         }
     }
 
     fn show_connection_screen(&mut self) {
-        let mut wind = window::Window::default()
-            .with_size(600, 480)
-            .with_label("baucord - Connect");
-        wind.make_resizable(false);
-        wind.set_color(theme::BG_PRIMARY);
-        Self::set_window_icon(&mut wind);
-
-        let mut col = group::Flex::default_fill().column();
-        col.set_margins(20, 20, 20, 20);
-        col.set_spacing(15);
-
-        let mut title = frame::Frame::default()
-            .with_label("baucord")
-            .with_align(enums::Align::Center);
-        title.set_label_size(32);
-        title.set_label_color(theme::TEXT_PRIMARY);
-        col.fixed(&title, 50);
-
-        let mut subtitle = frame::Frame::default()
-            .with_label("We have discord at home")
-            .with_align(enums::Align::Center);
-        subtitle.set_label_size(12);
-        subtitle.set_label_color(theme::TEXT_SECONDARY);
-        col.fixed(&subtitle, 20);
-
-        let mut nick_frame = frame::Frame::default()
-            .with_label("Nickname")
-            .with_align(enums::Align::Left | enums::Align::Inside);
-        nick_frame.set_label_color(theme::TEXT_SECONDARY);
-        nick_frame.set_label_size(11);
-        col.fixed(&nick_frame, 20);
-
-        let mut nick_input = input::Input::default();
-        nick_input.set_value(&self.settings.nickname);
-        style::style_input(&mut nick_input);
-        col.fixed(&nick_input, 35);
-
-        let mut addr_frame = frame::Frame::default()
-            .with_label("Server Address")
-            .with_align(enums::Align::Left | enums::Align::Inside);
-        addr_frame.set_label_color(theme::TEXT_SECONDARY);
-        addr_frame.set_label_size(11);
-        col.fixed(&addr_frame, 20);
-
-        let mut addr_input = input::Input::default();
-        addr_input.set_value(&self.settings.last_server);
-        style::style_input(&mut addr_input);
-        col.fixed(&addr_input, 35);
-
-        let mut error_frame = frame::Frame::default().with_align(enums::Align::Center);
-        error_frame.set_label_color(theme::DANGER);
-        error_frame.set_label_size(12);
-        col.fixed(&error_frame, 25);
+        let (wind, error_frame) = crate::ui::connect::show(self.sender, &self.settings);
         self.error_frame = Some(error_frame);
-
-        let mut connect_btn = controls::accent_button("Connect", theme::ACCENT);
-        col.fixed(&connect_btn, 40);
-
-        col.end();
-        wind.end();
-        wind.show();
-
-        let sender = self.sender;
-        connect_btn.set_callback(move |_| {
-            let nickname = nick_input.value();
-            let server = addr_input.value();
-            if nickname.trim().is_empty() {
-                sender.send(UiMessage::ShowError("Nickname cannot be empty".into()));
-            } else {
-                sender.send(UiMessage::Connect { nickname, server });
-            }
-        });
-
-        // Intercept window close — route through our shutdown path instead
-        // of letting FLTK hide the window silently (which used to leave
-        // worker threads running with no UI to control them).
-        let sender = self.sender;
-        wind.set_callback(move |w| {
-            if app::event() == enums::Event::Close {
-                sender.send(UiMessage::Shutdown);
-                w.hide();
-            }
-        });
-
         self.connection_window = Some(wind);
     }
 
@@ -804,7 +792,7 @@ impl App {
             .with_label("baucord");
         wind.make_resizable(true);
         wind.set_color(theme::BG_PRIMARY);
-        Self::set_window_icon(&mut wind);
+        crate::ui::set_window_icon(&mut wind);
 
         if let (Some(x), Some(y)) = (self.settings.window_x, self.settings.window_y) {
             wind.set_pos(x, y);

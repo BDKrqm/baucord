@@ -110,7 +110,9 @@ jobs:
           files: artifacts/*.zip
 
       - name: Prepare web files
-        run: cp artifacts/*.zip web/
+        run: |
+          cp artifacts/*.zip web/
+          grep '^version' crates/client/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/' > web/version
 
       - name: Upload to R2
         uses: jakejarvis/s3-sync-action@v0.5.1

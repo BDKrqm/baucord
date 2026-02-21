@@ -1,6 +1,15 @@
 // ui/messages.rs
 use renet::ClientId;
 
+/// Result of the background version check.
+#[derive(Debug, Clone)]
+pub enum VersionCheckResult {
+    /// Remote version is newer.
+    UpdateAvailable { remote_version: String },
+    /// Up to date, or the check failed (don't block the user).
+    UpToDate,
+}
+
 #[derive(Debug, Clone)]
 pub enum UiMessage {
     // ── Connection flow ─────────────────────────────────────────────
@@ -54,6 +63,22 @@ pub enum UiMessage {
     // ── Device management ───────────────────────────────────────────
     SetInputDevice(Option<String>),
     SetOutputDevice(Option<String>),
+
+    // ── Update flow ─────────────────────────────────────────────────
+    /// Background version check finished.
+    VersionCheckComplete(VersionCheckResult),
+    /// User chose to skip the update and proceed to connect.
+    SkipUpdate,
+    /// User clicked "Update" — start the download.
+    StartDownload(String),
+    /// Download thread finished successfully. Contains the file path.
+    DownloadComplete(String),
+    /// Download thread hit an error.
+    DownloadFailed(String),
+    /// User cancelled an in-progress download.
+    DownloadCancelled,
+    /// User clicked "Open File" — open the zip and shut down.
+    OpenUpdateAndQuit(String),
 
     // ── UI updates ──────────────────────────────────────────────────
     ShowError(String),

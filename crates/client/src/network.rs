@@ -658,11 +658,12 @@ pub struct NetworkThreadHandle {
 }
 
 impl NetworkThreadHandle {
-    /// Spawn the network thread using pre-created channels.
+    /// Spawn the network thread with pre-created channels.
     ///
-    /// This allows the caller to give `network_tx` to the voice thread
-    /// before the network thread is spawned (resolving the circular dependency).
-    pub fn spawn_with_channels(
+    /// The caller creates channels externally so that `network_tx` can be
+    /// shared with the voice thread before the network thread starts
+    /// (resolving the circular dependency).
+    pub fn spawn(
         tx: Sender<NetworkControl>,
         control_rx: Receiver<NetworkControl>,
         msg_tx: Sender<NetworkMessage>,
@@ -679,13 +680,6 @@ impl NetworkThreadHandle {
             msg_rx,
             join_handle: Some(join_handle),
         }
-    }
-
-    /// Convenience: spawn with internally created channels.
-    pub fn spawn(voice_tx: Sender<VoiceControl>, wake: WakeFn) -> Self {
-        let (tx, control_rx) = bounded::<NetworkControl>(256);
-        let (msg_tx, msg_rx) = bounded::<NetworkMessage>(256);
-        Self::spawn_with_channels(tx, control_rx, msg_tx, msg_rx, voice_tx, wake)
     }
 
     /// Send shutdown and wait for the thread to exit.
