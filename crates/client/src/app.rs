@@ -181,6 +181,10 @@ impl App {
         match evt {
             VoiceEvent::Started => {
                 info!("Voice engine ready");
+                self.voice
+                    .tx
+                    .send(VoiceControl::PlaySound(core::SoundType::UserJoined))
+                    .ok();
             }
             VoiceEvent::Error(e) => {
                 self.show_error(&e);
@@ -236,6 +240,10 @@ impl App {
                 if let Some(chat) = &mut self.chat {
                     chat.handle_text_message(username, text);
                 }
+                self.voice
+                    .tx
+                    .send(VoiceControl::PlaySound(core::SoundType::UserChat))
+                    .ok();
             }
             NetworkMessage::UserSpeaking {
                 client_id,
@@ -564,6 +572,10 @@ impl App {
         if let Some(chat) = &mut self.chat {
             chat.handle_user_joined(username);
         }
+        self.voice
+            .tx
+            .send(VoiceControl::PlaySound(core::SoundType::UserJoined))
+            .ok();
         self.update_user_list();
     }
 
@@ -574,6 +586,10 @@ impl App {
         if let Some(chat) = &mut self.chat {
             chat.handle_user_left(username);
         }
+        self.voice
+            .tx
+            .send(VoiceControl::PlaySound(core::SoundType::UserLeft))
+            .ok();
         self.update_user_list();
     }
 
@@ -787,9 +803,10 @@ impl App {
     }
 
     fn show_main_screen(&mut self) {
+        let title = format!("baucord v{}", env!("CARGO_PKG_VERSION"));
         let mut wind = window::Window::default()
             .with_size(self.settings.window_width, self.settings.window_height)
-            .with_label("baucord");
+            .with_label(&title);
         wind.make_resizable(true);
         wind.set_color(theme::BG_PRIMARY);
         crate::ui::set_window_icon(&mut wind);

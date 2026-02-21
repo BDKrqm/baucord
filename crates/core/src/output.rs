@@ -6,6 +6,7 @@
 use crate::config::PeerAudioSettings;
 use crate::jitter_buffer::{AdaptiveJitterBuffer, DecodedFrame};
 use crate::resampler::build_output_resampler;
+use crate::sounds::{SoundBank, SoundType};
 use crate::stats::AudioStats;
 use crate::OPUS_SAMPLE_RATE;
 
@@ -28,6 +29,7 @@ pub struct AudioOutput {
     device_config: SupportedStreamConfig,
     stream: Option<Stream>,
     decoder_rx: Option<Receiver<DecodedFrame>>,
+    sound_rx: Option<Receiver<SoundType>>,
 
     ring_producer: Option<Producer<f32>>,
     ring_consumer: Option<Consumer<f32>>,
@@ -52,6 +54,7 @@ impl AudioOutput {
     pub fn new(
         device_name: Option<&str>,
         decoder_rx: Receiver<DecodedFrame>,
+        sound_rx: Receiver<SoundType>,
         peer_settings: Arc<Mutex<HashMap<u64, PeerAudioSettings>>>,
         stats: Arc<AudioStats>,
         output_gain: f32,
@@ -100,6 +103,7 @@ impl AudioOutput {
             deafened: Arc::new(AtomicBool::new(false)),
             stats,
             decoder_rx: Some(decoder_rx),
+            sound_rx: Some(sound_rx),
         })
     }
 
@@ -117,12 +121,13 @@ impl AudioOutput {
         let format = self.device_config.sample_format();
 
         // Start producer worker BEFORE the stream so it's ready when callbacks arrive
-        if let (Some(ring_producer), Some(decoder_rx)) =
-            (self.ring_producer.take(), self.decoder_rx.take())
+        if let (Some(ring_producer), Some(decoder_rx), Some(sound_rx)) =
+            (self.ring_producer.take(), self.decoder_rx.take(), self.sound_rx.take())
         {
             let handle = Self::spawn_worker(
                 ring_producer,
                 decoder_rx,
+                sound_rx,
                 self.peer_settings.clone(),
                 self.stats.clone(),
                 self.should_stop.clone(),
@@ -216,6 +221,7 @@ impl AudioOutput {
     fn spawn_worker(
         mut ring_producer: Producer<f32>,
         decoder_rx: Receiver<DecodedFrame>,
+        sound_rx: Receiver<SoundType>,
         peer_settings: Arc<Mutex<HashMap<u64, PeerAudioSettings>>>,
         stats: Arc<AudioStats>,
         should_stop: Arc<AtomicBool>,
@@ -227,6 +233,12 @@ impl AudioOutput {
         thread::spawn(move || {
             let mut jitter_buffer =
                 AdaptiveJitterBuffer::new(OPUS_SAMPLE_RATE as usize, 10, peer_settings);
+
+            // Decode all notification sounds once at startup
+            let sound_bank = SoundBank::new();
+
+            // Currently playing notification: (samples, cursor)
+            let mut playing: Option<(Vec<f32>, usize)> = None;
 
             // Build output resampler EAGERLY (not in the audio callback)
             let needs_resample = device_sample_rate != OPUS_SAMPLE_RATE;
@@ -269,6 +281,15 @@ impl AudioOutput {
                     }
                 }
 
+                // Check for new notification sounds (latest wins)
+                while let Ok(sound) = sound_rx.try_recv() {
+                    let samples = sound_bank.get(sound);
+                    if !samples.is_empty() {
+                        playing = Some((samples.to_vec(), 0));
+                        info!("🔔 Playing notification: {sound:?}");
+                    }
+                }
+
                 // Fill the ring up to a target level, not just one hop.
                 // The cpal callback drains the ring at the device's hardware
                 // clock rate, which may be slightly faster than our 10ms tick.
@@ -292,13 +313,30 @@ impl AudioOutput {
                         hop_buf.fill(0.0);
                     } else {
                         jitter_buffer.pull_mixed(HOP, &mut hop_buf);
+                    }
 
-                        // Apply master output gain
-                        let gain = f32::from_bits(output_gain.load(Ordering::Relaxed));
-                        if (gain - 1.0).abs() > f32::EPSILON {
-                            for s in hop_buf.iter_mut() {
-                                *s = (*s * gain).clamp(-0.99, 0.99);
-                            }
+                    // Mix notification sound into hop buffer (at 48 kHz,
+                    // before gain so it respects the master volume).
+                    // Notifications play even when deafened — you should
+                    // still hear join/leave events.
+                    if let Some((ref samples, ref mut cursor)) = playing {
+                        let remaining = samples.len() - *cursor;
+                        let to_mix = remaining.min(HOP);
+                        for i in 0..to_mix {
+                            hop_buf[i] = (hop_buf[i] + samples[*cursor + i]).clamp(-0.99, 0.99);
+                        }
+                        *cursor += to_mix;
+                        if *cursor >= samples.len() {
+                            playing = None;
+                        }
+                    }
+
+                    // Apply master output gain (always — notifications
+                    // need gain even when deafened).
+                    let gain = f32::from_bits(output_gain.load(Ordering::Relaxed));
+                    if (gain - 1.0).abs() > f32::EPSILON {
+                        for s in hop_buf.iter_mut() {
+                            *s = (*s * gain).clamp(-0.99, 0.99);
                         }
                     }
 

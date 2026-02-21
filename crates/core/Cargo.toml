@@ -12,6 +12,9 @@ serde = ["dep:serde"]
 cpal = "0.15"
 dasp_sample = "0.11"
 
+# Wav reading
+hound = "3.5"
+
 # Lock-free ring buffer (RT-safe)
 rtrb = "0.3"
 
@@ -47,3 +50,7 @@ path = "examples/stats.rs"
 [[example]]
 name = "latency_profile"
 path = "examples/latency.rs"
+
+[[example]]
+name = "sounds"
+path = "examples/play.rs"

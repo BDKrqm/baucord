@@ -467,6 +467,7 @@ dependencies = [
  "earshot",
  "env_logger",
  "fltk",
+ "hound",
  "log",
  "nnnoiseless",
  "opus",

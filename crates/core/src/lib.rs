@@ -25,11 +25,13 @@ pub mod limiter;
 mod output;
 mod packet;
 mod resampler;
+pub mod sounds;
 mod stats;
 mod vad;
 
 pub use config::{PeerAudioSettings, VoiceChatConfig};
 pub use packet::AudioPacket;
+pub use sounds::SoundType;
 pub use stats::AudioStats;
 
 use crossbeam_channel::{bounded, Receiver, Sender};
@@ -77,6 +79,10 @@ pub struct VoiceChat {
     decoder_to_audio_tx: Sender<DecodedFrame>,
     decoder_to_audio_rx: Receiver<DecodedFrame>,
 
+    /// Notification sounds → output worker.
+    sound_tx: Sender<sounds::SoundType>,
+    sound_rx: Option<Receiver<sounds::SoundType>>,
+
     // ── Thread handles ──────────────────────────────────────────────────
     encoder_thread: Option<std::thread::JoinHandle<()>>,
     decoder_pool: Option<decoder::DecoderPool>,
@@ -106,6 +112,7 @@ impl VoiceChat {
         let (encoder_to_network_tx, encoder_to_network_rx) = bounded(8);
         let (network_to_decoder_tx, network_to_decoder_rx) = bounded(max_peers * 4);
         let (decoder_to_audio_tx, decoder_to_audio_rx) = bounded(max_peers * 2);
+        let (sound_tx, sound_rx) = bounded::<sounds::SoundType>(4);
 
         // ── Shared atomics (created once, passed to children) ───────
         let output_gain = Arc::new(AtomicU32::new(config.output_gain.to_bits()));
@@ -135,6 +142,8 @@ impl VoiceChat {
             network_to_decoder_tx,
             decoder_to_audio_tx,
             decoder_to_audio_rx,
+            sound_tx,
+            sound_rx: Some(sound_rx),
             encoder_thread: Some(encoder_thread),
             decoder_pool: Some(decoder_pool),
             should_stop,
@@ -178,9 +187,17 @@ impl VoiceChat {
     }
 
     fn start_output(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Take the sound_rx if available, otherwise create a dummy one
+        // (covers the case where output is restarted after device swap).
+        let sound_rx = self.sound_rx.take().unwrap_or_else(|| {
+            let (_, rx) = bounded::<sounds::SoundType>(1);
+            rx
+        });
+
         let mut output = AudioOutput::new(
             self.config.output_device.as_deref(),
             self.decoder_to_audio_rx.clone(),
+            sound_rx,
             self.user_settings.clone(),
             self.stats.clone(),
             self.config.output_gain,
@@ -193,6 +210,15 @@ impl VoiceChat {
     }
 
     // ── Public API ───────────────────────────────────────────────────────
+
+    /// Play a notification sound through the output device.
+    ///
+    /// The sound is mixed into the output pipeline and respects the
+    /// master output gain. Works even when deafened.
+    /// No-op if the output isn't started yet.
+    pub fn play_sound(&self, sound: SoundType) {
+        let _ = self.sound_tx.try_send(sound);
+    }
 
     pub fn receive_packet(&self, packet: AudioPacket) {
         let _ = self.network_to_decoder_tx.try_send(packet);
@@ -354,6 +380,10 @@ impl VoiceChat {
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.output.take();
         self.config.output_device = device_name.map(String::from);
+        // Recreate sound channel so the new output worker gets a fresh rx.
+        let (sound_tx, sound_rx) = bounded::<sounds::SoundType>(4);
+        self.sound_tx = sound_tx;
+        self.sound_rx = Some(sound_rx);
         self.start_output()?;
         info!("Output device changed");
         Ok(())

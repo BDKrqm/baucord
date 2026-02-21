@@ -15,8 +15,8 @@ use ui::widgets::controls;
 
 // ── Embedded SVG icons for remote user mute/deafen state ────────────────
 
-const SVG_SELF_MUTED: &str = include_str!("../../../../assets/mic-muted.svg");
-const SVG_SELF_DEAFENED: &str = include_str!("../../../../assets/headphones-off.svg");
+const SVG_SELF_MUTED: &str = include_str!("../../../../assets/icons/mic-muted.svg");
+const SVG_SELF_DEAFENED: &str = include_str!("../../../../assets/icons/headphones-off.svg");
 
 /// Create a scaled SVG image from embedded data.
 fn svg_icon(data: &str, size: i32) -> Option<SvgImage> {

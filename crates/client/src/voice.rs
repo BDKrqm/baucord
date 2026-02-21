@@ -19,7 +19,7 @@ use log::info;
 
 use crate::config::Settings;
 use crate::network::NetworkControl;
-use core::{AudioPacket, PeerAudioSettings, VoiceChat, VoiceChatConfig};
+use core::{AudioPacket, PeerAudioSettings, SoundType, VoiceChat, VoiceChatConfig};
 
 /// A callback the worker thread invokes to wake the UI event loop.
 /// Injected at construction so this module never imports a UI crate.
@@ -46,6 +46,7 @@ pub enum VoiceControl {
     RemovePeer(u64),
     SetPeerAudio(u64, PeerAudioSettings),
     IncomingVoicePacket(AudioPacket),
+    PlaySound(SoundType),
     Shutdown,
 }
 
@@ -290,6 +291,11 @@ impl VoiceLoopState {
             VoiceControl::IncomingVoicePacket(packet) => {
                 if let Some(v) = &self.vc {
                     v.receive_packet(packet);
+                }
+            }
+            VoiceControl::PlaySound(sound) => {
+                if let Some(v) = &self.vc {
+                    v.play_sound(sound);
                 }
             }
             VoiceControl::Shutdown => {
