@@ -17,8 +17,10 @@ pub fn show(
     sender: app::Sender<UiMessage>,
     settings: &Settings,
 ) -> (window::Window, frame::Frame) {
+    let (cx, cy) = settings.center_child(600, 480);
     let mut wind = window::Window::default()
         .with_size(600, 480)
+        .with_pos(cx, cy)
         .with_label("Connect");
     wind.make_resizable(false);
     wind.set_color(theme::BG_PRIMARY);
@@ -54,7 +56,7 @@ pub fn show(
     col.fixed(&nick_frame, 20);
 
     let mut nick_input = input::Input::default();
-    nick_input.set_value(&settings.nickname);
+    nick_input.set_value(&settings.user.nickname);
     style::style_input(&mut nick_input);
     col.fixed(&nick_input, 35);
 
@@ -68,7 +70,7 @@ pub fn show(
     col.fixed(&addr_frame, 20);
 
     let mut addr_input = input::Input::default();
-    addr_input.set_value(&settings.last_server);
+    addr_input.set_value(&settings.server.address);
     style::style_input(&mut addr_input);
     col.fixed(&addr_input, 35);
 

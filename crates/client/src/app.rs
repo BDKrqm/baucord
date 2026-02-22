@@ -321,15 +321,15 @@ impl App {
                 self.handle_test_microphone(enabled);
             }
             UiMessage::SetGateThreshold(t) => {
-                self.settings.gate_threshold = t;
+                self.settings.audio.gate_threshold = t;
                 self.voice.tx.send(VoiceControl::SetGateThreshold(t)).ok();
             }
             UiMessage::SetInputGain(g) => {
-                self.settings.input_gain = g;
+                self.settings.audio.input.gain = g;
                 self.voice.tx.send(VoiceControl::SetInputGain(g)).ok();
             }
             UiMessage::SetOutputGain(g) => {
-                self.settings.output_gain = g;
+                self.settings.audio.output.gain = g;
                 self.voice.tx.send(VoiceControl::SetOutputGain(g)).ok();
             }
             UiMessage::MuteUser {
@@ -383,11 +383,11 @@ impl App {
                 self.settings.reset();
             }
             UiMessage::SetInputDevice(d) => {
-                self.settings.input_device = d.clone();
+                self.settings.audio.input.device = d.clone();
                 self.voice.tx.send(VoiceControl::SetInputDevice(d)).ok();
             }
             UiMessage::SetOutputDevice(d) => {
-                self.settings.output_device = d.clone();
+                self.settings.audio.output.device = d.clone();
                 self.voice.tx.send(VoiceControl::SetOutputDevice(d)).ok();
             }
 
@@ -485,8 +485,8 @@ impl App {
     // ════════════════════════════════════════════════════════════════════
 
     fn handle_connect(&mut self, nickname: String, server: String) {
-        self.settings.nickname = nickname.clone();
-        self.settings.last_server = server.clone();
+        self.settings.user.nickname = nickname.clone();
+        self.settings.server.address = server.clone();
         self.settings.save();
 
         let addr = match server.parse::<SocketAddr>() {
@@ -524,7 +524,7 @@ impl App {
 
         // Find our own client ID from the user list
         for (&id, name) in &users {
-            let is_us = name == &self.settings.nickname;
+            let is_us = name == &self.settings.user.nickname;
             self.users.insert(
                 id,
                 UserState {
@@ -827,13 +827,13 @@ impl App {
 
     fn show_main_screen(&mut self) {
         let mut wind = window::Window::default()
-            .with_size(self.settings.window_width, self.settings.window_height)
+            .with_size(self.settings.window.width, self.settings.window.height)
             .with_label("baucord");
         wind.make_resizable(true);
         wind.set_color(theme::BG_PRIMARY);
         crate::ui::set_window_icon(&mut wind);
 
-        if let (Some(x), Some(y)) = (self.settings.window_x, self.settings.window_y) {
+        if let (Some(x), Some(y)) = (self.settings.window.x, self.settings.window.y) {
             wind.set_pos(x, y);
         }
 
@@ -926,10 +926,10 @@ impl App {
 
         // 1. Save window geometry while the window still exists
         if let Some(ref w) = self.main_window {
-            self.settings.window_width = w.w();
-            self.settings.window_height = w.h();
-            self.settings.window_x = Some(w.x());
-            self.settings.window_y = Some(w.y());
+            self.settings.window.width = w.w();
+            self.settings.window.height = w.h();
+            self.settings.window.x = Some(w.x());
+            self.settings.window.y = Some(w.y());
         }
         self.settings.save();
 

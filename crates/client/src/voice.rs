@@ -84,12 +84,12 @@ impl SharedAudioState {
 
 fn settings_to_config(s: &Settings) -> VoiceChatConfig {
     VoiceChatConfig {
-        input_device: s.input_device.clone(),
-        output_device: s.output_device.clone(),
-        gate_threshold: s.gate_threshold,
+        input_device: s.audio.input.device.clone(),
+        output_device: s.audio.output.device.clone(),
+        gate_threshold: s.audio.gate_threshold,
         noise_suppression: true,
-        input_gain: s.input_gain,
-        output_gain: s.output_gain,
+        input_gain: s.audio.input.gain,
+        output_gain: s.audio.output.gain,
     }
 }
 

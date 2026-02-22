@@ -17,7 +17,6 @@ pub fn peer_key(username: &str) -> String {
 
 // ── Bindable actions ────────────────────────────────────────────────────
 
-/// All actions that can be bound to a global hotkey.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BindableAction {
@@ -41,11 +40,6 @@ impl BindableAction {
 
 // ── Keybind entry ───────────────────────────────────────────────────────
 
-/// A single keybind: pairs an action with a key combination string.
-///
-/// The `bind` field is human-readable: `"Ctrl+Shift+M"`, `"Alt+F1"`, `"F9"`.
-/// Modifiers: `Ctrl`, `Alt`, `Shift`. Separator: `+`.
-/// The key name uses `keyboard-types` Code names (KeyM, F1, Space, Digit0…).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KeybindEntry {
     pub action: BindableAction,
@@ -53,7 +47,6 @@ pub struct KeybindEntry {
 }
 
 impl KeybindEntry {
-    /// Parse the bind string into modifiers + key code.
     pub fn parse(&self) -> Option<ParsedKeybind> {
         parse_bind(&self.bind)
     }
@@ -63,29 +56,21 @@ impl KeybindEntry {
     }
 
     pub fn display(&self) -> &str {
-        if self.bind.is_empty() {
-            "Not set"
-        } else {
-            &self.bind
-        }
+        if self.bind.is_empty() { "Not set" } else { &self.bind }
     }
 }
 
-/// Result of parsing a bind string.
 pub struct ParsedKeybind {
     pub ctrl: bool,
     pub alt: bool,
     pub shift: bool,
-    /// Key code string, e.g. "KeyM", "F1", "Space".
     pub code: String,
 }
 
-/// Parse a bind string like "Ctrl+Shift+M" into components.
 pub fn parse_bind(s: &str) -> Option<ParsedKeybind> {
     if s.is_empty() {
         return None;
     }
-
     let mut ctrl = false;
     let mut alt = false;
     let mut shift = false;
@@ -101,87 +86,129 @@ pub fn parse_bind(s: &str) -> Option<ParsedKeybind> {
         }
     }
 
-    Some(ParsedKeybind {
-        ctrl,
-        alt,
-        shift,
-        code: code?,
-    })
+    Some(ParsedKeybind { ctrl, alt, shift, code: code? })
 }
 
-/// Build a bind string from components.
 pub fn build_bind_string(ctrl: bool, alt: bool, shift: bool, code: &str) -> String {
     let mut parts = Vec::new();
-    if ctrl {
-        parts.push("Ctrl");
-    }
-    if alt {
-        parts.push("Alt");
-    }
-    if shift {
-        parts.push("Shift");
-    }
+    if ctrl { parts.push("Ctrl"); }
+    if alt { parts.push("Alt"); }
+    if shift { parts.push("Shift"); }
     parts.push(code);
     parts.join("+")
 }
 
+// ── Settings sub-sections ───────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserSettings {
+    pub nickname: String,
+}
+
+impl Default for UserSettings {
+    fn default() -> Self {
+        Self { nickname: String::new() }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerSettings {
+    pub address: String,
+}
+
+impl Default for ServerSettings {
+    fn default() -> Self {
+        Self { address: "64.176.16.18:5000".to_string() }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioInputSettings {
+    pub device: Option<String>,
+    pub gain: f32,
+}
+
+impl Default for AudioInputSettings {
+    fn default() -> Self {
+        Self { device: None, gain: 1.0 }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioOutputSettings {
+    pub device: Option<String>,
+    pub gain: f32,
+}
+
+impl Default for AudioOutputSettings {
+    fn default() -> Self {
+        Self { device: None, gain: 1.0 }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioSettings {
+    pub input: AudioInputSettings,
+    pub output: AudioOutputSettings,
+    pub gate_threshold: f32,
+}
+
+impl Default for AudioSettings {
+    fn default() -> Self {
+        Self {
+            input: AudioInputSettings::default(),
+            output: AudioOutputSettings::default(),
+            gate_threshold: 0.005,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowSettings {
+    pub width: i32,
+    pub height: i32,
+    pub x: Option<i32>,
+    pub y: Option<i32>,
+}
+
+impl Default for WindowSettings {
+    fn default() -> Self {
+        Self { width: 1000, height: 700, x: None, y: None }
+    }
+}
+
 fn default_keybinds() -> Vec<KeybindEntry> {
     vec![
-        KeybindEntry {
-            action: BindableAction::ToggleMute,
-            bind: "Ctrl+Shift+KeyM".to_string(),
-        },
-        KeybindEntry {
-            action: BindableAction::ToggleDeafen,
-            bind: "Ctrl+Shift+KeyD".to_string(),
-        },
+        KeybindEntry { action: BindableAction::ToggleMute, bind: "Ctrl+Shift+KeyM".to_string() },
+        KeybindEntry { action: BindableAction::ToggleDeafen, bind: "Ctrl+Shift+KeyD".to_string() },
     ]
 }
 
-// ── Settings ────────────────────────────────────────────────────────────
+// ── Root settings ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
-    pub nickname: String,
-    pub last_server: String,
-
-    // Voice
-    pub gate_threshold: f32,
-    pub input_gain: f32,
-    pub output_gain: f32,
-
-    // Window
-    pub window_width: i32,
-    pub window_height: i32,
-    pub window_x: Option<i32>,
-    pub window_y: Option<i32>,
-
-    // Devices
-    pub input_device: Option<String>,
-    pub output_device: Option<String>,
-
-    // Keybinds
+    #[serde(default)]
+    pub user: UserSettings,
+    #[serde(default)]
+    pub server: ServerSettings,
+    #[serde(default)]
+    pub audio: AudioSettings,
+    #[serde(default)]
+    pub window: WindowSettings,
     #[serde(default = "default_keybinds")]
     pub keybinds: Vec<KeybindEntry>,
-
-    // Per-peer audio (keyed by hashed username)
+    #[serde(default)]
     pub peer_settings: HashMap<String, PeerAudioSettings>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            nickname: String::new(),
-            last_server: "64.176.16.18:5000".to_string(),
-            gate_threshold: 0.005,
-            input_gain: 1.0,
-            output_gain: 1.0,
-            window_width: 1000,
-            window_height: 700,
-            window_x: None,
-            window_y: None,
-            input_device: None,
-            output_device: None,
+            user: UserSettings::default(),
+            server: ServerSettings::default(),
+            audio: AudioSettings::default(),
+            window: WindowSettings::default(),
             keybinds: default_keybinds(),
             peer_settings: HashMap::new(),
         }
@@ -231,7 +258,6 @@ impl Settings {
         self.save();
     }
 
-    /// Get the bind string for a given action, or empty string if unbound.
     pub fn bind_for(&self, action: BindableAction) -> &str {
         self.keybinds
             .iter()
@@ -245,6 +271,20 @@ impl Settings {
             entry.bind = bind;
         } else {
             self.keybinds.push(KeybindEntry { action, bind });
+        }
+    }
+
+    /// Compute centered position for a child window of given size,
+    /// relative to the saved main window geometry (fallback: screen center).
+    pub fn center_child(&self, child_w: i32, child_h: i32) -> (i32, i32) {
+        if let (Some(wx), Some(wy)) = (self.window.x, self.window.y) {
+            (
+                wx + (self.window.width - child_w) / 2,
+                wy + (self.window.height - child_h) / 2,
+            )
+        } else {
+            let (sw, sh) = fltk::app::screen_size();
+            ((sw as i32 - child_w) / 2, (sh as i32 - child_h) / 2)
         }
     }
 }

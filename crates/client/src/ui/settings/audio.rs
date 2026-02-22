@@ -57,7 +57,7 @@ pub fn build(
         &mut input_choice,
         "System Default",
         &input_names,
-        settings.input_device.as_deref(),
+        settings.audio.input.device.as_deref(),
     );
 
     labels::field_label(&mut col, "Output Device (Speakers/Headphones)");
@@ -67,7 +67,7 @@ pub fn build(
         &mut output_choice,
         "System Default",
         &output_names,
-        settings.output_device.as_deref(),
+        settings.audio.output.device.as_deref(),
     );
 
     labels::hint_label(
@@ -86,7 +86,7 @@ pub fn build(
     labels::section_header(&mut col, "\u{1f3a4}", "INPUT");
 
     labels::field_label(&mut col, "Capture Level");
-    let threshold_rc = std::rc::Rc::new(std::cell::RefCell::new(settings.gate_threshold));
+    let threshold_rc = std::rc::Rc::new(std::cell::RefCell::new(settings.audio.gate_threshold));
     let vu_input = meter::gate(
         &mut col,
         denoised_level.clone(),
@@ -99,13 +99,13 @@ pub fn build(
         &mut col,
         0.0,
         2.0,
-        settings.input_gain as f64,
+        settings.audio.input.gain as f64,
         0.05,
         theme::ACCENT,
     );
     let input_gain_lbl = labels::hint_label(
         &mut col,
-        &format!("Gain: {}%", (settings.input_gain * 100.0) as i32),
+        &format!("Gain: {}%", (settings.audio.input.gain * 100.0) as i32),
     );
 
     labels::field_label(&mut col, "Input Sensitivity");
@@ -113,13 +113,13 @@ pub fn build(
         &mut col,
         0.005,
         0.10,
-        settings.gate_threshold as f64,
+        settings.audio.gate_threshold as f64,
         0.001,
         theme::ACCENT,
     );
     let vad_sens_lbl = labels::hint_label(
         &mut col,
-        &format_sensitivity(settings.gate_threshold as f64),
+        &format_sensitivity(settings.audio.gate_threshold as f64),
     );
     labels::hint_label(
         &mut col,
@@ -147,13 +147,13 @@ pub fn build(
         &mut col,
         0.0,
         2.0,
-        settings.output_gain as f64,
+        settings.audio.output.gain as f64,
         0.05,
         theme::CYAN,
     );
     let output_gain_lbl = labels::hint_label(
         &mut col,
-        &format!("Volume: {}%", (settings.output_gain * 100.0) as i32),
+        &format!("Volume: {}%", (settings.audio.output.gain * 100.0) as i32),
     );
 
     col.end();
