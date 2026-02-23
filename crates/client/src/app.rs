@@ -3,6 +3,7 @@
 // Owns the FLTK event loop and delegates to:
 //   - NetworkThreadHandle (network.rs) for renet client + protocol
 //   - VoiceThreadHandle   (voice.rs)   for audio capture/playback/encoding
+//   - ScreenThreadHandle  (screen.rs)  for screen capture/encode/decode
 //
 // Speaking state is driven by vc.is_speaking(), not inferred from packet flow.
 
@@ -19,7 +20,8 @@ use crate::{
     config::{BindableAction, Settings, peer_key},
     hotkeys::HotkeyManager,
     network::{NetworkControl, NetworkMessage, NetworkThreadHandle},
-    ui::{chat::Chat, messages::UiMessage, sidebar::Sidebar},
+    screen::{ScreenControl, ScreenEvent, ScreenThreadHandle},
+    ui::{chat::Chat, messages::UiMessage, sidebar::Sidebar, viewer::ViewerWindow},
     voice::{VoiceControl, VoiceEvent, VoiceThreadHandle},
 };
 use core::PeerAudioSettings;
@@ -50,6 +52,7 @@ pub struct App {
     // Thread handles (own the threads + their channels)
     network: NetworkThreadHandle,
     voice: VoiceThreadHandle,
+    screen: ScreenThreadHandle,
 
     // State
     users: HashMap<renet::ClientId, UserState>,
@@ -60,6 +63,11 @@ pub struct App {
     is_deafened: bool,
     is_testing_mic: bool,
     is_testing_mic_shared: Arc<AtomicBool>,
+
+    /// Active screen sharers: client_id → (width, height).
+    /// Updated when ScreenShareStarted/Stopped arrives from network.
+    active_sharers: HashMap<renet::ClientId, (u32, u32)>,
+    viewer_windows: HashMap<u64, ViewerWindow>,
 
     // UI
     splash_window: Option<window::Window>,
@@ -98,12 +106,16 @@ impl App {
             wake.clone(),
         );
 
+        // After spawning voice, before spawning network:
+        let screen = ScreenThreadHandle::spawn(network_tx.clone(), wake.clone());
+
         let network = NetworkThreadHandle::spawn(
             network_tx,
             network_control_rx,
             network_msg_tx,
             network_msg_rx,
             voice.tx.clone(),
+            screen.tx.clone(),
             wake,
         );
 
@@ -115,6 +127,7 @@ impl App {
             receiver,
             network,
             voice,
+            screen,
             users: HashMap::new(),
             our_client_id: None,
             connected: false,
@@ -123,6 +136,8 @@ impl App {
             is_deafened: false,
             is_testing_mic: false,
             is_testing_mic_shared,
+            active_sharers: HashMap::new(),
+            viewer_windows: HashMap::new(),
             splash_window: None,
             update_window: None,
             connection_window: None,
@@ -193,6 +208,17 @@ impl App {
                 }
             }
 
+            // Screen events (bounded drain)
+            for _ in 0..32 {
+                match self.screen.event_rx.try_recv() {
+                    Ok(evt) => {
+                        self.handle_screen_event(evt);
+                        needs_redraw = true;
+                    }
+                    Err(_) => break,
+                }
+            }
+
             if needs_redraw {
                 app::redraw();
             }
@@ -210,7 +236,10 @@ impl App {
         match evt {
             VoiceEvent::Started => {
                 info!("Voice engine ready");
-                self.voice.tx.send(VoiceControl::PlaySound(SoundType::UserJoined)).ok();
+                self.voice
+                    .tx
+                    .send(VoiceControl::PlaySound(SoundType::UserJoined))
+                    .ok();
             }
             VoiceEvent::Error(e) => {
                 self.show_error(&e);
@@ -223,6 +252,66 @@ impl App {
                     user.last_activity = Instant::now();
                 }
                 self.update_user_list();
+            }
+        }
+    }
+
+    fn handle_screen_event(&mut self, evt: ScreenEvent) {
+        match evt {
+            ScreenEvent::SharingStarted { quality } => {
+                info!("📺 Screen share started: {quality}");
+                if let Some(chat) = &mut self.chat {
+                    chat.handle_system_message(format!("Screen share started ({quality})"));
+                }
+            }
+            ScreenEvent::SharingStopped => {
+                info!("📺 Screen share stopped");
+                if let Some(chat) = &mut self.chat {
+                    chat.handle_system_message("Screen share stopped".to_string());
+                }
+            }
+            ScreenEvent::Error(e) => {
+                self.show_error(&format!("Screen share: {e}"));
+            }
+            ScreenEvent::FrameReady {
+                client_id,
+                width,
+                height,
+                rgba,
+            } => {
+                if let Some(viewer) = self.viewer_windows.get_mut(&client_id) {
+                    viewer.update_frame(rgba, width, height);
+                } else {
+                    // First frame — open a viewer window
+                    let username = self.username_for_u64(client_id);
+                    let mut viewer =
+                        ViewerWindow::new(client_id, &username, width, height, self.sender);
+                    viewer.update_frame(rgba, width, height);
+                    self.viewer_windows.insert(client_id, viewer);
+                    info!("📺 Opened viewer for {username} ({width}x{height})");
+                }
+            }
+            ScreenEvent::PeerStartedSharing {
+                client_id,
+                width,
+                height,
+            } => {
+                let username = self.username_for_u64(client_id);
+                info!("📺 {username} started sharing ({width}x{height})");
+                if let Some(chat) = &mut self.chat {
+                    chat.handle_system_message(format!("{username} started sharing their screen"));
+                }
+            }
+            ScreenEvent::PeerStoppedSharing { client_id } => {
+                let username = self.username_for_u64(client_id);
+                info!("📺 {username} stopped sharing");
+                if let Some(chat) = &mut self.chat {
+                    chat.handle_system_message(format!("{username} stopped sharing their screen"));
+                }
+                // Close viewer window if open
+                if let Some(mut viewer) = self.viewer_windows.remove(&client_id) {
+                    viewer.close();
+                }
             }
         }
     }
@@ -266,7 +355,11 @@ impl App {
                 if let Some(chat) = &mut self.chat {
                     chat.handle_text_message(username, text);
                 }
-                self.voice.tx.send(VoiceControl::PlaySound(SoundType::UserChat)).ok();
+                //removed chat sound for now
+                //self.voice
+                //    .tx
+                //    .send(VoiceControl::PlaySound(SoundType::UserChat))
+                //    .ok();
             }
             NetworkMessage::UserSpeaking {
                 client_id,
@@ -297,11 +390,43 @@ impl App {
                     sidebar.update_latency(rtt_ms, Some(audio_ms));
                 }
             }
+
+            // ── Screen share signaling (already routed to screen thread
+            //    by the network loop — here we just update app state) ────
+            NetworkMessage::ScreenShareStarted {
+                client_id,
+                width,
+                height,
+            } => {
+                self.active_sharers.insert(client_id, (width, height));
+                // TODO: show "Watch" button in sidebar for this user
+            }
+            NetworkMessage::ScreenShareStopped { client_id } => {
+                self.active_sharers.remove(&client_id);
+                // TODO: remove "Watch" button, close viewer window if open
+            }
+            NetworkMessage::VideoFrame { .. } => {
+                // Video frames are routed directly to the screen thread by the
+                // network loop. They should never arrive here, but if they do
+                // we silently ignore them.
+            }
         }
     }
 
     fn handle_ui_message(&mut self, msg: UiMessage) {
         match msg {
+            UiMessage::UnwatchPeer { client_id } => {
+                // User closed a viewer window — unsubscribe from stream
+                self.viewer_windows.remove(&client_id);
+                self.network
+                    .tx
+                    .send(NetworkControl::UnsubscribeScreen {
+                        target_id: client_id,
+                    })
+                    .ok();
+                let username = self.username_for_u64(client_id);
+                self.show_chat_system(&format!("Stopped watching {username}."));
+            }
             UiMessage::Connect { nickname, server } => {
                 self.handle_connect(nickname, server);
             }
@@ -309,7 +434,11 @@ impl App {
                 self.handle_disconnect();
             }
             UiMessage::SendChatMessage(text) => {
-                self.network.tx.send(NetworkControl::SendMessage(text)).ok();
+                if let Some(cmd) = text.strip_prefix('/') {
+                    self.handle_command(cmd);
+                } else {
+                    self.network.tx.send(NetworkControl::SendMessage(text)).ok();
+                }
             }
             UiMessage::ToggleMute => {
                 self.handle_toggle_mute();
@@ -321,15 +450,15 @@ impl App {
                 self.handle_test_microphone(enabled);
             }
             UiMessage::SetGateThreshold(t) => {
-                self.settings.gate_threshold = t;
+                self.settings.audio.gate_threshold = t;
                 self.voice.tx.send(VoiceControl::SetGateThreshold(t)).ok();
             }
             UiMessage::SetInputGain(g) => {
-                self.settings.input_gain = g;
+                self.settings.audio.input.gain = g;
                 self.voice.tx.send(VoiceControl::SetInputGain(g)).ok();
             }
             UiMessage::SetOutputGain(g) => {
-                self.settings.output_gain = g;
+                self.settings.audio.output.gain = g;
                 self.voice.tx.send(VoiceControl::SetOutputGain(g)).ok();
             }
             UiMessage::MuteUser {
@@ -383,11 +512,11 @@ impl App {
                 self.settings.reset();
             }
             UiMessage::SetInputDevice(d) => {
-                self.settings.input_device = d.clone();
+                self.settings.audio.input.device = d.clone();
                 self.voice.tx.send(VoiceControl::SetInputDevice(d)).ok();
             }
             UiMessage::SetOutputDevice(d) => {
-                self.settings.output_device = d.clone();
+                self.settings.audio.output.device = d.clone();
                 self.voice.tx.send(VoiceControl::SetOutputDevice(d)).ok();
             }
 
@@ -416,7 +545,7 @@ impl App {
             }
             UiMessage::StartDownload(remote_version) => {
                 if let Some(mut w) = self.splash_window.take() {
-                    w.end();   // end any active group context
+                    w.end(); // end any active group context
                     w.hide();
                 }
                 let wind = crate::ui::update::show(self.sender, &remote_version);
@@ -481,12 +610,138 @@ impl App {
     }
 
     // ════════════════════════════════════════════════════════════════════
+    //  CHAT COMMANDS (/share, /stopshare, /watch, /unwatch)
+    // ════════════════════════════════════════════════════════════════════
+
+    fn handle_command(&mut self, cmd: &str) {
+        let parts: Vec<&str> = cmd.split_whitespace().collect();
+        let Some(verb) = parts.first() else { return };
+
+        match *verb {
+            "share" => {
+                if self.screen.shared.is_sharing.load(Ordering::Relaxed) {
+                    self.show_chat_system("Already sharing. Use /stopshare first.");
+                    return;
+                }
+                // Default: primary monitor, 720p30
+                self.screen
+                    .tx
+                    .send(ScreenControl::StartSharing {
+                        quality: screencap::Quality::HD30,
+                        monitor_index: 0,
+                    })
+                    .ok();
+                self.show_chat_system("Starting screen share (720p 30fps)...");
+            }
+            "stopshare" => {
+                if !self.screen.shared.is_sharing.load(Ordering::Relaxed) {
+                    self.show_chat_system("Not currently sharing.");
+                    return;
+                }
+                self.screen.tx.send(ScreenControl::StopSharing).ok();
+            }
+            "watch" => {
+                let target_name = parts.get(1).copied();
+                let Some(target_id) = self.resolve_sharer(target_name) else {
+                    if target_name.is_some() {
+                        self.show_chat_system("That user is not sharing.");
+                    } else if self.active_sharers.is_empty() {
+                        self.show_chat_system("No one is sharing right now.");
+                    } else {
+                        let names: Vec<String> = self
+                            .active_sharers
+                            .keys()
+                            .map(|id| self.get_username(*id))
+                            .collect();
+                        self.show_chat_system(&format!(
+                            "Multiple sharers — specify a name: /watch <username>\nSharing: {}",
+                            names.join(", ")
+                        ));
+                    }
+                    return;
+                };
+
+                let username = self.get_username(target_id);
+                self.network
+                    .tx
+                    .send(NetworkControl::SubscribeScreen {
+                        target_id: u64::from(target_id),
+                    })
+                    .ok();
+                self.show_chat_system(&format!("Watching {username}'s screen..."));
+            }
+            "unwatch" => {
+                let target_name = parts.get(1).copied();
+                let Some(target_id) = self.resolve_sharer(target_name) else {
+                    self.show_chat_system("Specify who to stop watching: /unwatch <username>");
+                    return;
+                };
+
+                let username = self.get_username(target_id);
+                self.network
+                    .tx
+                    .send(NetworkControl::UnsubscribeScreen {
+                        target_id: u64::from(target_id),
+                    })
+                    .ok();
+                self.show_chat_system(&format!("Stopped watching {username}."));
+            }
+            _ => {
+                self.show_chat_system(&format!("Unknown command: /{verb}"));
+            }
+        }
+    }
+
+    /// Resolve a sharer by username. If `name` is None and there's exactly
+    /// one active sharer, return them. Otherwise return None.
+    fn resolve_sharer(&self, name: Option<&str>) -> Option<renet::ClientId> {
+        match name {
+            Some(target) => {
+                // Find client_id by username among active sharers
+                self.active_sharers
+                    .keys()
+                    .find(|&&id| {
+                        self.users
+                            .get(&id)
+                            .is_some_and(|u| u.username.eq_ignore_ascii_case(target))
+                    })
+                    .copied()
+            }
+            None => {
+                // Auto-resolve if exactly one sharer
+                if self.active_sharers.len() == 1 {
+                    self.active_sharers.keys().next().copied()
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// Show a system message in chat (not sent to server).
+    fn show_chat_system(&mut self, text: &str) {
+        if let Some(chat) = &mut self.chat {
+            chat.handle_system_message(text.to_string());
+        }
+    }
+
+    /// Look up username by u64 client id (for screen thread events which use u64).
+    fn username_for_u64(&self, raw_id: u64) -> String {
+        // Try to find a matching ClientId in our user map
+        self.users
+            .iter()
+            .find(|&(&id, _)| u64::from(id) == raw_id)
+            .map(|(_, u)| u.username.clone())
+            .unwrap_or_else(|| format!("User#{raw_id}"))
+    }
+
+    // ════════════════════════════════════════════════════════════════════
     //  CONNECTION HANDLERS
     // ════════════════════════════════════════════════════════════════════
 
     fn handle_connect(&mut self, nickname: String, server: String) {
-        self.settings.nickname = nickname.clone();
-        self.settings.last_server = server.clone();
+        self.settings.user.nickname = nickname.clone();
+        self.settings.server.address = server.clone();
         self.settings.save();
 
         let addr = match server.parse::<SocketAddr>() {
@@ -524,7 +779,7 @@ impl App {
 
         // Find our own client ID from the user list
         for (&id, name) in &users {
-            let is_us = name == &self.settings.nickname;
+            let is_us = name == &self.settings.user.nickname;
             self.users.insert(
                 id,
                 UserState {
@@ -601,18 +856,30 @@ impl App {
         if let Some(chat) = &mut self.chat {
             chat.handle_user_joined(username);
         }
-        self.voice.tx.send(VoiceControl::PlaySound(SoundType::UserJoined)).ok();
+        self.voice
+            .tx
+            .send(VoiceControl::PlaySound(SoundType::UserJoined))
+            .ok();
         self.update_user_list();
     }
 
     fn handle_user_left(&mut self, client_id: renet::ClientId, username: String) {
         self.voice.tx.send(VoiceControl::RemovePeer(client_id)).ok();
         self.users.remove(&client_id);
+        self.active_sharers.remove(&client_id);
+        // Close viewer if we were watching this user
+        let raw_id = u64::from(client_id);
+        if let Some(mut viewer) = self.viewer_windows.remove(&raw_id) {
+            viewer.close();
+        }
 
         if let Some(chat) = &mut self.chat {
             chat.handle_user_left(username);
         }
-        self.voice.tx.send(VoiceControl::PlaySound(SoundType::UserLeft)).ok();
+        self.voice
+            .tx
+            .send(VoiceControl::PlaySound(SoundType::UserLeft))
+            .ok();
         self.update_user_list();
     }
 
@@ -753,6 +1020,16 @@ impl App {
         self.is_testing_mic = false;
         self.voice.tx.send(VoiceControl::Stop).ok();
 
+        // Stop our screen share if active
+        if self.screen.shared.is_sharing.load(Ordering::Relaxed) {
+            self.screen.tx.send(ScreenControl::StopSharing).ok();
+        }
+        self.active_sharers.clear();
+        // Close all viewer windows
+        for (_, mut viewer) in self.viewer_windows.drain() {
+            viewer.close();
+        }
+
         if let Some(sidebar) = &mut self.sidebar {
             sidebar.handle_disconnected();
         }
@@ -827,13 +1104,13 @@ impl App {
 
     fn show_main_screen(&mut self) {
         let mut wind = window::Window::default()
-            .with_size(self.settings.window_width, self.settings.window_height)
+            .with_size(self.settings.window.width, self.settings.window.height)
             .with_label("baucord");
         wind.make_resizable(true);
         wind.set_color(theme::BG_PRIMARY);
         crate::ui::set_window_icon(&mut wind);
 
-        if let (Some(x), Some(y)) = (self.settings.window_x, self.settings.window_y) {
+        if let (Some(x), Some(y)) = (self.settings.window.x, self.settings.window.y) {
             wind.set_pos(x, y);
         }
 
@@ -913,6 +1190,13 @@ impl App {
         });
     }
 
+    fn get_username(&self, client_id: renet::ClientId) -> String {
+        self.users
+            .get(&client_id)
+            .map(|u| u.username.clone())
+            .unwrap_or_else(|| format!("User{client_id}"))
+    }
+
     /// Clean shutdown: signal threads, join with timeout, save settings.
     ///
     /// Order matters:
@@ -926,10 +1210,10 @@ impl App {
 
         // 1. Save window geometry while the window still exists
         if let Some(ref w) = self.main_window {
-            self.settings.window_width = w.w();
-            self.settings.window_height = w.h();
-            self.settings.window_x = Some(w.x());
-            self.settings.window_y = Some(w.y());
+            self.settings.window.width = w.w();
+            self.settings.window.height = w.h();
+            self.settings.window.x = Some(w.x());
+            self.settings.window.y = Some(w.y());
         }
         self.settings.save();
 
@@ -942,15 +1226,17 @@ impl App {
         // Small delay to let the disconnect packet go out
         std::thread::sleep(Duration::from_millis(50));
 
-        // 4. Signal both threads to exit their loops
+        // 4. Signal all threads to exit their loops
         self.voice.tx.send(VoiceControl::Shutdown).ok();
         self.network.tx.send(NetworkControl::Shutdown).ok();
+        self.screen.tx.send(ScreenControl::Shutdown).ok();
 
         // 5. Join with hard timeout — take handles so Drop won't try again.
         //    If a thread is stuck (cpal deadlock, etc.), we bail after 2s
         //    and let the OS clean up on process exit.
         let voice_handle = self.voice.join_handle.take();
         let network_handle = self.network.join_handle.take();
+        let screen_handle = self.screen.join_handle.take();
 
         let (done_tx, done_rx) = crossbeam_channel::bounded(1);
         std::thread::spawn(move || {
@@ -958,6 +1244,9 @@ impl App {
                 let _ = h.join();
             }
             if let Some(h) = network_handle {
+                let _ = h.join();
+            }
+            if let Some(h) = screen_handle {
                 let _ = h.join();
             }
             let _ = done_tx.send(());

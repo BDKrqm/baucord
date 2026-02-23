@@ -9,11 +9,12 @@
 
 pub mod about;
 pub mod audio;
+pub mod credits;
 pub mod keybinds;
 
 use fltk::{prelude::*, *};
-use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32};
 
 use crate::config::Settings;
 use crate::ui::messages::UiMessage;
@@ -25,17 +26,19 @@ use ui::widgets::controls;
 enum Tab {
     Audio,
     Keyboard,
+    Credits,
     About,
 }
 
 impl Tab {
-    const ALL: &'static [Tab] = &[Tab::Audio, Tab::Keyboard, Tab::About];
+    const ALL: &'static [Tab] = &[Tab::Audio, Tab::Keyboard, Tab::Credits, Tab::About];
 
     fn label(&self) -> &'static str {
         match self {
-            Tab::Audio => "\u{1f3a7}  Audio",
-            Tab::Keyboard => "\u{2328}  Keyboard",
-            Tab::About => "\u{2139}  About",
+            Tab::Audio => "Audio",
+            Tab::Keyboard => "Keyboard",
+            Tab::Credits => "Credits",
+            Tab::About => "About",
         }
     }
 }
@@ -122,14 +125,12 @@ impl SettingsWindow {
         );
 
         // Keyboard panel — same pattern, hidden initially
-        let mut keyboard_flex = keybinds::build(
-            sender,
-            &settings,
-            content_x,
-            10,
-            content_w,
-        );
+        let mut keyboard_flex = keybinds::build(sender, &settings, content_x, 10, content_w);
         keyboard_flex.hide();
+
+        // Credits panel
+        let mut credits_flex = credits::build(content_x, 10, content_w);
+        credits_flex.hide();
 
         // About panel
         let mut about_flex = about::build(content_x, 10, content_w);
@@ -163,7 +164,12 @@ impl SettingsWindow {
 
         // Collect the switchable panels.  We use group::Flex which
         // implements WidgetExt, so show/hide work fine.
-        let panels: Vec<group::Flex> = vec![audio_flex.clone(), keyboard_flex.clone(), about_flex.clone()];
+        let panels: Vec<group::Flex> = vec![
+            audio_flex.clone(),
+            keyboard_flex.clone(),
+            credits_flex.clone(),
+            about_flex.clone(),
+        ];
         let buttons_rc = std::rc::Rc::new(std::cell::RefCell::new(nav_buttons.clone()));
 
         style_nav_buttons(&nav_buttons, 0);
@@ -225,3 +231,4 @@ fn style_nav_buttons(buttons: &[button::Button], active: usize) {
         }
     }
 }
+

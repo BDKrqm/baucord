@@ -3,6 +3,7 @@ use log::{error, info};
 use std::thread;
 use std::time::Duration;
 mod config;
+mod relay;
 mod server;
 use config::Config;
 use server::ChatServer;
@@ -27,7 +28,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Failed to load config from {}: {e}", args.config);
         let config = Config::default();
         if let Err(save_err) = config.save_to_file(&args.config) {
-            eprintln!("Could not save default config to {}: {save_err}", args.config);
+            eprintln!(
+                "Could not save default config to {}: {save_err}",
+                args.config
+            );
         } else {
             eprintln!("Default configuration saved to {}", args.config);
         }

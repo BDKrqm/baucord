@@ -1,11 +1,12 @@
 // ui/mod.rs
 pub mod chat;
-pub mod sidebar;
 pub mod connect;
 pub mod messages;
 pub mod settings;
+pub mod sidebar;
 pub mod splash;
 pub mod update;
+pub mod viewer;
 use fltk::prelude::*;
 
 /// Set the application icon on a window. Shared across all screens.

@@ -5,6 +5,7 @@ mod app;
 mod config;
 mod hotkeys;
 mod network;
+mod screen;
 mod ui;
 mod voice;
 
@@ -35,3 +36,4 @@ fn main() {
     // Settings are already saved by this point.
     std::process::exit(0);
 }
+

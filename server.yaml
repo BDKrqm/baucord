@@ -1,0 +1,19 @@
+server:
+  name: Baucord Server
+  host: 0.0.0.0
+  port: 5000
+  greeting_message: Welcome to the server!
+network:
+  max_clients: 64
+  protocol_id: 27
+channels:
+  reliable_channel_id: 2
+  voice_channel_id: 3
+  voice_buffer_size_mb: 5
+  video_channel_id: 4
+  video_buffer_size_mb: 10
+logging:
+  level: info
+  stats_interval_secs: 30
+authentication:
+  enabled: false

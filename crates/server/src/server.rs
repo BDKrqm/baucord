@@ -1,102 +1,22 @@
+//! Chat server — connection management, message routing, media relay.
+//!
+//! Uses the shared `protocol` crate for all wire types and constants.
+//! Delegates voice and video relay to dedicated structs in `relay.rs`.
+
 use bincode::Options;
-use log::{debug, info, warn};
+use log::{info, warn};
 use renet::{ChannelConfig, ClientId, ConnectionConfig, RenetServer, SendType, ServerEvent};
 use renet_netcode::{
     NETCODE_USER_DATA_BYTES, NetcodeServerTransport, ServerAuthentication, ServerConfig,
 };
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant, SystemTime};
 
+use protocol::{ChatMessage, ClientMessage, RELIABLE_BUFFER_BYTES, ServerMessage};
+
 use crate::config::{ChannelSettings, Config};
-
-// ── Protocol types ──────────────────────────────────────────────────────
-
-const VOICE_PROTOCOL_VERSION: u8 = 1;
-const VOICE_MTU_BUDGET: usize = 1000;
-const MAX_FRAMES_PER_PACKET: usize = 2;
-
-#[repr(C)]
-#[derive(Copy, Clone)]
-struct VoiceHeader {
-    version: u8,
-    _reserved: [u8; 3],
-    client_id: u64,
-    seq: u32,
-    ts_48k: u32,
-    frame_count: u8,
-    _padding: [u8; 3],
-}
-
-impl VoiceHeader {
-    const SIZE: usize = 24;
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Message {
-    client_id: ClientId,
-    text: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-enum ClientMessage {
-    Text(String),
-    VoiceData(Vec<u8>),
-    Speaking(bool),
-    AudioState { muted: bool, deafened: bool },
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-enum ServerMessage {
-    ClientConnected {
-        client_id: ClientId,
-        username: String,
-    },
-    ClientDisconnected {
-        client_id: ClientId,
-    },
-    ClientMessage(Message),
-    InitClient {
-        usernames: HashMap<ClientId, String>,
-        server_name: String,
-        greeting: String,
-    },
-    VoiceData {
-        client_id: ClientId,
-        data: Vec<u8>,
-    },
-    Speaking {
-        client_id: ClientId,
-        is_speaking: bool,
-    },
-    AudioState {
-        client_id: ClientId,
-        muted: bool,
-        deafened: bool,
-    },
-}
-
-// ── Stats ───────────────────────────────────────────────────────────────
-
-#[derive(Default)]
-struct VoiceStats {
-    packets_received: u64,
-    packets_forwarded: u64,
-    packets_dropped_malformed: u64,
-    packets_dropped_oversize: u64,
-    packets_dropped_version: u64,
-    total_frames: u64,
-    avg_frames_per_packet: f32,
-}
-
-#[derive(Default)]
-struct ServerStats {
-    messages_count: u64,
-    voice_packets_count: u64,
-    bytes_sent: u64,
-    bytes_received: u64,
-}
+use crate::relay::{VideoRelay, VoiceRelay};
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -116,6 +36,15 @@ fn encode_message(msg: &ServerMessage) -> Option<Vec<u8>> {
         .ok()
 }
 
+// ── Stats ───────────────────────────────────────────────────────────────
+
+#[derive(Default)]
+struct ServerStats {
+    messages_count: u64,
+    bytes_sent: u64,
+    bytes_received: u64,
+}
+
 // ── ChatServer ──────────────────────────────────────────────────────────
 
 pub struct ChatServer {
@@ -126,7 +55,8 @@ pub struct ChatServer {
     last_updated: Instant,
     last_stats: Instant,
     stats: ServerStats,
-    voice_stats: VoiceStats,
+    voice: VoiceRelay,
+    video: VideoRelay,
 }
 
 impl ChatServer {
@@ -164,7 +94,8 @@ impl ChatServer {
             last_updated: Instant::now(),
             last_stats: Instant::now(),
             stats: ServerStats::default(),
-            voice_stats: VoiceStats::default(),
+            voice: VoiceRelay::new(),
+            video: VideoRelay::new(),
         })
     }
 
@@ -173,25 +104,41 @@ impl ChatServer {
         config.client_channels_config.clear();
         config.server_channels_config.clear();
 
-        let reliable_channel = ChannelConfig {
+        let reliable = ChannelConfig {
             channel_id: channels.reliable_channel_id,
-            max_memory_usage_bytes: 1024 * 1024,
+            max_memory_usage_bytes: RELIABLE_BUFFER_BYTES,
             send_type: SendType::ReliableOrdered {
                 resend_time: Duration::from_millis(200),
             },
         };
+        config.client_channels_config.push(reliable.clone());
+        config.server_channels_config.push(reliable);
 
-        config.client_channels_config.push(reliable_channel.clone());
-        config.server_channels_config.push(reliable_channel);
-
-        let voice_channel = ChannelConfig {
+        let voice = ChannelConfig {
             channel_id: channels.voice_channel_id,
             max_memory_usage_bytes: channels.voice_buffer_size_mb * 1024 * 1024,
             send_type: SendType::Unreliable,
         };
+        config.client_channels_config.push(voice.clone());
+        config.server_channels_config.push(voice);
 
-        config.client_channels_config.push(voice_channel.clone());
-        config.server_channels_config.push(voice_channel);
+        let video = ChannelConfig {
+            channel_id: channels.video_channel_id,
+            max_memory_usage_bytes: channels.video_buffer_size_mb * 1024 * 1024,
+            send_type: SendType::Unreliable,
+        };
+        config.client_channels_config.push(video.clone());
+        config.server_channels_config.push(video);
+
+        let reliable_video = ChannelConfig {
+            channel_id: channels.reliable_video_channel_id,
+            max_memory_usage_bytes: channels.reliable_video_buffer_size_mb * 1024 * 1024,
+            send_type: SendType::ReliableOrdered {
+                resend_time: Duration::from_millis(200),
+            },
+        };
+        config.client_channels_config.push(reliable_video.clone());
+        config.server_channels_config.push(reliable_video);
 
         config
     }
@@ -210,7 +157,13 @@ impl ChatServer {
 
         self.process_events();
         self.process_reliable_messages();
-        self.process_voice_messages();
+        self.voice
+            .process(&mut self.server, self.config.channels.voice_channel_id);
+        self.video.process(
+            &mut self.server,
+            self.config.channels.video_channel_id,
+            self.config.channels.reliable_video_channel_id,
+        );
 
         self.transport.send_packets(&mut self.server);
 
@@ -224,7 +177,7 @@ impl ChatServer {
         Ok(())
     }
 
-    // ── Event handling ──────────────────────────────────────────────
+    // ── Connection events ───────────────────────────────────────────
 
     fn process_events(&mut self) {
         while let Some(event) = self.server.get_event() {
@@ -248,42 +201,63 @@ impl ChatServer {
         info!("{username} ({client_id}) connected");
         self.usernames.insert(client_id, username.clone());
 
+        let reliable = self.config.channels.reliable_channel_id;
+
         // Send init with the full user list to the new client
         let init_msg = ServerMessage::InitClient {
             usernames: self.usernames.clone(),
             server_name: self.config.server.name.clone(),
             greeting: self.config.server.greeting_message.clone(),
         };
-
         if let Some(encoded) = encode_message(&init_msg) {
-            self.server
-                .send_message(client_id, self.config.channels.reliable_channel_id, encoded);
+            self.server.send_message(client_id, reliable, encoded);
         }
 
-        // Notify everyone else
+        // Notify the new client about any active screen shares
+        for (sharer_id, &(width, height)) in self.video.sharers() {
+            let msg = ServerMessage::ScreenShareStarted {
+                client_id: *sharer_id,
+                width,
+                height,
+            };
+            if let Some(encoded) = encode_message(&msg) {
+                self.server.send_message(client_id, reliable, encoded);
+            }
+        }
+
+        // Notify everyone else about the new client
         let connected_msg = ServerMessage::ClientConnected {
             client_id,
             username,
         };
-
         if let Some(encoded) = encode_message(&connected_msg) {
-            self.server.broadcast_message_except(
-                client_id,
-                self.config.channels.reliable_channel_id,
-                encoded,
-            );
+            self.server
+                .broadcast_message_except(client_id, reliable, encoded);
         }
     }
 
     fn handle_client_disconnected(&mut self, client_id: ClientId, reason: renet::DisconnectReason) {
+        let reliable = self.config.channels.reliable_channel_id;
+
         if let Some(username) = self.usernames.remove(&client_id) {
             info!("{username} ({client_id}) disconnected: {reason}");
         }
 
+        // Clean up screen share state — if they were sharing, notify everyone
+        let was_sharing = self.video.is_sharing(client_id);
+        self.video.handle_disconnect(client_id);
+
+        if was_sharing {
+            let msg = ServerMessage::ScreenShareStopped { client_id };
+            if let Some(encoded) = encode_message(&msg) {
+                self.server.broadcast_message(reliable, encoded);
+            }
+        }
+
+        // Notify everyone about the disconnect
         let msg = ServerMessage::ClientDisconnected { client_id };
         if let Some(encoded) = encode_message(&msg) {
-            self.server
-                .broadcast_message(self.config.channels.reliable_channel_id, encoded);
+            self.server.broadcast_message(reliable, encoded);
         }
     }
 
@@ -304,18 +278,19 @@ impl ChatServer {
     }
 
     fn handle_client_message(&mut self, client_id: ClientId, message: ClientMessage) {
+        let reliable = self.config.channels.reliable_channel_id;
+
         match message {
             ClientMessage::Text(text) => {
                 let username = self.get_username(client_id);
                 info!("[{username}]: {text}");
                 self.stats.messages_count += 1;
 
-                let msg = ServerMessage::ClientMessage(Message { client_id, text });
+                let msg = ServerMessage::ClientMessage(ChatMessage { client_id, text });
                 if let Some(encoded) = encode_message(&msg) {
                     self.stats.bytes_sent +=
                         encoded.len() as u64 * self.server.connected_clients() as u64;
-                    self.server
-                        .broadcast_message(self.config.channels.reliable_channel_id, encoded);
+                    self.server.broadcast_message(reliable, encoded);
                 }
             }
             ClientMessage::Speaking(is_speaking) => {
@@ -324,8 +299,7 @@ impl ChatServer {
                     is_speaking,
                 };
                 if let Some(encoded) = encode_message(&msg) {
-                    self.server
-                        .broadcast_message(self.config.channels.reliable_channel_id, encoded);
+                    self.server.broadcast_message(reliable, encoded);
                 }
             }
             ClientMessage::AudioState { muted, deafened } => {
@@ -335,147 +309,46 @@ impl ChatServer {
                     deafened,
                 };
                 if let Some(encoded) = encode_message(&msg) {
-                    self.server.broadcast_message_except(
-                        client_id,
-                        self.config.channels.reliable_channel_id,
-                        encoded,
-                    );
+                    self.server
+                        .broadcast_message_except(client_id, reliable, encoded);
                 }
             }
             ClientMessage::VoiceData(_) => {
                 warn!("Voice data received on reliable channel from {client_id}");
             }
-        }
-    }
 
-    // ── Voice relay ─────────────────────────────────────────────────
+            // ── Screen share signaling ──────────────────────────────
+            ClientMessage::ScreenShareStart { width, height } => {
+                let username = self.get_username(client_id);
+                info!("{username} started screen share ({width}x{height})");
 
-    fn process_voice_messages(&mut self) {
-        let channel_id = self.config.channels.voice_channel_id;
-        let clients: Vec<ClientId> = self.server.clients_id();
+                self.video.start_sharing(client_id, width, height);
 
-        for client_id in &clients {
-            while let Some(message) = self.server.receive_message(*client_id, channel_id) {
-                self.stats.bytes_received += message.len() as u64;
-                self.voice_stats.packets_received += 1;
-
-                // Validate packet size
-                if message.len() < VoiceHeader::SIZE + 3 {
-                    self.voice_stats.packets_dropped_malformed += 1;
-                    continue;
+                let msg = ServerMessage::ScreenShareStarted {
+                    client_id,
+                    width,
+                    height,
+                };
+                if let Some(encoded) = encode_message(&msg) {
+                    self.server.broadcast_message(reliable, encoded);
                 }
+            }
+            ClientMessage::ScreenShareStop => {
+                let username = self.get_username(client_id);
+                info!("{username} stopped screen share");
 
-                if message.len() > VOICE_MTU_BUDGET {
-                    self.voice_stats.packets_dropped_oversize += 1;
-                    warn!(
-                        "Dropping oversize packet: {} bytes from {client_id}",
-                        message.len(),
-                    );
-                    continue;
+                self.video.stop_sharing(client_id);
+
+                let msg = ServerMessage::ScreenShareStopped { client_id };
+                if let Some(encoded) = encode_message(&msg) {
+                    self.server.broadcast_message(reliable, encoded);
                 }
-
-                // Validate protocol version
-                if message[0] != VOICE_PROTOCOL_VERSION {
-                    self.voice_stats.packets_dropped_version += 1;
-                    warn!("Invalid protocol version {} from {client_id}", message[0]);
-                    continue;
-                }
-
-                // Parse header
-                let mut off = 0;
-                let _version = message[off];
-                off += 4; // version + reserved
-
-                let hdr_client_id = u64::from_le_bytes(message[off..off + 8].try_into().unwrap());
-                off += 8;
-                let _seq = u32::from_le_bytes(message[off..off + 4].try_into().unwrap());
-                off += 4;
-                let _ts_48k = u32::from_le_bytes(message[off..off + 4].try_into().unwrap());
-                off += 4;
-                let frame_count = message[off] as usize;
-                off += 4; // frame_count + padding
-
-                // Validate frame count
-                if frame_count == 0 || frame_count > MAX_FRAMES_PER_PACKET {
-                    self.voice_stats.packets_dropped_malformed += 1;
-                    warn!("Invalid frame count {frame_count} from {client_id}");
-                    continue;
-                }
-
-                // Client ID mismatch is expected during fast reconnects —
-                // the authenticated transport already guarantees the sender,
-                // so this is purely informational.
-                if hdr_client_id != *client_id {
-                    debug!(
-                        "Header client_id {hdr_client_id} != sender {client_id} (stale session?)",
-                    );
-                }
-
-                // Validate all frame lengths
-                let mut valid = true;
-                let mut validation_offset = off;
-
-                for i in 0..frame_count {
-                    if validation_offset + 2 > message.len() {
-                        valid = false;
-                        break;
-                    }
-
-                    let len = u16::from_le_bytes(
-                        message[validation_offset..validation_offset + 2]
-                            .try_into()
-                            .unwrap(),
-                    ) as usize;
-                    validation_offset += 2;
-
-                    if len == 0 || len > 512 {
-                        debug!("Invalid frame {i} size: {len} bytes from {client_id}");
-                        valid = false;
-                        break;
-                    }
-
-                    if validation_offset + len > message.len() {
-                        valid = false;
-                        break;
-                    }
-
-                    validation_offset += len;
-                }
-
-                if !valid {
-                    self.voice_stats.packets_dropped_malformed += 1;
-                    continue;
-                }
-
-                if validation_offset != message.len() {
-                    self.voice_stats.packets_dropped_malformed += 1;
-                    debug!(
-                        "Trailing bytes: expected {validation_offset}, got {} from {client_id}",
-                        message.len(),
-                    );
-                    continue;
-                }
-
-                // Stats (EMA, not running mean)
-                self.voice_stats.total_frames += frame_count as u64;
-                #[allow(clippy::cast_precision_loss)] // frame_count ≤ MAX_FRAMES_PER_PACKET (2)
-                {
-                    self.voice_stats.avg_frames_per_packet =
-                        self.voice_stats.avg_frames_per_packet * 0.95 + frame_count as f32 * 0.05;
-                }
-
-                // Forward raw bytes to all other clients.
-                // Capture len before move — broadcast_message_except takes ownership.
-                let recipients = clients.len().saturating_sub(1);
-                let msg_len = message.len();
-
-                self.server.broadcast_message_except(
-                    *client_id, channel_id, message, // moved, not cloned
-                );
-
-                self.voice_stats.packets_forwarded += 1;
-                self.stats.voice_packets_count += 1;
-                self.stats.bytes_sent += msg_len as u64 * recipients as u64;
+            }
+            ClientMessage::SubscribeScreen { target_id } => {
+                self.video.subscribe(client_id, target_id);
+            }
+            ClientMessage::UnsubscribeScreen { target_id } => {
+                self.video.unsubscribe(client_id, target_id);
             }
         }
     }
@@ -489,35 +362,14 @@ impl ChatServer {
             .unwrap_or_else(|| format!("User{client_id}"))
     }
 
-    #[allow(clippy::cast_precision_loss)] // display-only stats, precision irrelevant
+    #[allow(clippy::cast_precision_loss)]
     fn print_stats(&self) {
         info!("=== {} Statistics ===", self.config.server.name);
         info!("Connected clients: {}", self.server.connected_clients());
         info!("Text messages: {}", self.stats.messages_count);
 
-        info!(
-            "Voice packets - RX: {}, FWD: {}",
-            self.voice_stats.packets_received, self.voice_stats.packets_forwarded
-        );
-
-        if self.voice_stats.packets_received > 0 {
-            let total_dropped = self.voice_stats.packets_dropped_malformed
-                + self.voice_stats.packets_dropped_oversize
-                + self.voice_stats.packets_dropped_version;
-            let drop_rate = total_dropped as f32 / self.voice_stats.packets_received as f32 * 100.0;
-
-            info!(
-                "Voice drops: {} malformed, {} oversize, {} bad version ({drop_rate:.1}% total)",
-                self.voice_stats.packets_dropped_malformed,
-                self.voice_stats.packets_dropped_oversize,
-                self.voice_stats.packets_dropped_version,
-            );
-        }
-
-        info!(
-            "Avg frames/packet: {:.2}, Total frames: {}",
-            self.voice_stats.avg_frames_per_packet, self.voice_stats.total_frames
-        );
+        self.voice.print_stats();
+        self.video.print_stats();
 
         info!(
             "Data sent: {:.2} MB, received: {:.2} MB",

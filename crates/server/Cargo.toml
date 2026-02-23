@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+protocol = { path = "../protocol" }
+bytes = "1.11.1"
 renet = "1.2.0"
 renet_netcode = "1.2.0"
 serde = { version = "1.0", features = ["derive"] }

@@ -2,14 +2,15 @@
 //
 // NetworkClient handles protocol, serialization, voice bundling.
 // NetworkThreadHandle owns the thread that polls the client and routes
-// voice packets to the voice thread.
+// voice packets to the voice thread and video packets to the screen thread.
+//
+// All wire protocol types come from the shared `protocol` crate.
 
 use bincode::Options;
 use crossbeam_channel::{Receiver, Sender, TryRecvError, bounded};
 use log::warn;
 use renet::{ChannelConfig, ClientId, ConnectionConfig, RenetClient, SendType};
 use renet_netcode::{ClientAuthentication, NETCODE_USER_DATA_BYTES, NetcodeClientTransport};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{SocketAddr, UdpSocket};
 use std::thread;
@@ -17,68 +18,17 @@ use std::time::{Duration, Instant, SystemTime};
 
 use core::AudioPacket;
 
+use protocol::{
+    ClientMessage, PROTOCOL_ID, RELIABLE_BUFFER_BYTES, RELIABLE_CHANNEL,
+    RELIABLE_VIDEO_BUFFER_BYTES, RELIABLE_VIDEO_CHANNEL, ServerMessage, VIDEO_BUFFER_BYTES,
+    VIDEO_CHANNEL, VIDEO_MTU_BUDGET, VIDEO_PROTOCOL_VERSION, VOICE_BATCH_THRESHOLD,
+    VOICE_BUFFER_BYTES, VOICE_CHANNEL, VOICE_MAX_FRAME_SIZE, VOICE_MAX_FRAMES_PER_PACKET,
+    VOICE_MTU_BUDGET, VOICE_PROTOCOL_VERSION, VideoHeader, VoiceHeader, pack_video_frame,
+    parse_video_header, video_payload,
+};
+
+use crate::screen::ScreenControl;
 use crate::voice::{VoiceControl, WakeFn};
-
-// ── Protocol constants ──────────────────────────────────────────────────
-
-const PROTOCOL_ID: u64 = 27;
-const RELIABLE_CHANNEL: u8 = 2;
-const VOICE_CHANNEL: u8 = 3;
-const VOICE_PROTOCOL_VERSION: u8 = 1;
-const VOICE_MTU_BUDGET: usize = 800;
-const MAX_FRAMES_PER_PACKET: usize = 2;
-const VOICE_PACKET_BATCH_THRESHOLD: u8 = 1;
-
-// ── Wire protocol types ─────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Message {
-    client_id: ClientId,
-    text: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-enum ClientMessage {
-    Text(String),
-    VoiceData(Vec<u8>),
-    Speaking(bool),
-    /// Broadcast our mute/deafen state to all other users.
-    AudioState {
-        muted: bool,
-        deafened: bool,
-    },
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-enum ServerMessage {
-    ClientConnected {
-        client_id: ClientId,
-        username: String,
-    },
-    ClientDisconnected {
-        client_id: ClientId,
-    },
-    ClientMessage(Message),
-    InitClient {
-        usernames: HashMap<ClientId, String>,
-        server_name: String,
-        greeting: String,
-    },
-    VoiceData {
-        client_id: ClientId,
-        data: Vec<u8>,
-    },
-    Speaking {
-        client_id: ClientId,
-        is_speaking: bool,
-    },
-    /// Another user's mute/deafen state changed.
-    AudioState {
-        client_id: ClientId,
-        muted: bool,
-        deafened: bool,
-    },
-}
 
 // ── Messages sent to the UI / App layer ─────────────────────────────────
 
@@ -125,24 +75,27 @@ pub enum NetworkMessage {
     },
     /// Periodic UI refresh tick.
     UiUpdate,
-}
 
-// ── Voice header (binary protocol, not bincode) ─────────────────────────
-
-#[repr(C)]
-#[derive(Copy, Clone)]
-struct VoiceHeader {
-    version: u8,
-    _reserved: [u8; 3],
-    client_id: u64,
-    seq: u32,
-    ts_48k: u32,
-    frame_count: u8,
-    _padding: [u8; 3],
-}
-
-impl VoiceHeader {
-    const SIZE: usize = 24;
+    // ── Screen share events ─────────────────────────────────────────
+    /// A remote user started sharing their screen.
+    ScreenShareStarted {
+        client_id: ClientId,
+        width: u32,
+        height: u32,
+    },
+    /// A remote user stopped sharing their screen.
+    ScreenShareStopped {
+        client_id: ClientId,
+    },
+    /// An inbound video frame (routed to screen thread, not app).
+    VideoFrame {
+        client_id: u64,
+        seq: u32,
+        is_keyframe: bool,
+        width: u32,
+        height: u32,
+        data: Vec<u8>,
+    },
 }
 
 // ── Voice packet bundler ────────────────────────────────────────────────
@@ -180,10 +133,10 @@ impl VoiceBundler {
     }
 
     fn try_push_frame(&mut self, opus_frame: &[u8]) -> bool {
-        if self.frames as usize >= MAX_FRAMES_PER_PACKET {
+        if self.frames as usize >= VOICE_MAX_FRAMES_PER_PACKET {
             return false;
         }
-        if opus_frame.len() > 512 {
+        if opus_frame.len() > VOICE_MAX_FRAME_SIZE {
             return false;
         }
 
@@ -264,7 +217,7 @@ impl NetworkClient {
 
         let reliable = ChannelConfig {
             channel_id: RELIABLE_CHANNEL,
-            max_memory_usage_bytes: 1024 * 1024,
+            max_memory_usage_bytes: RELIABLE_BUFFER_BYTES,
             send_type: SendType::ReliableOrdered {
                 resend_time: Duration::from_millis(200),
             },
@@ -272,8 +225,22 @@ impl NetworkClient {
 
         let voice = ChannelConfig {
             channel_id: VOICE_CHANNEL,
-            max_memory_usage_bytes: 5 * 1024 * 1024,
+            max_memory_usage_bytes: VOICE_BUFFER_BYTES,
             send_type: SendType::Unreliable,
+        };
+
+        let video = ChannelConfig {
+            channel_id: VIDEO_CHANNEL,
+            max_memory_usage_bytes: VIDEO_BUFFER_BYTES,
+            send_type: SendType::Unreliable,
+        };
+
+        let reliable_video = ChannelConfig {
+            channel_id: RELIABLE_VIDEO_CHANNEL,
+            max_memory_usage_bytes: RELIABLE_VIDEO_BUFFER_BYTES,
+            send_type: SendType::ReliableOrdered {
+                resend_time: Duration::from_millis(200),
+            },
         };
 
         connection_config
@@ -282,6 +249,14 @@ impl NetworkClient {
         connection_config.server_channels_config.push(reliable);
         connection_config.client_channels_config.push(voice.clone());
         connection_config.server_channels_config.push(voice);
+        connection_config.client_channels_config.push(video.clone());
+        connection_config.server_channels_config.push(video);
+        connection_config
+            .client_channels_config
+            .push(reliable_video.clone());
+        connection_config
+            .server_channels_config
+            .push(reliable_video);
 
         let client = RenetClient::new(connection_config);
         let socket =
@@ -340,6 +315,7 @@ impl NetworkClient {
 
         self.process_reliable_messages();
         self.process_voice_messages();
+        self.process_video_messages();
 
         if let Err(e) = self.transport.send_packets(&mut self.client) {
             self.message_queue
@@ -437,6 +413,21 @@ impl NetworkClient {
                 ServerMessage::VoiceData { .. } => {
                     // Voice data shouldn't arrive on the reliable channel
                 }
+                ServerMessage::ScreenShareStarted {
+                    client_id,
+                    width,
+                    height,
+                } => {
+                    self.message_queue.push(NetworkMessage::ScreenShareStarted {
+                        client_id,
+                        width,
+                        height,
+                    });
+                }
+                ServerMessage::ScreenShareStopped { client_id } => {
+                    self.message_queue
+                        .push(NetworkMessage::ScreenShareStopped { client_id });
+                }
             }
         }
     }
@@ -475,7 +466,7 @@ impl NetworkClient {
         let frame_count = message[off] as usize;
         off += 4; // frame_count + padding
 
-        if frame_count == 0 || frame_count > MAX_FRAMES_PER_PACKET {
+        if frame_count == 0 || frame_count > VOICE_MAX_FRAMES_PER_PACKET {
             return false;
         }
 
@@ -498,7 +489,7 @@ impl NetworkClient {
             let len = u16::from_le_bytes(message[off..off + 2].try_into().unwrap()) as usize;
             off += 2;
 
-            if len == 0 || len > 512 || off + len > message.len() {
+            if len == 0 || len > VOICE_MAX_FRAME_SIZE || off + len > message.len() {
                 return false;
             }
 
@@ -523,6 +514,37 @@ impl NetworkClient {
         }
 
         true
+    }
+
+    // ── Video channels ──────────────────────────────────────────────
+
+    fn process_video_messages(&mut self) {
+        // Read from both channels — same wire format, different transport.
+        // Keyframes arrive on RELIABLE_VIDEO_CHANNEL (guaranteed delivery),
+        // P-frames arrive on VIDEO_CHANNEL (unreliable, low latency).
+        for channel in [RELIABLE_VIDEO_CHANNEL, VIDEO_CHANNEL] {
+            while let Some(message) = self.client.receive_message(channel) {
+                self.process_video_packet(&message);
+            }
+        }
+    }
+
+    fn process_video_packet(&mut self, message: &[u8]) {
+        let Some(hdr) = parse_video_header(message) else {
+            return;
+        };
+        let Some(payload) = video_payload(message) else {
+            return;
+        };
+
+        self.message_queue.push(NetworkMessage::VideoFrame {
+            client_id: hdr.client_id,
+            seq: hdr.seq,
+            is_keyframe: hdr.flags & VideoHeader::FLAG_KEYFRAME != 0,
+            width: hdr.width as u32,
+            height: hdr.height as u32,
+            data: payload.to_vec(),
+        });
     }
 
     // ── Outbound messages ───────────────────────────────────────────
@@ -589,8 +611,69 @@ impl NetworkClient {
             }
         }
 
-        if self.voice_bundler.frames >= VOICE_PACKET_BATCH_THRESHOLD {
+        if self.voice_bundler.frames >= VOICE_BATCH_THRESHOLD {
             self.flush_voice_packet();
+        }
+    }
+
+    /// Send an encoded H.264 video frame.
+    ///
+    /// Keyframes go on `RELIABLE_VIDEO_CHANNEL` (guaranteed delivery —
+    /// the decoder can't start without SPS/PPS from a keyframe).
+    /// P-frames go on `VIDEO_CHANNEL` (unreliable, low latency —
+    /// dropping one causes a brief glitch, not a broken stream).
+    pub fn send_video_frame(
+        &mut self,
+        our_client_id: u64,
+        seq: u32,
+        is_keyframe: bool,
+        width: u16,
+        height: u16,
+        h264_data: &[u8],
+    ) {
+        let total = VideoHeader::SIZE + h264_data.len();
+        if total > VIDEO_MTU_BUDGET {
+            warn!("Video frame too large: {total} bytes, dropping");
+            return;
+        }
+
+        let buf = pack_video_frame(our_client_id, seq, is_keyframe, width, height, h264_data);
+
+        let channel = if is_keyframe {
+            RELIABLE_VIDEO_CHANNEL
+        } else {
+            VIDEO_CHANNEL
+        };
+        self.client.send_message(channel, buf);
+    }
+
+    /// Send screen share signaling on the reliable channel.
+    pub fn send_screen_share_start(&mut self, width: u32, height: u32) {
+        if let Some(encoded) =
+            encode_client_message(&ClientMessage::ScreenShareStart { width, height })
+        {
+            self.client.send_message(RELIABLE_CHANNEL, encoded);
+        }
+    }
+
+    pub fn send_screen_share_stop(&mut self) {
+        if let Some(encoded) = encode_client_message(&ClientMessage::ScreenShareStop) {
+            self.client.send_message(RELIABLE_CHANNEL, encoded);
+        }
+    }
+
+    pub fn send_subscribe_screen(&mut self, target_id: u64) {
+        if let Some(encoded) = encode_client_message(&ClientMessage::SubscribeScreen { target_id })
+        {
+            self.client.send_message(RELIABLE_CHANNEL, encoded);
+        }
+    }
+
+    pub fn send_unsubscribe_screen(&mut self, target_id: u64) {
+        if let Some(encoded) =
+            encode_client_message(&ClientMessage::UnsubscribeScreen { target_id })
+        {
+            self.client.send_message(RELIABLE_CHANNEL, encoded);
         }
     }
 
@@ -620,6 +703,10 @@ impl NetworkClient {
         let _ = self.transport.send_packets(&mut self.client);
     }
 
+    pub fn client_id(&self) -> u64 {
+        self.transport.client_id()
+    }
+
     pub fn get_users(&self) -> &HashMap<ClientId, String> {
         &self.usernames
     }
@@ -644,6 +731,32 @@ pub enum NetworkControl {
         muted: bool,
         deafened: bool,
     },
+
+    // ── Screen share ────────────────────────────────────────────────
+    /// Signal that we started sharing (reliable → server → all clients).
+    ScreenShareStart {
+        width: u32,
+        height: u32,
+    },
+    /// Signal that we stopped sharing.
+    ScreenShareStop,
+    /// Send an encoded H.264 frame on the video channel.
+    SendVideoFrame {
+        seq: u32,
+        is_keyframe: bool,
+        width: u16,
+        height: u16,
+        data: Vec<u8>,
+    },
+    /// Subscribe to a remote user's screen share stream.
+    SubscribeScreen {
+        target_id: u64,
+    },
+    /// Unsubscribe from a remote user's screen share stream.
+    UnsubscribeScreen {
+        target_id: u64,
+    },
+
     Shutdown,
 }
 
@@ -669,10 +782,11 @@ impl NetworkThreadHandle {
         msg_tx: Sender<NetworkMessage>,
         msg_rx: Receiver<NetworkMessage>,
         voice_tx: Sender<VoiceControl>,
+        screen_tx: Sender<ScreenControl>,
         wake: WakeFn,
     ) -> Self {
         let join_handle = thread::spawn(move || {
-            run_network_loop(control_rx, msg_tx, voice_tx, wake);
+            run_network_loop(control_rx, msg_tx, voice_tx, screen_tx, wake);
         });
 
         Self {
@@ -703,6 +817,7 @@ fn run_network_loop(
     control_rx: Receiver<NetworkControl>,
     msg_tx: Sender<NetworkMessage>,
     voice_tx: Sender<VoiceControl>,
+    screen_tx: Sender<ScreenControl>,
     wake: WakeFn,
 ) {
     let mut client: Option<NetworkClient> = None;
@@ -760,6 +875,47 @@ fn run_network_loop(
                             c.send_audio_state(muted, deafened);
                         }
                     }
+
+                    // ── Screen share controls ───────────────────────
+                    NetworkControl::ScreenShareStart { width, height } => {
+                        if let Some(c) = &mut client {
+                            c.send_screen_share_start(width, height);
+                        }
+                    }
+                    NetworkControl::ScreenShareStop => {
+                        if let Some(c) = &mut client {
+                            c.send_screen_share_stop();
+                        }
+                    }
+                    NetworkControl::SendVideoFrame {
+                        seq,
+                        is_keyframe,
+                        width,
+                        height,
+                        data,
+                    } => {
+                        if let Some(c) = &mut client {
+                            c.send_video_frame(
+                                c.client_id(),
+                                seq,
+                                is_keyframe,
+                                width,
+                                height,
+                                &data,
+                            );
+                        }
+                    }
+                    NetworkControl::SubscribeScreen { target_id } => {
+                        if let Some(c) = &mut client {
+                            c.send_subscribe_screen(target_id);
+                        }
+                    }
+                    NetworkControl::UnsubscribeScreen { target_id } => {
+                        if let Some(c) = &mut client {
+                            c.send_unsubscribe_screen(target_id);
+                        }
+                    }
+
                     NetworkControl::Shutdown => {
                         if let Some(mut c) = client.take() {
                             c.disconnect();
@@ -781,6 +937,7 @@ fn run_network_loop(
 
             for msg in c.poll_messages() {
                 match msg {
+                    // Voice → voice thread (hot path, bypass app)
                     NetworkMessage::VoiceData {
                         client_id,
                         seq,
@@ -790,6 +947,53 @@ fn run_network_loop(
                         let packet = AudioPacket::new(seq, timestamp, client_id, data);
                         let _ = voice_tx.try_send(VoiceControl::IncomingVoicePacket(packet));
                     }
+
+                    // Video → screen thread (hot path, bypass app)
+                    NetworkMessage::VideoFrame {
+                        client_id,
+                        seq,
+                        is_keyframe,
+                        width,
+                        height,
+                        data,
+                    } => {
+                        let _ = screen_tx.try_send(ScreenControl::IncomingVideoFrame {
+                            client_id,
+                            seq,
+                            is_keyframe,
+                            width,
+                            height,
+                            data,
+                        });
+                    }
+
+                    // Screen share signaling → screen thread + app
+                    NetworkMessage::ScreenShareStarted {
+                        client_id,
+                        width,
+                        height,
+                    } => {
+                        let _ = screen_tx.try_send(ScreenControl::PeerStartedSharing {
+                            client_id: client_id.into(),
+                            width,
+                            height,
+                        });
+                        let _ = msg_tx.try_send(NetworkMessage::ScreenShareStarted {
+                            client_id,
+                            width,
+                            height,
+                        });
+                        wake();
+                    }
+                    NetworkMessage::ScreenShareStopped { client_id } => {
+                        let _ = screen_tx.try_send(ScreenControl::PeerStoppedSharing {
+                            client_id: client_id.into(),
+                        });
+                        let _ = msg_tx.try_send(NetworkMessage::ScreenShareStopped { client_id });
+                        wake();
+                    }
+
+                    // Everything else → app
                     other => {
                         let _ = msg_tx.try_send(other);
                         wake();

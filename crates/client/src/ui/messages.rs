@@ -46,6 +46,12 @@ pub enum UiMessage {
         username: String,
     },
 
+    // ── Screen share viewer ─────────────────────────────────────────
+    /// User closed a viewer window — unsubscribe from that peer's stream.
+    UnwatchPeer {
+        client_id: u64,
+    },
+
     // ── Settings window ─────────────────────────────────────────────
     OpenSettings,
     SaveSettings,
