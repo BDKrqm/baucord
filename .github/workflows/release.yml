@@ -44,14 +44,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            pkg-config cmake nasm \
+            pkg-config cmake nasm libclang-dev \
             libopus-dev libasound2-dev \
             libx11-dev libxext-dev libxinerama-dev libxcursor-dev \
             libxrender-dev libxfixes-dev libxft-dev libfontconfig1-dev \
             libpango1.0-dev libcairo2-dev \
             libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
             libavfilter-dev libavdevice-dev libswresample-dev \
-            libx264-dev
+            libx264-dev \
+            libxcb1-dev libxrandr-dev libdbus-1-dev \
+            libpipewire-0.3-dev libwayland-dev libegl-dev
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
