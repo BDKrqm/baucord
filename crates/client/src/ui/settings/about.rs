@@ -31,7 +31,10 @@ pub fn build(x: i32, y: i32, w: i32) -> group::Flex {
 
     let config_path = std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.join("settings.json").display().to_string()))
+        .and_then(|p| {
+            p.parent()
+                .map(|d| d.join("settings.json").display().to_string())
+        })
         .unwrap_or_else(|| "Unknown".to_string());
 
     path_label(&mut col, "Running from:", &exe_path);
@@ -56,13 +59,24 @@ pub fn build(x: i32, y: i32, w: i32) -> group::Flex {
     labels::section_header(&mut col, "\u{1f6e0}", "BUILT WITH");
 
     let techs: &[(&str, &str)] = &[
-        ("Rust — Programming Language",  "https://rust-lang.org"),
-        ("FLTK — User Interface",        "https://www.fltk.org/"),
-        ("Renet — Networking",           "https://github.com/lucaspoffo/renet"),
-        ("CPAL — Audio I/O",             "https://github.com/RustAudio/cpal"),
-        ("Opus — Audio Codec",           "https://opus-codec.org/"),
-        ("RNNoise — Noise Suppression",  "https://jmvalin.ca/demo/rnnoise/"),
-        ("Rubato — Audio Resampling",    "https://github.com/HEnquist/rubato"),
+        ("Rust — Programming Language", "https://rust-lang.org"),
+        ("FLTK — User Interface", "https://www.fltk.org/"),
+        ("Renet — Networking", "https://github.com/lucaspoffo/renet"),
+        (
+            "FFmpeg — Video Encoding/Decoding",
+            "https://www.ffmpeg.org/",
+        ),
+        ("Xcap — Screen capture", "https://github.com/nashaofu/xcap"),
+        ("CPAL — Audio I/O", "https://github.com/RustAudio/cpal"),
+        ("Opus — Audio Codec", "https://opus-codec.org/"),
+        (
+            "RNNoise — Noise Suppression",
+            "https://jmvalin.ca/demo/rnnoise/",
+        ),
+        (
+            "Rubato — Audio Resampling",
+            "https://github.com/HEnquist/rubato",
+        ),
     ];
 
     for &(name, url) in techs {
@@ -105,7 +119,9 @@ fn link_button(col: &mut group::Flex, label: &str, url: &str) {
     btn.set_label_size(11);
     btn.set_align(enums::Align::Left | enums::Align::Inside);
     let url = url.to_string();
-    btn.set_callback(move |_| { let _ = open::that(&url); });
+    btn.set_callback(move |_| {
+        let _ = open::that(&url);
+    });
 }
 
 fn separator(col: &mut group::Flex) {
@@ -120,3 +136,4 @@ fn spacer(col: &mut group::Flex, h: i32) {
     let s = frame::Frame::default();
     col.fixed(&s, h);
 }
+
