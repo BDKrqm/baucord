@@ -67,6 +67,7 @@ pub struct H264Encoder {
     quality: Quality,
     frame_count: u64,
     keyframe_interval: u64,
+    force_next_keyframe: bool,
     /// Reusable YUV420 planar buffer — written each frame, never cloned.
     yuv_buf: Vec<u8>,
 }
@@ -88,6 +89,7 @@ impl H264Encoder {
             quality,
             frame_count: 0,
             keyframe_interval: quality.fps() as u64 * 2,
+            force_next_keyframe: false,
             yuv_buf: vec![0u8; quality.yuv420_size()],
         })
     }
@@ -97,8 +99,9 @@ impl H264Encoder {
         let w = frame.width as usize;
         let h = frame.height as usize;
 
-        if self.frame_count % self.keyframe_interval == 0 {
+        if self.force_next_keyframe || self.frame_count % self.keyframe_interval == 0 {
             self.encoder.force_intra_frame();
+            self.force_next_keyframe = false;
         }
 
         // Convert RGBA → YUV420 in-place (integer math, no allocation)
@@ -129,6 +132,11 @@ impl H264Encoder {
         })
     }
 
+    /// Force the next encoded frame to be a keyframe.
+    pub fn force_keyframe(&mut self) {
+        self.force_next_keyframe = true;
+    }
+
     pub fn quality(&self) -> Quality {
         self.quality
     }
@@ -141,6 +149,10 @@ impl crate::VideoEncoder for H264Encoder {
 
     fn quality(&self) -> Quality {
         self.quality
+    }
+
+    fn force_keyframe(&mut self) {
+        self.force_keyframe();
     }
 }
 
@@ -216,5 +228,9 @@ impl H264Decoder {
 impl crate::VideoDecoder for H264Decoder {
     fn decode(&mut self, encoded: &EncodedFrame) -> Result<Option<DecodedFrame>, CodecError> {
         self.decode(encoded)
+    }
+
+    fn return_buffer(&mut self, buf: Vec<u8>) {
+        self.return_buffer(buf);
     }
 }

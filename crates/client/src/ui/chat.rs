@@ -135,7 +135,11 @@ impl Chat {
     pub fn create_ui(&mut self) -> group::Flex {
         self.group.clone()
     }
-
+    pub fn handle_system_message(&mut self, text: String) {
+        let msg = format!("{text}\n");
+        self.append_system_message(&msg);
+        self.scroll_to_bottom();
+    }
     pub fn handle_connected(&mut self, server_name: String, greeting: String) {
         self.chat_buffer.set_text("");
         self.style_buffer.set_text("");

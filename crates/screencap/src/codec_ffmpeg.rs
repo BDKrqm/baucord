@@ -35,6 +35,7 @@ pub struct FfmpegEncoder {
     quality: Quality,
     frame_count: i64,
     keyframe_interval: i64,
+    force_next_keyframe: bool,
     /// Reusable FFmpeg frame for RGBA input — avoids alloc per encode.
     rgba_frame: VideoFrame,
     /// Reusable FFmpeg frame for YUV420P — fed to encoder.
@@ -60,16 +61,20 @@ impl FfmpegEncoder {
             .video()
             .map_err(|e| CodecError::EncoderInit(e.to_string()))?;
 
+        let target_bitrate = quality.bitrate() as usize;
+        let max_bitrate = target_bitrate * 2;
+
         ctx.set_width(quality.width());
         ctx.set_height(quality.height());
         ctx.set_format(Pixel::YUV420P);
         ctx.set_time_base(Rational(1, quality.fps() as i32));
         ctx.set_frame_rate(Some(Rational(quality.fps() as i32, 1)));
-        ctx.set_bit_rate(quality.bitrate() as usize);
+        ctx.set_bit_rate(target_bitrate);
+        ctx.set_max_bit_rate(max_bitrate);
         ctx.set_gop(quality.fps() * 2);
         ctx.set_max_b_frames(0);
 
-        let opts = codec_options(enc_name);
+        let opts = codec_options(enc_name, quality);
         let encoder = ctx
             .open_with(opts)
             .map_err(|e| CodecError::EncoderInit(format!("{enc_name}: {e}")))?;
@@ -92,7 +97,7 @@ impl FfmpegEncoder {
         yuv_frame.set_format(Pixel::YUV420P);
 
         // Pre-allocate output buffer for typical keyframe size
-        let estimated_frame_bytes = quality.bitrate() as usize / quality.fps() as usize / 8;
+        let estimated_frame_bytes = target_bitrate / quality.fps() as usize / 8;
         let out_buf = Vec::with_capacity(estimated_frame_bytes * 2);
 
         Ok(Self {
@@ -101,6 +106,7 @@ impl FfmpegEncoder {
             quality,
             frame_count: 0,
             keyframe_interval: (quality.fps() * 2) as i64,
+            force_next_keyframe: false,
             rgba_frame,
             yuv_frame,
             pkt: Packet::empty(),
@@ -120,8 +126,9 @@ impl FfmpegEncoder {
 
         self.yuv_frame.set_pts(Some(self.frame_count));
 
-        if self.frame_count % self.keyframe_interval == 0 {
+        if self.force_next_keyframe || self.frame_count % self.keyframe_interval == 0 {
             self.yuv_frame.set_kind(ffmpeg::picture::Type::I);
+            self.force_next_keyframe = false;
         } else {
             self.yuv_frame.set_kind(ffmpeg::picture::Type::None);
         }
@@ -151,6 +158,14 @@ impl FfmpegEncoder {
         })
     }
 
+    /// Force the next encoded frame to be a keyframe.
+    ///
+    /// Call this when a new viewer subscribes so they immediately get a
+    /// decodable frame (with SPS/PPS parameter sets).
+    pub fn force_keyframe(&mut self) {
+        self.force_next_keyframe = true;
+    }
+
     pub fn quality(&self) -> Quality {
         self.quality
     }
@@ -172,7 +187,17 @@ impl VideoEncoder for FfmpegEncoder {
     fn quality(&self) -> Quality {
         self.quality
     }
+
+    fn force_keyframe(&mut self) {
+        self.force_keyframe();
+    }
 }
+
+// SAFETY: FFmpeg contexts are single-owner. We never share them across
+// threads — they move into the screen thread and stay there for the
+// lifetime of the capture session.
+unsafe impl Send for FfmpegEncoder {}
+unsafe impl Send for FfmpegDecoder {}
 
 // ---------------------------------------------------------------------------
 // Decoder
@@ -198,10 +223,9 @@ impl FfmpegDecoder {
     pub fn new() -> Result<Self, CodecError> {
         ffmpeg::init().map_err(|e| CodecError::DecoderInit(e.to_string()))?;
 
-        let dec =
-            ffmpeg::decoder::find(codec::Id::H264).ok_or(CodecError::DecoderInit(
-                "H264 decoder not found in FFmpeg".into(),
-            ))?;
+        let dec = ffmpeg::decoder::find(codec::Id::H264).ok_or(CodecError::DecoderInit(
+            "H264 decoder not found in FFmpeg".into(),
+        ))?;
 
         let ctx = ffmpeg::codec::context::Context::new_with_codec(dec)
             .decoder()
@@ -303,6 +327,10 @@ impl VideoDecoder for FfmpegDecoder {
     fn decode(&mut self, encoded: &EncodedFrame) -> Result<Option<DecodedFrame>, CodecError> {
         self.decode(encoded)
     }
+
+    fn return_buffer(&mut self, buf: Vec<u8>) {
+        self.return_buffer(buf);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -316,32 +344,53 @@ fn find_encoder() -> Result<(ffmpeg::Codec, &'static str), CodecError> {
             return Ok((enc, name));
         }
     }
-    Err(CodecError::NoEncoder(
-        ENCODER_PRIORITY.join(", "),
-    ))
+    Err(CodecError::NoEncoder(ENCODER_PRIORITY.join(", ")))
 }
 
 /// Build codec-specific option dictionaries for low-latency encoding.
-fn codec_options(name: &str) -> Dictionary<'static> {
+///
+/// VBV (Video Buffering Verifier) settings constrain peak bitrate so keyframes
+/// don't spike to hundreds of KB. The buffer size is set to 1 second of video
+/// at the max bitrate — this gives the encoder enough room for quality keyframes
+/// while preventing unconstrained spikes.
+fn codec_options(name: &str, quality: Quality) -> Dictionary<'static> {
     let mut opts = Dictionary::new();
+
+    // VBV buffer size: 1 second at max bitrate (2× target) gives the encoder
+    // room for occasional peaks without letting keyframes blow up.
+    let vbv_bufsize = quality.bitrate() * 2;
+
     match name {
         "libx264" => {
             opts.set("preset", "ultrafast");
             opts.set("tune", "zerolatency");
+            // Constrained VBV: caps peak bitrate so keyframes stay manageable.
+            // Without this, libx264 ultrafast produces 200-300KB keyframes at 720p.
+            opts.set("maxrate", &format!("{}", quality.bitrate() * 2));
+            opts.set("bufsize", &format!("{vbv_bufsize}"));
+            // Constrained Baseline profile: no B-frames, no CABAC — lowest
+            // decode complexity and most compatible across devices.
+            opts.set("profile", "baseline");
         }
         "h264_nvenc" => {
             opts.set("preset", "p1");
             opts.set("tune", "ull");
             opts.set("rc", "cbr");
             opts.set("zerolatency", "1");
+            opts.set("maxrate", &format!("{}", quality.bitrate() * 2));
+            opts.set("bufsize", &format!("{vbv_bufsize}"));
         }
         "h264_qsv" => {
             opts.set("preset", "veryfast");
             opts.set("low_power", "1");
+            opts.set("maxrate", &format!("{}", quality.bitrate() * 2));
+            opts.set("bufsize", &format!("{vbv_bufsize}"));
         }
         "h264_amf" => {
             opts.set("usage", "ultralowlatency");
             opts.set("quality", "speed");
+            opts.set("maxrate", &format!("{}", quality.bitrate() * 2));
+            opts.set("bufsize", &format!("{vbv_bufsize}"));
         }
         _ => {}
     }

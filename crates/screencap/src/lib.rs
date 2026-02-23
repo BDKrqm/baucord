@@ -181,10 +181,22 @@ pub enum CodecError {
 pub trait VideoEncoder {
     fn encode(&mut self, frame: &Frame) -> Result<EncodedFrame, CodecError>;
     fn quality(&self) -> Quality;
+
+    /// Force the next encoded frame to be a keyframe (IDR).
+    ///
+    /// Used when a new viewer subscribes — they need a keyframe with
+    /// SPS/PPS parameter sets before they can decode any P-frames.
+    fn force_keyframe(&mut self);
 }
 
 /// Decoder that converts H.264 bitstream back into RGBA frames.
 pub trait VideoDecoder {
     /// Returns `Ok(None)` when the decoder is still buffering (needs more NALs).
     fn decode(&mut self, encoded: &EncodedFrame) -> Result<Option<DecodedFrame>, CodecError>;
+
+    /// Return a previously-decoded RGBA buffer for reuse.
+    ///
+    /// Avoids allocating a new buffer on the next `decode()` call.
+    /// Optional — callers that don't recycle buffers can ignore this.
+    fn return_buffer(&mut self, _buf: Vec<u8>) {}
 }

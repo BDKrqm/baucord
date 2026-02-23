@@ -31,6 +31,30 @@ pub struct ChannelSettings {
     pub reliable_channel_id: u8,
     pub voice_channel_id: u8,
     pub voice_buffer_size_mb: usize,
+    #[serde(default = "default_video_channel_id")]
+    pub video_channel_id: u8,
+    #[serde(default = "default_video_buffer_size_mb")]
+    pub video_buffer_size_mb: usize,
+    #[serde(default = "default_reliable_video_channel_id")]
+    pub reliable_video_channel_id: u8,
+    #[serde(default = "default_reliable_video_buffer_size_mb")]
+    pub reliable_video_buffer_size_mb: usize,
+}
+
+fn default_video_channel_id() -> u8 {
+    protocol::VIDEO_CHANNEL
+}
+
+fn default_video_buffer_size_mb() -> usize {
+    protocol::VIDEO_BUFFER_BYTES / (1024 * 1024)
+}
+
+fn default_reliable_video_channel_id() -> u8 {
+    protocol::RELIABLE_VIDEO_CHANNEL
+}
+
+fn default_reliable_video_buffer_size_mb() -> usize {
+    protocol::RELIABLE_VIDEO_BUFFER_BYTES / (1024 * 1024)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -73,12 +97,17 @@ impl Default for Config {
             },
             network: NetworkSettings {
                 max_clients: 64,
-                protocol_id: 27,
+                protocol_id: protocol::PROTOCOL_ID,
             },
             channels: ChannelSettings {
-                reliable_channel_id: 2,
-                voice_channel_id: 3,
-                voice_buffer_size_mb: 5,
+                reliable_channel_id: protocol::RELIABLE_CHANNEL,
+                voice_channel_id: protocol::VOICE_CHANNEL,
+                voice_buffer_size_mb: protocol::VOICE_BUFFER_BYTES / (1024 * 1024),
+                video_channel_id: protocol::VIDEO_CHANNEL,
+                video_buffer_size_mb: protocol::VIDEO_BUFFER_BYTES / (1024 * 1024),
+                reliable_video_channel_id: protocol::RELIABLE_VIDEO_CHANNEL,
+                reliable_video_buffer_size_mb: protocol::RELIABLE_VIDEO_BUFFER_BYTES
+                    / (1024 * 1024),
             },
             logging: LoggingSettings {
                 level: "info".to_string(),
