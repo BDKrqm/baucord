@@ -51,7 +51,7 @@ jobs:
             libpango1.0-dev libcairo2-dev \
             libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
             libavfilter-dev libavdevice-dev libswresample-dev \
-            libx264-dev \
+            libx264-dev libgbm-dev \
             libxcb1-dev libxrandr-dev libdbus-1-dev \
             libpipewire-0.3-dev libwayland-dev libegl-dev
 
