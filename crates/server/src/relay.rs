@@ -120,7 +120,7 @@ impl VoiceRelay {
         }
 
         // Client ID mismatch is informational only — transport guarantees sender
-        if hdr_client_id != u64::from(client_id) {
+        if hdr_client_id != client_id {
             debug!("Header client_id {hdr_client_id} != sender {client_id} (stale session?)",);
         }
 
@@ -297,9 +297,6 @@ impl VideoRelay {
     ) {
         let clients: Vec<ClientId> = server.clients_id();
 
-        // Process both channels with the same validation + relay logic.
-        // The inbound channel tells us nothing about keyframe status —
-        // we read the flag from the header and choose the outbound channel.
         for inbound_channel in [reliable_video_channel_id, video_channel_id] {
             for client_id in &clients {
                 while let Some(message) = server.receive_message(*client_id, inbound_channel) {

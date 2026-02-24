@@ -519,9 +519,6 @@ impl NetworkClient {
     // ── Video channels ──────────────────────────────────────────────
 
     fn process_video_messages(&mut self) {
-        // Read from both channels — same wire format, different transport.
-        // Keyframes arrive on RELIABLE_VIDEO_CHANNEL (guaranteed delivery),
-        // P-frames arrive on VIDEO_CHANNEL (unreliable, low latency).
         for channel in [RELIABLE_VIDEO_CHANNEL, VIDEO_CHANNEL] {
             while let Some(message) = self.client.receive_message(channel) {
                 self.process_video_packet(&message);

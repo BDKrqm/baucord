@@ -101,6 +101,7 @@ impl ChatServer {
 
     fn create_connection_config(channels: &ChannelSettings) -> ConnectionConfig {
         let mut config = ConnectionConfig::default();
+
         config.client_channels_config.clear();
         config.server_channels_config.clear();
 

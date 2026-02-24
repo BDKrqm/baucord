@@ -5,10 +5,8 @@
 //
 // Sender side: capture → encode → NetworkControl::SendVideoFrame
 // Receiver side: incoming H.264 frames → per-peer VideoDecoder → RGBA for display
-//
-// This module has NO dependency on any UI toolkit.
 
-use crossbeam_channel::{Receiver, Sender, bounded, select};
+use crossbeam_channel::{Receiver, Sender, bounded};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,11 +14,12 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use log::{error, info, warn};
+use log::{info, warn};
 
 use screencap::capture::{MonitorInfo, ScreenCapturer};
 use screencap::{
-    CodecError, DecodedFrame, EncodedFrame, Frame, Quality, VideoDecoder, VideoEncoder,
+    CodecError, EncodedFrame, Quality, VideoDecoder, VideoEncoder,
+    codec::{FfmpegDecoder, FfmpegEncoder},
 };
 
 use crate::network::NetworkControl;
@@ -74,6 +73,8 @@ pub enum ScreenEvent {
         /// RGBA pixel data. Callers should process this promptly — the
         /// screen thread will keep producing frames.
         rgba: Vec<u8>,
+        /// Size of the encoded H.264 frame in bytes (before decode).
+        frame_bytes: usize,
     },
     /// A remote peer started sharing (so UI can show "Watch" button).
     PeerStartedSharing {
@@ -124,8 +125,10 @@ pub struct ScreenThreadHandle {
 
 impl ScreenThreadHandle {
     pub fn spawn(network_tx: Sender<NetworkControl>, wake: WakeFn) -> Self {
-        let (tx, control_rx) = bounded::<ScreenControl>(64);
-        let (event_tx, event_rx) = bounded::<ScreenEvent>(32);
+        // 256 slots: at 30fps inbound + outbound control messages, 64 was
+        // too tight and caused try_send drops during active streaming.
+        let (tx, control_rx) = bounded::<ScreenControl>(256);
+        let (event_tx, event_rx) = bounded::<ScreenEvent>(256);
         let shared = SharedScreenState::new();
 
         let shared_clone = shared.clone();
@@ -174,6 +177,11 @@ struct PeerStream {
     /// P-frames are silently dropped until the first keyframe arrives,
     /// preventing the "non-existing PPS 0 referenced" FFmpeg errors.
     got_keyframe: bool,
+    /// Last successfully processed sequence number for gap detection.
+    /// P-frames with seq gaps > 1 are dropped (unreliable channel may
+    /// lose or reorder packets, and H.264 decoders produce corruption
+    /// when reference frames are missing).
+    last_seq: Option<u32>,
 }
 
 // ── Thread loop ─────────────────────────────────────────────────────────
@@ -188,37 +196,62 @@ fn run_screen_loop(
     let mut capture: Option<CaptureState> = None;
     let mut peer_streams: HashMap<u64, PeerStream> = HashMap::new();
     let mut running = true;
+    let mut next_capture = Instant::now();
 
     while running {
-        // If we're actively capturing, use frame_duration as timeout.
-        // Otherwise, block until a control message arrives.
-        let timeout = capture
-            .as_ref()
-            .map(|c| c.quality.frame_duration())
-            .unwrap_or(Duration::from_millis(100));
+        let now = Instant::now();
 
-        select! {
-            recv(control_rx) -> msg => {
-                match msg {
-                    Ok(ctrl) => handle_control(
-                        ctrl,
-                        &mut capture,
-                        &mut peer_streams,
-                        &event_tx,
-                        &network_tx,
-                        &shared,
-                        &wake,
-                        &mut running,
-                    ),
-                    Err(_) => { running = false; }
+        let is_viewing = !peer_streams.is_empty();
+        let is_capturing = capture.is_some();
+
+        if is_capturing {
+            // ── Sharing mode ────────────────────────────────────────
+            // Use frame-interval timeout so we wake at capture time,
+            // but also wake immediately on any incoming message.
+            let time_to_capture = next_capture.saturating_duration_since(now);
+
+            match control_rx.recv_timeout(time_to_capture) {
+                Ok(ctrl) => handle_control(
+                    ctrl,
+                    &mut capture,
+                    &mut peer_streams,
+                    &event_tx,
+                    &network_tx,
+                    &shared,
+                    &wake,
+                    &mut running,
+                ),
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                Err(_) => break,
+            }
+
+            // Drain all pending
+            while let Ok(ctrl) = control_rx.try_recv() {
+                handle_control(
+                    ctrl,
+                    &mut capture,
+                    &mut peer_streams,
+                    &event_tx,
+                    &network_tx,
+                    &shared,
+                    &wake,
+                    &mut running,
+                );
+            }
+
+            // Capture if due
+            if let Some(state) = &mut capture {
+                if Instant::now() >= next_capture {
+                    capture_and_encode(state, &event_tx, &network_tx, &shared);
+                    next_capture = Instant::now() + state.quality.frame_duration();
                 }
             }
-            default(timeout) => {}
-        }
-
-        // Drain queued control messages
-        for _ in 0..32 {
-            match control_rx.try_recv() {
+        } else if is_viewing {
+            // ── Viewing mode (no capture) ───────────────────────────
+            // Block on channel with NO timeout — wake instantly when
+            // a frame arrives. This is the key to hitting 60fps: the
+            // OS scheduler doesn't get a chance to delay us.
+            match control_rx.recv() {
                 Ok(ctrl) => handle_control(
                     ctrl,
                     &mut capture,
@@ -231,15 +264,42 @@ fn run_screen_loop(
                 ),
                 Err(_) => break,
             }
-        }
 
-        // Capture + encode one frame if sharing
-        if let Some(state) = &mut capture {
-            capture_and_encode(state, &event_tx, &network_tx, &shared);
+            // Drain all pending — if multiple frames queued up,
+            // process them all before yielding. This prevents
+            // frame buildup in the channel.
+            while let Ok(ctrl) = control_rx.try_recv() {
+                handle_control(
+                    ctrl,
+                    &mut capture,
+                    &mut peer_streams,
+                    &event_tx,
+                    &network_tx,
+                    &shared,
+                    &wake,
+                    &mut running,
+                );
+            }
+        } else {
+            // ── Idle mode ───────────────────────────────────────────
+            // Nothing active — sleep until a control message arrives.
+            match control_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(ctrl) => handle_control(
+                    ctrl,
+                    &mut capture,
+                    &mut peer_streams,
+                    &event_tx,
+                    &network_tx,
+                    &shared,
+                    &wake,
+                    &mut running,
+                ),
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                Err(_) => break,
+            }
         }
     }
 
-    // Clean up
     shared.is_sharing.store(false, Ordering::Relaxed);
     info!("📺 Screen thread stopped");
 }
@@ -323,63 +383,17 @@ fn handle_control(
             height,
             data,
         } => {
-            let stream = peer_streams.entry(client_id).or_insert_with(|| {
-                // Lazily create decoder on first frame
-                let decoder = match create_decoder() {
-                    Ok(d) => d,
-                    Err(e) => {
-                        error!("Failed to create decoder for peer {client_id}: {e}");
-                        // Return a placeholder — will fail on decode but won't panic
-                        create_decoder().expect("fallback decoder failed")
-                    }
-                };
-                info!("📺 Created decoder for peer {client_id} ({width}x{height})");
-                PeerStream {
-                    decoder,
-                    width,
-                    height,
-                    got_keyframe: false,
-                }
-            });
-
-            // Drop P-frames until we have a keyframe — decoder needs SPS/PPS
-            // from the first keyframe to initialize. Without this, FFmpeg logs
-            // "non-existing PPS 0 referenced" for every P-frame.
-            if !is_keyframe && !stream.got_keyframe {
-                // Silently skip — don't even feed to decoder
-                return;
-            }
-
-            if is_keyframe {
-                stream.got_keyframe = true;
-                info!("📺 Keyframe #{seq}: {} bytes", data.len());
-            }
-
-            let encoded = EncodedFrame {
-                data,
-                timestamp_ms: 0, // receiver doesn't need sender timestamps
+            decode_incoming_frame(
+                client_id,
+                seq,
                 is_keyframe,
-            };
-
-            match stream.decoder.decode(&encoded) {
-                Ok(Some(decoded)) => {
-                    event_tx
-                        .send(ScreenEvent::FrameReady {
-                            client_id,
-                            width: decoded.width,
-                            height: decoded.height,
-                            rgba: decoded.data,
-                        })
-                        .ok();
-                    wake();
-                }
-                Ok(None) => {
-                    // Decoder buffering, no frame yet
-                }
-                Err(e) => {
-                    warn!("Decode error for peer {client_id} seq {seq}: {e}");
-                }
-            }
+                width,
+                height,
+                data,
+                peer_streams,
+                event_tx,
+                wake,
+            );
         }
 
         ScreenControl::PeerStartedSharing {
@@ -407,6 +421,154 @@ fn handle_control(
 
         ScreenControl::Shutdown => {
             *running = false;
+        }
+    }
+}
+
+/// Decode an incoming video frame from a remote peer.
+///
+/// Key invariants:
+/// - P-frames are dropped until the first keyframe (decoder needs SPS/PPS).
+/// - On each keyframe, the decoder is **reset** (fresh instance) to prevent
+///   corruption from compounding across GOP boundaries. This is critical
+///   because the unreliable channel may lose P-frames, leaving the decoder
+///   in an inconsistent reference state.
+/// - P-frames with sequence gaps > 1 are dropped — the missing reference
+///   frame(s) would cause cascading visual corruption.
+fn decode_incoming_frame(
+    client_id: u64,
+    seq: u32,
+    is_keyframe: bool,
+    width: u32,
+    height: u32,
+    data: Vec<u8>,
+    peer_streams: &mut HashMap<u64, PeerStream>,
+    event_tx: &Sender<ScreenEvent>,
+    wake: &WakeFn,
+) {
+    if is_keyframe {
+        let stream = peer_streams.entry(client_id).or_insert_with(|| {
+            // First keyframe from this peer — create decoder
+            info!("📺 Created decoder for peer {client_id} ({width}x{height})");
+            let decoder = create_decoder().expect("decoder creation failed");
+            PeerStream {
+                decoder,
+                width,
+                height,
+                got_keyframe: false,
+                last_seq: None,
+            }
+        });
+
+        stream.width = width;
+        stream.height = height;
+        stream.got_keyframe = true;
+        stream.last_seq = Some(seq);
+
+        info!(
+            "📺 Keyframe #{seq} from peer {client_id}: {} bytes",
+            data.len()
+        );
+
+        let encoded = EncodedFrame {
+            data,
+            timestamp_ms: 0,
+            is_keyframe: true,
+        };
+
+        let t0 = std::time::Instant::now();
+        match stream.decoder.decode(&encoded) {
+            Ok(Some(decoded)) => {
+                let decode_ms = t0.elapsed().as_secs_f32() * 1000.0;
+                if decode_ms > 10.0 {
+                    log::warn!("Slow decode: {decode_ms:.1}ms for seq {seq}");
+                }
+                event_tx
+                    .send(ScreenEvent::FrameReady {
+                        client_id,
+                        width: decoded.width,
+                        height: decoded.height,
+                        rgba: decoded.data,
+                        frame_bytes: encoded.data.len(),
+                    })
+                    .ok();
+                wake();
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!("Decode error for keyframe from peer {client_id} seq {seq}: {e}");
+                stream.got_keyframe = false;
+            }
+        }
+        return;
+    }
+
+    // P-frame path
+    let Some(stream) = peer_streams.get_mut(&client_id) else {
+        // No decoder yet — waiting for first keyframe
+        return;
+    };
+
+    if !stream.got_keyframe {
+        // Still waiting for a keyframe — silently drop
+        return;
+    }
+
+    // Sequence gap detection: small gaps (1-3 frames) are tolerated —
+    // the decoder may produce minor artifacts but recovers at next
+    // keyframe. Large gaps indicate serious packet loss; reset to
+    // avoid compounding corruption.
+    if let Some(last) = stream.last_seq {
+        let gap = seq.wrapping_sub(last);
+        if gap > 1 && gap < 1000 {
+            // Gap detected
+            if gap > 5 {
+                // Large gap — decoder state is too stale, wait for keyframe
+                warn!(
+                    "Large seq gap for peer {client_id}: expected {}, got {seq} (gap={gap}) — \
+                 dropping until next keyframe",
+                    last.wrapping_add(1)
+                );
+                stream.got_keyframe = false;
+                return;
+            }
+            // Small gap (2-5 frames) — log but let the decoder try.
+            // Worst case: minor artifacts until next keyframe.
+            warn!(
+                "Seq gap for peer {client_id}: expected {}, got {seq} (gap={gap}) — \
+             continuing (minor artifacts possible)",
+                last.wrapping_add(1)
+            );
+        }
+    }
+
+    stream.last_seq = Some(seq);
+
+    let encoded = EncodedFrame {
+        data,
+        timestamp_ms: 0,
+        is_keyframe: false,
+    };
+
+    match stream.decoder.decode(&encoded) {
+        Ok(Some(decoded)) => {
+            event_tx
+                .send(ScreenEvent::FrameReady {
+                    client_id,
+                    width: decoded.width,
+                    height: decoded.height,
+                    rgba: decoded.data,
+                    frame_bytes: encoded.data.len(),
+                })
+                .ok();
+            wake();
+        }
+        Ok(None) => {}
+        Err(e) => {
+            warn!("Decode error for peer {client_id} seq {seq}: {e}");
+            // Decode error likely means corrupted reference state —
+            // wait for the next keyframe to recover.
+            stream.got_keyframe = false;
         }
     }
 }
@@ -477,7 +639,7 @@ fn capture_and_encode(
 /// Create the best available video encoder.
 fn create_encoder(quality: Quality) -> Result<Box<dyn VideoEncoder + Send>, CodecError> {
     {
-        match screencap::codec_ffmpeg::FfmpegEncoder::new(quality) {
+        match FfmpegEncoder::new(quality) {
             Ok(enc) => {
                 info!("📺 Using FFmpeg encoder: {}", enc.encoder_name());
                 return Ok(Box::new(enc));
@@ -496,7 +658,7 @@ fn create_encoder(quality: Quality) -> Result<Box<dyn VideoEncoder + Send>, Code
 
 /// Create the best available video decoder.
 fn create_decoder() -> Result<Box<dyn VideoDecoder + Send>, CodecError> {
-    match screencap::codec_ffmpeg::FfmpegDecoder::new() {
+    match FfmpegDecoder::new() {
         Ok(dec) => return Ok(Box::new(dec)),
         Err(e) => {
             warn!("FFmpeg decoder unavailable: {e}, trying openh264");

@@ -209,7 +209,7 @@ impl App {
             }
 
             // Screen events (bounded drain)
-            for _ in 0..32 {
+            for _ in 0..64 {
                 match self.screen.event_rx.try_recv() {
                     Ok(evt) => {
                         self.handle_screen_event(evt);
@@ -263,11 +263,23 @@ impl App {
                 if let Some(chat) = &mut self.chat {
                     chat.handle_system_message(format!("Screen share started ({quality})"));
                 }
+                if let Some(sidebar) = &mut self.sidebar {
+                    sidebar.set_share_state(true);
+                }
+                // Start 1-second stream stats timer
+                let sender = self.sender;
+                app::add_timeout3(1.0, move |handle| {
+                    sender.send(UiMessage::UpdateStreamStats);
+                    app::repeat_timeout3(1.0, handle);
+                });
             }
             ScreenEvent::SharingStopped => {
                 info!("📺 Screen share stopped");
                 if let Some(chat) = &mut self.chat {
                     chat.handle_system_message("Screen share stopped".to_string());
+                }
+                if let Some(sidebar) = &mut self.sidebar {
+                    sidebar.set_share_state(false);
                 }
             }
             ScreenEvent::Error(e) => {
@@ -278,15 +290,24 @@ impl App {
                 width,
                 height,
                 rgba,
+                frame_bytes,
             } => {
+                use std::time::Instant;
+                static LAST: std::sync::OnceLock<std::sync::Mutex<Instant>> =
+                    std::sync::OnceLock::new();
+                let mut last = LAST
+                    .get_or_init(|| std::sync::Mutex::new(Instant::now()))
+                    .lock()
+                    .unwrap();
+
+                *last = Instant::now();
                 if let Some(viewer) = self.viewer_windows.get_mut(&client_id) {
-                    viewer.update_frame(rgba, width, height);
+                    viewer.update_frame(rgba, width, height, frame_bytes);
                 } else {
-                    // First frame — open a viewer window
                     let username = self.username_for_u64(client_id);
                     let mut viewer =
                         ViewerWindow::new(client_id, &username, width, height, self.sender);
-                    viewer.update_frame(rgba, width, height);
+                    viewer.update_frame(rgba, width, height, frame_bytes);
                     self.viewer_windows.insert(client_id, viewer);
                     info!("📺 Opened viewer for {username} ({width}x{height})");
                 }
@@ -355,11 +376,6 @@ impl App {
                 if let Some(chat) = &mut self.chat {
                     chat.handle_text_message(username, text);
                 }
-                //removed chat sound for now
-                //self.voice
-                //    .tx
-                //    .send(VoiceControl::PlaySound(SoundType::UserChat))
-                //    .ok();
             }
             NetworkMessage::UserSpeaking {
                 client_id,
@@ -391,19 +407,18 @@ impl App {
                 }
             }
 
-            // ── Screen share signaling (already routed to screen thread
-            //    by the network loop — here we just update app state) ────
+            // ── Screen share signaling ──────────────────────────────
             NetworkMessage::ScreenShareStarted {
                 client_id,
                 width,
                 height,
             } => {
                 self.active_sharers.insert(client_id, (width, height));
-                // TODO: show "Watch" button in sidebar for this user
+                self.sync_sharers_to_sidebar();
             }
             NetworkMessage::ScreenShareStopped { client_id } => {
                 self.active_sharers.remove(&client_id);
-                // TODO: remove "Watch" button, close viewer window if open
+                self.sync_sharers_to_sidebar();
             }
             NetworkMessage::VideoFrame { .. } => {
                 // Video frames are routed directly to the screen thread by the
@@ -415,6 +430,56 @@ impl App {
 
     fn handle_ui_message(&mut self, msg: UiMessage) {
         match msg {
+            // ── Screen share buttons ────────────────────────────────
+            UiMessage::StartShareScreen => {
+                if self.screen.shared.is_sharing.load(Ordering::Relaxed) {
+                    // Button is in "Stop Sharing" state — stop.
+                    self.screen.tx.send(ScreenControl::StopSharing).ok();
+                } else {
+                    // Start sharing: primary monitor, 720p30.
+                    self.screen
+                        .tx
+                        .send(ScreenControl::StartSharing {
+                            quality: screencap::Quality::HD60,
+                            monitor_index: 0,
+                        })
+                        .ok();
+                }
+            }
+            UiMessage::UpdateStreamStats => {
+                if self.screen.shared.is_sharing.load(Ordering::Relaxed) {
+                    let frame_bytes = self.screen.shared.last_frame_bytes.load(Ordering::Relaxed);
+                    let encode_us = self.screen.shared.last_encode_us.load(Ordering::Relaxed);
+                    let avg_kb = frame_bytes as f32 / 1024.0;
+                    let encode_ms = encode_us as f32 / 1000.0;
+                    if let Some(sidebar) = &mut self.sidebar {
+                        sidebar.update_stream_stats(Some(("720p 60fps", avg_kb, encode_ms)));
+                    }
+                } else {
+                    // Not sharing anymore — hide stats, timer won't re-arm
+                    if let Some(sidebar) = &mut self.sidebar {
+                        sidebar.update_stream_stats(None);
+                    }
+                }
+            }
+            UiMessage::StopShareScreen => {
+                if self.screen.shared.is_sharing.load(Ordering::Relaxed) {
+                    self.screen.tx.send(ScreenControl::StopSharing).ok();
+                }
+            }
+            UiMessage::WatchPeer { client_id } => {
+                let raw_id = u64::from(client_id);
+                // Don't open duplicate viewer windows
+                if self.viewer_windows.contains_key(&raw_id) {
+                    return;
+                }
+                let username = self.get_username(client_id);
+                self.network
+                    .tx
+                    .send(NetworkControl::SubscribeScreen { target_id: raw_id })
+                    .ok();
+                self.show_chat_system(&format!("Watching {username}'s screen..."));
+            }
             UiMessage::UnwatchPeer { client_id } => {
                 // User closed a viewer window — unsubscribe from stream
                 self.viewer_windows.remove(&client_id);
@@ -427,6 +492,7 @@ impl App {
                 let username = self.username_for_u64(client_id);
                 self.show_chat_system(&format!("Stopped watching {username}."));
             }
+
             UiMessage::Connect { nickname, server } => {
                 self.handle_connect(nickname, server);
             }
@@ -434,11 +500,7 @@ impl App {
                 self.handle_disconnect();
             }
             UiMessage::SendChatMessage(text) => {
-                if let Some(cmd) = text.strip_prefix('/') {
-                    self.handle_command(cmd);
-                } else {
-                    self.network.tx.send(NetworkControl::SendMessage(text)).ok();
-                }
+                self.network.tx.send(NetworkControl::SendMessage(text)).ok();
             }
             UiMessage::ToggleMute => {
                 self.handle_toggle_mute();
@@ -610,112 +672,17 @@ impl App {
     }
 
     // ════════════════════════════════════════════════════════════════════
-    //  CHAT COMMANDS (/share, /stopshare, /watch, /unwatch)
+    //  HELPERS
     // ════════════════════════════════════════════════════════════════════
 
-    fn handle_command(&mut self, cmd: &str) {
-        let parts: Vec<&str> = cmd.split_whitespace().collect();
-        let Some(verb) = parts.first() else { return };
-
-        match *verb {
-            "share" => {
-                if self.screen.shared.is_sharing.load(Ordering::Relaxed) {
-                    self.show_chat_system("Already sharing. Use /stopshare first.");
-                    return;
-                }
-                // Default: primary monitor, 720p30
-                self.screen
-                    .tx
-                    .send(ScreenControl::StartSharing {
-                        quality: screencap::Quality::HD30,
-                        monitor_index: 0,
-                    })
-                    .ok();
-                self.show_chat_system("Starting screen share (720p 30fps)...");
-            }
-            "stopshare" => {
-                if !self.screen.shared.is_sharing.load(Ordering::Relaxed) {
-                    self.show_chat_system("Not currently sharing.");
-                    return;
-                }
-                self.screen.tx.send(ScreenControl::StopSharing).ok();
-            }
-            "watch" => {
-                let target_name = parts.get(1).copied();
-                let Some(target_id) = self.resolve_sharer(target_name) else {
-                    if target_name.is_some() {
-                        self.show_chat_system("That user is not sharing.");
-                    } else if self.active_sharers.is_empty() {
-                        self.show_chat_system("No one is sharing right now.");
-                    } else {
-                        let names: Vec<String> = self
-                            .active_sharers
-                            .keys()
-                            .map(|id| self.get_username(*id))
-                            .collect();
-                        self.show_chat_system(&format!(
-                            "Multiple sharers — specify a name: /watch <username>\nSharing: {}",
-                            names.join(", ")
-                        ));
-                    }
-                    return;
-                };
-
-                let username = self.get_username(target_id);
-                self.network
-                    .tx
-                    .send(NetworkControl::SubscribeScreen {
-                        target_id: u64::from(target_id),
-                    })
-                    .ok();
-                self.show_chat_system(&format!("Watching {username}'s screen..."));
-            }
-            "unwatch" => {
-                let target_name = parts.get(1).copied();
-                let Some(target_id) = self.resolve_sharer(target_name) else {
-                    self.show_chat_system("Specify who to stop watching: /unwatch <username>");
-                    return;
-                };
-
-                let username = self.get_username(target_id);
-                self.network
-                    .tx
-                    .send(NetworkControl::UnsubscribeScreen {
-                        target_id: u64::from(target_id),
-                    })
-                    .ok();
-                self.show_chat_system(&format!("Stopped watching {username}."));
-            }
-            _ => {
-                self.show_chat_system(&format!("Unknown command: /{verb}"));
-            }
+    /// Push the current active_sharers set to the sidebar so it can show
+    /// "Live" badges and "Watch Stream" in the popup.
+    fn sync_sharers_to_sidebar(&mut self) {
+        if let Some(sidebar) = &mut self.sidebar {
+            sidebar.set_active_sharers(&self.active_sharers);
         }
-    }
-
-    /// Resolve a sharer by username. If `name` is None and there's exactly
-    /// one active sharer, return them. Otherwise return None.
-    fn resolve_sharer(&self, name: Option<&str>) -> Option<renet::ClientId> {
-        match name {
-            Some(target) => {
-                // Find client_id by username among active sharers
-                self.active_sharers
-                    .keys()
-                    .find(|&&id| {
-                        self.users
-                            .get(&id)
-                            .is_some_and(|u| u.username.eq_ignore_ascii_case(target))
-                    })
-                    .copied()
-            }
-            None => {
-                // Auto-resolve if exactly one sharer
-                if self.active_sharers.len() == 1 {
-                    self.active_sharers.keys().next().copied()
-                } else {
-                    None
-                }
-            }
-        }
+        // Trigger a user list refresh so badges update immediately
+        self.update_user_list();
     }
 
     /// Show a system message in chat (not sent to server).
@@ -727,7 +694,6 @@ impl App {
 
     /// Look up username by u64 client id (for screen thread events which use u64).
     fn username_for_u64(&self, raw_id: u64) -> String {
-        // Try to find a matching ClientId in our user map
         self.users
             .iter()
             .find(|&(&id, _)| u64::from(id) == raw_id)
@@ -867,6 +833,8 @@ impl App {
         self.voice.tx.send(VoiceControl::RemovePeer(client_id)).ok();
         self.users.remove(&client_id);
         self.active_sharers.remove(&client_id);
+        self.sync_sharers_to_sidebar();
+
         // Close viewer if we were watching this user
         let raw_id = u64::from(client_id);
         if let Some(mut viewer) = self.viewer_windows.remove(&raw_id) {
