@@ -37,6 +37,27 @@ pub enum Quality {
     /// 1920×1080 @ 60 FPS — best quality, needs hardware encoder.
     FHD60,
 }
+impl From<Quality> for u8 {
+    fn from(q: Quality) -> u8 {
+        match q {
+            Quality::HD30 => 0,
+            Quality::HD60 => 1,
+            Quality::FHD30 => 2,
+            Quality::FHD60 => 3,
+        }
+    }
+}
+
+impl From<u8> for Quality {
+    fn from(v: u8) -> Self {
+        match v {
+            1 => Self::HD60,
+            2 => Self::FHD30,
+            3 => Self::FHD60,
+            _ => Self::HD30,
+        }
+    }
+}
 
 impl Quality {
     pub const fn width(self) -> u32 {
@@ -68,10 +89,10 @@ impl Quality {
     /// high-frequency detail (glyphs, 1px borders, UI elements).
     pub const fn bitrate(self) -> u32 {
         match self {
-            Self::HD30 => 2_500_000,
-            Self::HD60 => 3_500_000,
-            Self::FHD30 => 5_000_000,
-            Self::FHD60 => 7_000_000,
+            Self::HD30 => 3_500_000,
+            Self::HD60 => 4_500_000,
+            Self::FHD30 => 6_000_000,
+            Self::FHD60 => 8_000_000,
         }
     }
 
@@ -200,4 +221,3 @@ pub trait VideoDecoder {
     /// Optional — callers that don't recycle buffers can ignore this.
     fn return_buffer(&mut self, _buf: Vec<u8>) {}
 }
-

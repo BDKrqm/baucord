@@ -20,7 +20,7 @@ use crate::{
     config::{BindableAction, Settings, peer_key},
     hotkeys::HotkeyManager,
     network::{NetworkControl, NetworkMessage, NetworkThreadHandle},
-    screen::{ScreenControl, ScreenEvent, ScreenThreadHandle},
+    screen::{Quality, ScreenControl, ScreenEvent, ScreenThreadHandle},
     ui::{chat::Chat, messages::UiMessage, sidebar::Sidebar, viewer::ViewerWindow},
     voice::{VoiceControl, VoiceEvent, VoiceThreadHandle},
 };
@@ -291,18 +291,43 @@ impl App {
                 height,
                 rgba,
                 frame_bytes,
+                seq,
+                is_keyframe,
+                enqueued_at,
+                decoded_at,
             } => {
                 use std::time::Instant;
-                static LAST: std::sync::OnceLock<std::sync::Mutex<Instant>> =
-                    std::sync::OnceLock::new();
-                let mut last = LAST
-                    .get_or_init(|| std::sync::Mutex::new(Instant::now()))
-                    .lock()
-                    .unwrap();
+                let app_drain_at = Instant::now();
+                let net_to_screen_ms =
+                    decoded_at.duration_since(enqueued_at).as_secs_f32() * 1000.0;
+                let decode_done_ms = net_to_screen_ms; // decode is within that window
+                let screen_to_app_ms =
+                    app_drain_at.duration_since(decoded_at).as_secs_f32() * 1000.0;
+                let total_ms = app_drain_at.duration_since(enqueued_at).as_secs_f32() * 1000.0;
 
-                *last = Instant::now();
+                let frame_type = if is_keyframe { "K" } else { "P" };
+
+                // Log every frame — filter with RUST_LOG=info or grep for 📊
+                log::info!(
+                    "📊 [seq={seq} {frame_type} {:.0}KB] net→decode: {net_to_screen_ms:.1}ms | \
+                    decode→app: {screen_to_app_ms:.1}ms | total: {total_ms:.1}ms",
+                    frame_bytes as f64 / 1024.0,
+                );
+
+                // Warn on slow frames (>25ms = would miss 30fps budget)
+                if total_ms > 25.0 {
+                    log::warn!(
+                        "📊 SLOW FRAME seq={seq}: {total_ms:.1}ms total \
+                        (net→decode: {net_to_screen_ms:.1}ms, decode→app: {screen_to_app_ms:.1}ms)"
+                    );
+                }
                 if let Some(viewer) = self.viewer_windows.get_mut(&client_id) {
+                    let blit_start = Instant::now();
                     viewer.update_frame(rgba, width, height, frame_bytes);
+                    let blit_ms = blit_start.elapsed().as_secs_f32() * 1000.0;
+                    if blit_ms > 5.0 {
+                        log::warn!("📊 Slow blit: {blit_ms:.1}ms for seq {seq}");
+                    }
                 } else {
                     let username = self.username_for_u64(client_id);
                     let mut viewer =
@@ -448,15 +473,19 @@ impl App {
             }
             UiMessage::UpdateStreamStats => {
                 if self.screen.shared.is_sharing.load(Ordering::Relaxed) {
+                    let quality = Quality::from(self.screen.shared.quality.load(Ordering::Relaxed));
                     let frame_bytes = self.screen.shared.last_frame_bytes.load(Ordering::Relaxed);
                     let encode_us = self.screen.shared.last_encode_us.load(Ordering::Relaxed);
                     let avg_kb = frame_bytes as f32 / 1024.0;
                     let encode_ms = encode_us as f32 / 1000.0;
                     if let Some(sidebar) = &mut self.sidebar {
-                        sidebar.update_stream_stats(Some(("720p 60fps", avg_kb, encode_ms)));
+                        sidebar.update_stream_stats(Some((
+                            &quality.to_string(),
+                            avg_kb,
+                            encode_ms,
+                        )));
                     }
                 } else {
-                    // Not sharing anymore — hide stats, timer won't re-arm
                     if let Some(sidebar) = &mut self.sidebar {
                         sidebar.update_stream_stats(None);
                     }
