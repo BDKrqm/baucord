@@ -107,7 +107,11 @@ impl App {
         );
 
         // After spawning voice, before spawning network:
-        let screen = ScreenThreadHandle::spawn(network_tx.clone(), wake.clone());
+        let screen = ScreenThreadHandle::spawn(
+            network_tx.clone(),
+            wake.clone(),
+            voice.shared.output_level.clone(),
+        );
 
         let network = NetworkThreadHandle::spawn(
             network_tx,
@@ -374,6 +378,11 @@ impl App {
                     self.show_error(&reason);
                 }
             }
+            NetworkMessage::SystemAudioData { .. } => {
+                // System audio packets are routed directly to the screen
+                // thread by the network loop (hot path). They should never
+                // arrive here, but if they do we silently ignore them.
+            }
             NetworkMessage::InitClient {
                 users,
                 server_name,
@@ -520,6 +529,19 @@ impl App {
                     .ok();
                 let username = self.username_for_u64(client_id);
                 self.show_chat_system(&format!("Stopped watching {username}."));
+            }
+
+            UiMessage::SetStreamVolume { client_id, volume } => {
+                self.screen
+                    .tx
+                    .send(ScreenControl::SetStreamVolume { client_id, volume })
+                    .ok();
+            }
+            UiMessage::MuteStream { client_id, muted } => {
+                self.screen
+                    .tx
+                    .send(ScreenControl::MuteStream { client_id, muted })
+                    .ok();
             }
 
             UiMessage::Connect { nickname, server } => {
