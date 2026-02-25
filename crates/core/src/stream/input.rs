@@ -38,7 +38,7 @@
 //! voice chat.
 
 use crate::stats::AudioStats;
-use crate::{FRAME_SIZE, OPUS_SAMPLE_RATE};
+use crate::OPUS_SAMPLE_RATE;
 
 use audioadapter_buffers::direct::SequentialSliceOfVecs;
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
@@ -442,7 +442,7 @@ mod linux_loopback {
 /// # Usage
 ///
 /// ```rust,no_run
-/// use core::loopback::SystemAudioCapture;
+/// use core::stream::input::SystemAudioCapture;
 /// use core::stats::AudioStats;
 /// use std::sync::Arc;
 ///
@@ -931,12 +931,12 @@ pub fn is_supported() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         Err("System audio capture on macOS requires ScreenCaptureKit integration (not yet implemented). \
-             See core::loopback::coreaudio_loopback module docs for the implementation plan.".into())
+             See core::stream::input::coreaudio_loopback module docs for the implementation plan.".into())
     }
     #[cfg(target_os = "linux")]
     {
         Err("System audio capture on Linux requires PipeWire or PulseAudio monitor integration (not yet implemented). \
-             See core::loopback::linux_loopback module docs for the implementation plan.".into())
+             See core::stream::input::linux_loopback module docs for the implementation plan.".into())
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
