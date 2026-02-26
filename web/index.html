@@ -1,273 +1,975 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="scroll-smooth">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>baucord — lightweight voice chat</title>
-    <link rel="stylesheet" href="style.css" />
+    <meta
+      name="description"
+      content="Real-time voice, text & screen sharing. Ultra lightweight, low latency, no bloat. Pure Rust with native UI."
+    />
+
+    <!--
+    ╔══════════════════════════════════════════════════════════╗
+    ║  COLOR SCHEME — 60 / 30 / 10 rule                      ║
+    ║                                                         ║
+    ║  60% — Surface colors (backgrounds, large areas)        ║
+    ║  30% — Content colors (text, borders, secondary fill)   ║
+    ║  10% — Accent color (CTAs, highlights, brand moments)   ║
+    ║                                                         ║
+    ║  Tweak the values below to reskin the entire site.      ║
+    ╚══════════════════════════════════════════════════════════╝
+  -->
+    <style>
+      :root {
+        /* ── 60% · Surfaces (darkest → lightest) ── */
+        --surface-0: #0c0c0e; /* page bg                    */
+        --surface-1: #111114; /* alternate section bg        */
+        --surface-2: #18181c; /* cards, inputs               */
+        --surface-3: #1f1f24; /* card hover, elevated        */
+
+        /* ── 30% · Content (brightest → dimmest) ── */
+        --text: #e8e4dd; /* primary body text           */
+        --text-dim: #a8a29e; /* secondary / descriptions    */
+        --text-muted: #6b6560; /* captions, labels, metadata  */
+        --border: rgba(255, 255, 255, 0.06);
+        --border-hover: rgba(255, 255, 255, 0.12);
+
+        /* ── 10% · Accent (bright → muted) ── */
+        --accent: #c4b5fd; /* headlines, icons, links    */
+        --accent-dim: #8b7fd4; /* hover / active states      */
+        --accent-muted: #5b4fa8; /* glows, tinted backgrounds  */
+        --accent-glass: rgba(196, 181, 253, 0.08);
+
+        /* ── Special · Live indicator ── */
+        --live: #6ee7b7;
+        --live-bg: rgba(110, 231, 183, 0.1);
+        --live-border: rgba(110, 231, 183, 0.2);
+      }
+    </style>
+
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              surface: {
+                0: "var(--surface-0)",
+                1: "var(--surface-1)",
+                2: "var(--surface-2)",
+                3: "var(--surface-3)",
+              },
+              bone: {
+                DEFAULT: "var(--text)",
+                dim: "var(--text-dim)",
+                muted: "var(--text-muted)",
+              },
+              accent: {
+                DEFAULT: "var(--accent)",
+                dim: "var(--accent-dim)",
+                muted: "var(--accent-muted)",
+              },
+              live: "var(--live)",
+            },
+            fontFamily: {
+              mono: ['"JetBrains Mono"', "ui-monospace", "monospace"],
+              sans: ['"Outfit"', "system-ui", "sans-serif"],
+            },
+          },
+        },
+      };
+    </script>
+
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Outfit:wght@300;400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+
+    <!-- Font Awesome 6 -->
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"
+      crossorigin="anonymous"
+    />
+
+    <!-- Alpine.js -->
+    <script
+      defer
+      src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"
+    ></script>
+
+    <style>
+      /* Noise overlay */
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        pointer-events: none;
+        opacity: 0.02;
+        background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+      }
+
+      /* Scrollbar */
+      ::-webkit-scrollbar {
+        width: 6px;
+      }
+      ::-webkit-scrollbar-track {
+        background: var(--surface-0);
+      }
+      ::-webkit-scrollbar-thumb {
+        background: var(--surface-3);
+        border-radius: 3px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: var(--text-muted);
+      }
+      html {
+        scrollbar-width: thin;
+        scrollbar-color: var(--surface-3) var(--surface-0);
+      }
+
+      /* Hero grid */
+      .hero-grid {
+        background-image:
+          linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+        background-size: 64px 64px;
+        mask-image: radial-gradient(
+          ellipse 60% 50% at 50% 30%,
+          black 10%,
+          transparent 70%
+        );
+      }
+
+      /* Glow */
+      @keyframes glow-pulse {
+        0%,
+        100% {
+          opacity: 0.3;
+          transform: translate(-50%, -50%) scale(1);
+        }
+        50% {
+          opacity: 0.5;
+          transform: translate(-50%, -50%) scale(1.08);
+        }
+      }
+      .hero-glow {
+        animation: glow-pulse 10s ease-in-out infinite;
+      }
+
+      /* Live blink */
+      @keyframes blink {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.25;
+        }
+      }
+      .live-dot {
+        animation: blink 2.5s ease-in-out infinite;
+      }
+
+      /* Fade up */
+      @keyframes fade-up {
+        from {
+          opacity: 0;
+          transform: translateY(16px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+      .anim {
+        animation: fade-up 0.7s ease-out both;
+      }
+      .d1 {
+        animation-delay: 0.1s;
+      }
+      .d2 {
+        animation-delay: 0.2s;
+      }
+      .d3 {
+        animation-delay: 0.3s;
+      }
+      .d4 {
+        animation-delay: 0.4s;
+      }
+      .d5 {
+        animation-delay: 0.5s;
+      }
+
+      /* Card accent line on hover */
+      .card-line::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 1px;
+        background: linear-gradient(
+          90deg,
+          transparent,
+          var(--accent-dim),
+          transparent
+        );
+        opacity: 0;
+        transition: opacity 0.3s;
+      }
+      .card-line:hover::before {
+        opacity: 1;
+      }
+
+      /* Utility: border from var */
+      .b-subtle {
+        border: 1px solid var(--border);
+      }
+      .b-subtle-t {
+        border-top: 1px solid var(--border);
+      }
+
+      /* Theme editor panel */
+      .theme-panel {
+        position: fixed;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        width: 320px;
+        z-index: 200;
+        background: var(--surface-1);
+        border-left: 1px solid var(--border);
+        transform: translateX(100%);
+        transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        overflow-y: auto;
+        scrollbar-width: thin;
+        scrollbar-color: var(--surface-3) var(--surface-1);
+      }
+      .theme-panel.open {
+        transform: translateX(0);
+      }
+      .theme-panel::-webkit-scrollbar {
+        width: 4px;
+      }
+      .theme-panel::-webkit-scrollbar-track {
+        background: var(--surface-1);
+      }
+      .theme-panel::-webkit-scrollbar-thumb {
+        background: var(--surface-3);
+        border-radius: 2px;
+      }
+
+      /* Color input styling */
+      .color-row input[type="color"] {
+        -webkit-appearance: none;
+        appearance: none;
+        width: 28px;
+        height: 28px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: transparent;
+        cursor: pointer;
+        padding: 0;
+        flex-shrink: 0;
+      }
+      .color-row input[type="color"]::-webkit-color-swatch-wrapper {
+        padding: 2px;
+      }
+      .color-row input[type="color"]::-webkit-color-swatch {
+        border: none;
+        border-radius: 3px;
+      }
+      .color-row input[type="color"]::-moz-color-swatch {
+        border: none;
+        border-radius: 3px;
+      }
+
+      .color-row input[type="text"] {
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        color: var(--text);
+        font-family: "JetBrains Mono", monospace;
+        font-size: 0.65rem;
+        padding: 0.3rem 0.5rem;
+        width: 100%;
+        outline: none;
+        transition: border-color 0.2s;
+      }
+      .color-row input[type="text"]:focus {
+        border-color: var(--accent-dim);
+      }
+    </style>
   </head>
-  <body>
-    <!-- Navigation -->
-    <nav>
-      <div class="nav-inner">
-        <a href="#" class="logo">baucord<span>.app</span></a>
-        <div class="nav-links">
-          <a href="#features">Features</a>
-          <a href="#screenshots">Screenshots</a>
-          <a href="https://github.com/baucord/baucord" target="_blank"
-            >GitHub</a
+
+  <body
+    class="bg-surface-0 text-bone font-sans antialiased overflow-x-hidden"
+    x-data="app()"
+  >
+    <!-- ═══ Theme Editor Toggle ═══ -->
+    <button
+      @click="themeOpen = !themeOpen"
+      class="fixed bottom-5 right-5 z-[210] w-10 h-10 rounded-lg bg-surface-2 b-subtle flex items-center justify-center text-bone-muted hover:text-accent hover:border-[var(--accent-dim)] transition-all duration-200 cursor-pointer"
+      :class="themeOpen && 'text-accent'"
+      title="Theme editor"
+    >
+      <i class="fa-solid fa-palette text-sm"></i>
+    </button>
+
+    <!-- ═══ Theme Editor Panel ═══ -->
+    <div class="theme-panel" :class="themeOpen && 'open'">
+      <div class="p-5">
+        <!-- Header -->
+        <div class="flex items-center justify-between mb-6">
+          <div>
+            <div
+              class="font-mono text-[0.6rem] font-medium uppercase tracking-[0.2em] text-accent mb-1"
+            >
+              // theme
+            </div>
+            <div class="font-mono text-sm font-semibold">Color Editor</div>
+          </div>
+          <button
+            @click="themeOpen = false"
+            class="w-8 h-8 rounded-md bg-surface-2 flex items-center justify-center text-bone-muted hover:text-bone transition-colors cursor-pointer"
           >
+            <i class="fa-solid fa-xmark text-xs"></i>
+          </button>
         </div>
-        <a href="#download" class="btn-download-nav">Download</a>
+
+        <!-- Color groups -->
+        <template x-for="group in themeGroups" :key="group.label">
+          <div class="mb-5">
+            <div
+              class="font-mono text-[0.55rem] font-medium uppercase tracking-[0.2em] text-bone-muted mb-3"
+              x-text="group.label"
+            ></div>
+            <div class="space-y-2">
+              <template x-for="v in group.vars" :key="v.prop">
+                <div class="color-row flex items-center gap-2.5">
+                  <input
+                    type="color"
+                    :value="themeColors[v.prop]"
+                    @input="setColor(v.prop, $event.target.value)"
+                  />
+                  <div class="flex-1 min-w-0">
+                    <div
+                      class="font-mono text-[0.6rem] text-bone-dim mb-0.5 truncate"
+                      x-text="v.prop"
+                    ></div>
+                    <input
+                      type="text"
+                      :value="themeColors[v.prop]"
+                      @change="setColor(v.prop, $event.target.value)"
+                      spellcheck="false"
+                    />
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
+        </template>
+
+        <!-- Actions -->
+        <div class="flex gap-2 mt-6 mb-2">
+          <button
+            @click="copyTheme()"
+            class="flex-1 font-mono text-[0.65rem] font-medium py-2.5 px-3 rounded-lg bg-accent text-surface-0 hover:opacity-80 transition-opacity cursor-pointer"
+          >
+            <i class="fa-solid fa-copy mr-1.5"></i>
+            <span x-text="copyLabel">Copy :root</span>
+          </button>
+          <button
+            @click="resetTheme()"
+            class="font-mono text-[0.65rem] font-medium py-2.5 px-3 rounded-lg bg-surface-2 b-subtle text-bone-muted hover:text-bone transition-colors cursor-pointer"
+          >
+            <i class="fa-solid fa-rotate-left mr-1"></i>Reset
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ Nav ═══ -->
+    <nav
+      class="fixed top-0 w-full z-50 backdrop-blur-xl b-subtle"
+      style="
+        background: color-mix(in srgb, var(--surface-0) 85%, transparent);
+        border-top: none;
+        border-left: none;
+        border-right: none;
+      "
+    >
+      <div
+        class="max-w-5xl mx-auto px-6 h-16 flex items-center justify-between"
+      >
+        <a
+          href="#"
+          class="font-mono font-bold text-lg tracking-wider text-bone"
+        >
+          bau<span class="text-accent">cord</span>
+        </a>
+        <div class="hidden md:flex items-center gap-8">
+          <a
+            href="#features"
+            class="font-mono text-xs uppercase tracking-widest text-bone-muted hover:text-bone transition-colors"
+            >Features</a
+          >
+          <a
+            href="#screenshots"
+            class="font-mono text-xs uppercase tracking-widest text-bone-muted hover:text-bone transition-colors"
+            >Interface</a
+          >
+          <a
+            href="https://github.com/baucord/baucord"
+            target="_blank"
+            class="font-mono text-xs uppercase tracking-widest text-bone-muted hover:text-bone transition-colors"
+          >
+            <i class="fa-brands fa-github mr-1.5"></i>GitHub
+          </a>
+        </div>
+        <a
+          href="#download"
+          class="font-mono text-xs font-semibold tracking-wide px-4 py-2 rounded-md bg-bone text-surface-0 hover:opacity-80 transition-opacity"
+        >
+          <i class="fa-solid fa-download mr-1.5 text-[0.6rem]"></i>Download
+        </a>
       </div>
     </nav>
 
-    <!-- Hero -->
-    <section class="hero" id="home">
-      <div class="hero-grid-bg"></div>
-      <div class="hero-glow"></div>
-      <div class="hero-content">
-        <div class="hero-badge">live — servers online</div>
-        <h1><span class="accent">bau</span>cord</h1>
-        <p class="hero-sub">
-          Real-time voice &amp; text chat. Ultra lightweight, low latency, no
-          bloat. Just connect and talk.
+    <!-- ═══ Hero ═══ -->
+    <section
+      class="relative min-h-screen flex items-center justify-center pt-16"
+    >
+      <div class="absolute inset-0 hero-grid"></div>
+      <div
+        class="hero-glow absolute top-[15%] left-1/2 w-[500px] h-[500px] rounded-full blur-[100px] pointer-events-none"
+        style="
+          background: color-mix(in srgb, var(--accent-muted) 20%, transparent);
+        "
+      ></div>
+
+      <div class="relative z-10 text-center max-w-2xl mx-auto px-6 py-20">
+        <div
+          class="anim inline-flex items-center gap-2 font-mono text-[0.65rem] font-medium uppercase tracking-[0.15em] rounded-full px-4 py-1.5 mb-10"
+          style="
+            color: var(--live);
+            background: var(--live-bg);
+            border: 1px solid var(--live-border);
+          "
+        >
+          <span
+            class="live-dot w-1.5 h-1.5 rounded-full"
+            style="background: var(--live)"
+          ></span>
+          servers online
+        </div>
+
+        <h1
+          class="anim d1 font-mono text-6xl md:text-7xl lg:text-8xl font-bold tracking-tight leading-none mb-6"
+        >
+          baucord
+        </h1>
+
+        <p
+          class="anim d2 text-lg md:text-xl font-light text-bone-dim leading-relaxed max-w-md mx-auto mb-12"
+        >
+          Voice, text & screen sharing.<br class="hidden sm:block" />
+          Ultra lightweight. Low latency. No bloat.
         </p>
 
-        <div class="hero-stats">
-          <div class="hero-stat">
-            <div class="number" id="online-count">247</div>
-            <div class="label">Online Now</div>
+        <!-- Stats -->
+        <div class="anim d3 flex justify-center gap-10 md:gap-16 mb-14">
+          <div class="text-center">
+            <div
+              class="font-mono text-2xl font-bold text-bone"
+              x-text="onlineCount"
+            ></div>
+            <div
+              class="font-mono text-[0.6rem] uppercase tracking-[0.15em] text-bone-muted mt-1"
+            >
+              Online Now
+            </div>
           </div>
-          <div class="hero-stat">
-            <div class="number">~3.5<span class="unit">MB</span></div>
-            <div class="label">RAM Usage</div>
+          <div class="text-center">
+            <div class="font-mono text-2xl font-bold text-bone">
+              ~3.5<span class="text-sm font-normal text-bone-muted ml-0.5"
+                >MB</span
+              >
+            </div>
+            <div
+              class="font-mono text-[0.6rem] uppercase tracking-[0.15em] text-bone-muted mt-1"
+            >
+              RAM Usage
+            </div>
           </div>
-          <div class="hero-stat">
-            <div class="number">10<span class="unit">ms</span></div>
-            <div class="label">Audio Frames</div>
+          <div class="text-center">
+            <div class="font-mono text-2xl font-bold text-bone">
+              10<span class="text-sm font-normal text-bone-muted ml-0.5"
+                >ms</span
+              >
+            </div>
+            <div
+              class="font-mono text-[0.6rem] uppercase tracking-[0.15em] text-bone-muted mt-1"
+            >
+              Audio Frames
+            </div>
           </div>
         </div>
 
-        <div class="download-grid">
-          <a href="baucord-win-x64.zip" class="dl-btn">
-            <svg viewBox="0 0 24 24" fill="currentColor">
-              <path
-                d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.9-1.801"
-              />
-            </svg>
-            Windows
-          </a>
-          <a href="baucord-macos-arm64.zip" class="dl-btn">
-            <svg viewBox="0 0 24 24" fill="currentColor">
-              <path
-                d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"
-              />
-            </svg>
-            macOS arm64
-          </a>
-          <a href="baucord-macos-intel.zip" class="dl-btn">
-            <svg viewBox="0 0 24 24" fill="currentColor">
-              <path
-                d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"
-              />
-            </svg>
-            macOS Intel (amd64)
-          </a>
-          <a href="baucord-linux-x64.zip" class="dl-btn">
-            <svg viewBox="0 0 24 24" fill="currentColor">
-              <path
-                d="M12.504 0c-.155 0-.315.008-.48.021-4.226.333-3.105 4.807-3.17 6.298-.076 1.092-.3 1.953-1.05 3.02-.885 1.051-2.127 2.75-2.716 4.521-.278.832-.41 1.684-.287 2.489a.424.424 0 00-.11.135c-.26.268-.45.6-.663.839-.199.199-.485.267-.797.4-.313.136-.658.269-.864.68-.09.189-.136.394-.132.602 0 .199.027.4.055.536.058.399.116.728.04.97-.249.68-.28 1.145-.106 1.484.174.334.535.47.94.601.81.2 1.91.135 2.774.6.926.466 1.866.67 2.616.47.526-.116.97-.464 1.208-.946.587-.003 1.23-.269 2.26-.334.699-.058 1.574.267 2.577.2.025.134.063.198.114.333l.003.003c.391.778 1.113 1.368 1.884 1.43.868.07 1.723-.467 2.395-1.004.232-.171.464-.37.697-.533.349-.247.7-.464 1.088-.632.564-.27 1.088-.669 1.34-1.234.26-.564.16-1.27-.194-1.87a.417.417 0 00-.025-.047l-.017-.032a10.856 10.856 0 01-.397-1.163c-.134-.454-.243-.95-.378-1.385-.263-.853-.689-1.38-1.197-1.747-.262-.188-.549-.325-.851-.422.146-.672.067-1.294-.152-1.837-.219-.535-.558-.998-.913-1.338-.497-.453-1.066-.827-1.698-1.378-.625-.537-1.316-1.236-2.164-2.477-.131-.19-.267-.392-.407-.59a12.606 12.606 0 01-.658-1.074C13.897 2.23 13.827.468 12.504 0zm-.178 1.178c.637.014.924.467 1.312 1.474.195.507.382.971.584 1.385.177.36.369.697.571 1.01.142.2.281.404.416.6.898 1.31 1.627 2.054 2.293 2.627.665.574 1.196.916 1.655 1.335.301.274.581.665.757 1.1.176.434.243.94.128 1.516l-.009.057.05.024c.318.148.621.29.871.475.396.296.718.697.934 1.399.136.441.25.95.388 1.413.138.464.283.934.455 1.298l.013.027.007.014c.3.533.35 1.093.161 1.498-.189.405-.59.71-1.089.948-.42.198-.81.445-1.197.717-.244.172-.489.383-.733.56-.57.457-1.288.89-1.961.834-.569-.046-1.138-.498-1.438-1.119-.025-.069-.043-.098-.064-.223-.022-.125-.031-.311-.048-.484a7.36 7.36 0 00-.12-.67 1.544 1.544 0 00-.389-.698c-.168-.168-.398-.265-.608-.3-.21-.037-.404-.021-.57.015a4.053 4.053 0 00-.578.168c-.03.011-.058.023-.084.035h-.009l-.052.02c-.64.263-1.448.46-2.381.5-.92.038-1.7-.178-2.482-.6-.782-.421-1.32-.656-1.996-.788-.674-.136-1.408-.063-2.268-.251a2.39 2.39 0 01-.566-.218c-.072-.053-.102-.078-.102-.237 0-.155.038-.334.066-.517.058-.367.11-.756.04-1.157-.082-.464-.378-.815-.727-1.108-.185-.156-.39-.29-.576-.41a2.175 2.175 0 01-.268-.215c-.063-.065-.073-.1-.049-.218.023-.113.082-.267.175-.437.186-.332.459-.646.678-.893.12-.136.235-.258.33-.378.058-.075.089-.135.117-.2.028-.065.05-.133.065-.2.014-.062.01-.097.01-.134v-.006a3.555 3.555 0 01.234-2.07c.539-1.643 1.71-3.253 2.55-4.254.79-1.13 1.053-2.089 1.138-3.28.067-1.18-.196-3.498 2.157-4.736.359-.188.775-.3 1.178-.31z"
-              />
-            </svg>
-            Linux
-          </a>
+        <!-- Download buttons (hero) -->
+        <div class="anim d4 flex flex-wrap justify-center gap-3">
+          <template x-for="dl in downloads" :key="dl.label">
+            <a
+              :href="dl.href"
+              class="group flex items-center gap-2.5 px-5 py-3 rounded-lg bg-surface-2 b-subtle hover:bg-surface-3 transition-all duration-200 hover:-translate-y-0.5"
+              @mouseenter="$el.style.borderColor='var(--accent-dim)'"
+              @mouseleave="$el.style.borderColor='var(--border)'"
+            >
+              <i
+                :class="dl.iconClass"
+                class="text-bone-dim group-hover:text-accent transition-colors"
+              ></i>
+              <span
+                class="font-mono text-sm font-medium text-bone"
+                x-text="dl.label"
+              ></span>
+            </a>
+          </template>
         </div>
+
+        <p class="anim d5 font-mono text-[0.65rem] text-bone-muted mt-6">
+          Each zip contains
+          <span
+            class="px-1.5 py-0.5 rounded"
+            style="color: var(--accent); background: var(--accent-glass)"
+            >baucord</span
+          >
+          client +
+          <span
+            class="px-1.5 py-0.5 rounded"
+            style="color: var(--accent); background: var(--accent-glass)"
+            >dedicated-server</span
+          >
+        </p>
       </div>
     </section>
 
-    <!-- Features -->
-    <section id="features">
-      <div class="section-inner">
-        <div class="features-header">
-          <div class="section-label">// features</div>
-          <h2 class="section-title">Built for speed, not for show</h2>
-          <p class="section-desc">
-            No Electron. No web wrapper. Pure Rust with native FLTK UI.
+    <!-- ═══ Features ═══ -->
+    <section id="features" class="relative bg-surface-1 b-subtle-t">
+      <div class="max-w-5xl mx-auto px-6 py-24 md:py-32">
+        <div class="text-center mb-16">
+          <div
+            class="font-mono text-[0.65rem] font-medium uppercase tracking-[0.2em] text-accent mb-3"
+          >
+            // features
+          </div>
+          <h2 class="text-3xl md:text-4xl font-bold tracking-tight mb-4">
+            Built for speed, not for show.
+          </h2>
+          <p class="text-bone-dim max-w-lg mx-auto leading-relaxed">
+            No Electron. No web wrapper. Pure Rust with FLTK, renet, and FFmpeg.
           </p>
         </div>
 
-        <div class="features-grid">
-          <div class="feature-card">
-            <div class="feature-icon">🎙️</div>
-            <h3>Voice Activity Detection</h3>
-            <p>
-              Automatic voice detection — start talking and it transmits. No
-              push-to-talk needed.
-            </p>
-          </div>
-          <div class="feature-card">
-            <div class="feature-icon">⚡</div>
-            <h3>10ms Audio Frames</h3>
-            <p>
-              Ultra low latency audio using Opus codec with 10ms frames for
-              responsive real-time voice chat.
-            </p>
-          </div>
-          <div class="feature-card">
-            <div class="feature-icon">🪶</div>
-            <h3>~3.5MB RAM</h3>
-            <p>
-              Lighter than a browser tab. Native Rust binary with minimal
-              resource footprint.
-            </p>
-          </div>
-          <div class="feature-card">
-            <div class="feature-icon">💬</div>
-            <h3>Text Chat</h3>
-            <p>
-              Built-in text messaging alongside voice. Simple, fast, always
-              available.
-            </p>
-          </div>
-          <div class="feature-card">
-            <div class="feature-icon">🔊</div>
-            <h3>Per-User Audio</h3>
-            <p>
-              Right-click any user to mute or adjust their volume individually.
-              Full control over your mix.
-            </p>
-          </div>
-          <div class="feature-card">
-            <div class="feature-icon">🖥️</div>
-            <h3>Cross-Platform</h3>
-            <p>
-              Runs on Windows, Linux, and macOS. Same lightweight experience
-              everywhere.
-            </p>
-          </div>
-          <div class="feature-card">
-            <div class="feature-icon">⚙️</div>
-            <h3>Persistent Settings</h3>
-            <p>
-              Audio config, VAD sensitivity, loopback — all saved between
-              sessions automatically.
-            </p>
-          </div>
-          <div class="feature-card">
-            <div class="feature-icon">🔒</div>
-            <h3>Self-Hosted</h3>
-            <p>
-              Run your own dedicated server. Your voice data, your
-              infrastructure, your rules.
-            </p>
-          </div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <template x-for="f in features" :key="f.title">
+            <div
+              class="card-line relative rounded-xl bg-surface-2 b-subtle p-6 hover:-translate-y-1 transition-all duration-300 overflow-hidden"
+              @mouseenter="$el.style.borderColor='var(--border-hover)'"
+              @mouseleave="$el.style.borderColor='var(--border)'"
+            >
+              <div
+                class="w-9 h-9 rounded-lg flex items-center justify-center mb-4"
+                style="background: var(--accent-glass)"
+              >
+                <i :class="f.iconClass" class="text-accent text-sm"></i>
+              </div>
+              <h3
+                class="font-mono text-sm font-semibold mb-2"
+                x-text="f.title"
+              ></h3>
+              <p
+                class="text-sm text-bone-dim leading-relaxed"
+                x-text="f.desc"
+              ></p>
+            </div>
+          </template>
         </div>
       </div>
     </section>
 
-    <!-- Screenshots -->
-    <section id="screenshots">
-      <div class="section-inner">
-        <div class="screenshots-header">
-          <div class="section-label">// interface</div>
-          <h2 class="section-title">Minimal but functional</h2>
-          <p class="section-desc">
+    <!-- ═══ Screenshots ═══ -->
+    <section id="screenshots" class="relative b-subtle-t">
+      <div class="max-w-5xl mx-auto px-6 py-24 md:py-32">
+        <div class="text-center mb-14">
+          <div
+            class="font-mono text-[0.65rem] font-medium uppercase tracking-[0.2em] text-accent mb-3"
+          >
+            // interface
+          </div>
+          <h2 class="text-3xl md:text-4xl font-bold tracking-tight mb-4">
+            Minimal but functional.
+          </h2>
+          <p class="text-bone-dim max-w-lg mx-auto leading-relaxed">
             Clean native UI — no web overhead, just the essentials.
           </p>
         </div>
 
-        <div class="screenshots-container">
-          <div class="screenshot-item">
-            <img src="img/client2.png" alt="baucord connect screen" />
-            <div class="screenshot-caption">→ connect to any server</div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-4xl mx-auto">
+          <div
+            class="rounded-xl bg-surface-2 b-subtle overflow-hidden hover:-translate-y-1 transition-all duration-300"
+            @mouseenter="$el.style.borderColor='var(--border-hover)'"
+            @mouseleave="$el.style.borderColor='var(--border)'"
+          >
+            <img
+              src="img/client2.png"
+              alt="baucord connect screen"
+              class="w-full h-auto block"
+            />
+            <div class="px-5 py-3 b-subtle-t">
+              <span
+                class="font-mono text-[0.65rem] text-bone-muted tracking-wide"
+              >
+                <i
+                  class="fa-solid fa-arrow-right mr-1.5 text-accent text-[0.55rem]"
+                ></i
+                >connect to any server
+              </span>
+            </div>
           </div>
-          <div class="screenshot-item">
-            <img src="img/client1.png" alt="baucord main interface" />
-            <div class="screenshot-caption">
-              → voice chat + text + per-user controls
+          <div
+            class="rounded-xl bg-surface-2 b-subtle overflow-hidden hover:-translate-y-1 transition-all duration-300"
+            @mouseenter="$el.style.borderColor='var(--border-hover)'"
+            @mouseleave="$el.style.borderColor='var(--border)'"
+          >
+            <img
+              src="img/client1.png"
+              alt="baucord main interface"
+              class="w-full h-auto block"
+            />
+            <div class="px-5 py-3 b-subtle-t">
+              <span
+                class="font-mono text-[0.65rem] text-bone-muted tracking-wide"
+              >
+                <i
+                  class="fa-solid fa-arrow-right mr-1.5 text-accent text-[0.55rem]"
+                ></i
+                >voice chat + text + per-user controls
+              </span>
             </div>
           </div>
         </div>
       </div>
     </section>
 
-    <!-- Download -->
-    <section id="download">
-      <div class="section-inner download-section">
-        <div class="section-label">// download</div>
-        <h2 class="section-title">Get baucord</h2>
-        <p class="section-desc">Pick your platform. Extract. Run. Connect.</p>
+    <!-- ═══ Download ═══ -->
+    <section id="download" class="relative bg-surface-1 b-subtle-t">
+      <div class="max-w-5xl mx-auto px-6 py-24 md:py-32 text-center">
+        <div
+          class="font-mono text-[0.65rem] font-medium uppercase tracking-[0.2em] text-accent mb-3"
+        >
+          // download
+        </div>
+        <h2 class="text-3xl md:text-4xl font-bold tracking-tight mb-4">
+          Get baucord.
+        </h2>
+        <p class="text-bone-dim max-w-md mx-auto leading-relaxed mb-12">
+          Pick your platform. Extract. Run. Connect.
+        </p>
 
-        <div class="download-platforms">
-          <a href="baucord-win-x64.zip" class="platform-card">
-            <svg viewBox="0 0 24 24" fill="currentColor">
-              <path
-                d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.9-1.801"
-              />
-            </svg>
-            <span class="platform-name">Windows</span>
-            <span class="platform-arch">x86_64</span>
-          </a>
-          <a href="baucord-macos-arm64.zip" class="platform-card">
-            <svg viewBox="0 0 24 24" fill="currentColor">
-              <path
-                d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"
-              />
-            </svg>
-            <span class="platform-name">macOS</span>
-            <span class="platform-arch">ARM64</span>
-          </a>
-          <a href="baucord-macos-intel.zip" class="platform-card">
-            <svg viewBox="0 0 24 24" fill="currentColor">
-              <path
-                d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"
-              />
-            </svg>
-            <span class="platform-name">macOS</span>
-            <span class="platform-arch">Intel (AMD64)</span>
-          </a>
-
-          <a href="baucord-linux-x64.zip" class="platform-card">
-            <svg viewBox="0 0 24 24" fill="currentColor">
-              <path
-                d="M12.504 0c-.155 0-.315.008-.48.021-4.226.333-3.105 4.807-3.17 6.298-.076 1.092-.3 1.953-1.05 3.02-.885 1.051-2.127 2.75-2.716 4.521-.278.832-.41 1.684-.287 2.489a.424.424 0 00-.11.135c-.26.268-.45.6-.663.839-.199.199-.485.267-.797.4-.313.136-.658.269-.864.68-.09.189-.136.394-.132.602 0 .199.027.4.055.536.058.399.116.728.04.97-.249.68-.28 1.145-.106 1.484.174.334.535.47.94.601.81.2 1.91.135 2.774.6.926.466 1.866.67 2.616.47.526-.116.97-.464 1.208-.946.587-.003 1.23-.269 2.26-.334.699-.058 1.574.267 2.577.2.025.134.063.198.114.333l.003.003c.391.778 1.113 1.368 1.884 1.43.868.07 1.723-.467 2.395-1.004.232-.171.464-.37.697-.533.349-.247.7-.464 1.088-.632.564-.27 1.088-.669 1.34-1.234.26-.564.16-1.27-.194-1.87a.417.417 0 00-.025-.047l-.017-.032a10.856 10.856 0 01-.397-1.163c-.134-.454-.243-.95-.378-1.385-.263-.853-.689-1.38-1.197-1.747-.262-.188-.549-.325-.851-.422.146-.672.067-1.294-.152-1.837-.219-.535-.558-.998-.913-1.338-.497-.453-1.066-.827-1.698-1.378-.625-.537-1.316-1.236-2.164-2.477-.131-.19-.267-.392-.407-.59a12.606 12.606 0 01-.658-1.074C13.897 2.23 13.827.468 12.504 0z"
-              />
-            </svg>
-            <span class="platform-name">Linux</span>
-            <span class="platform-arch">x86_64</span>
-          </a>
+        <div
+          class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 max-w-3xl mx-auto mb-10"
+        >
+          <template x-for="dl in downloads" :key="dl.label">
+            <a
+              :href="dl.href"
+              class="group flex flex-col items-center gap-3 p-6 rounded-xl bg-surface-2 b-subtle hover:bg-surface-3 hover:-translate-y-1 transition-all duration-200"
+              @mouseenter="$el.style.borderColor='var(--accent-dim)'"
+              @mouseleave="$el.style.borderColor='var(--border)'"
+            >
+              <i :class="dl.iconClass" class="text-xl text-accent"></i>
+              <span
+                class="font-mono text-sm font-semibold"
+                x-text="dl.platform"
+              ></span>
+              <span
+                class="font-mono text-[0.6rem] text-bone-muted"
+                x-text="dl.arch"
+              ></span>
+            </a>
+          </template>
         </div>
 
-        <p class="download-note">
-          Each zip contains <code>baucord</code> (client) and
-          <code>dedicated-server</code>.<br />
+        <p
+          class="font-mono text-[0.65rem] text-bone-muted leading-relaxed max-w-md mx-auto"
+        >
+          Each download contains the client and dedicated server binary.<br />
           Run the server, share the address, connect. That's it.
         </p>
       </div>
     </section>
 
-    <!-- Footer -->
-    <footer>
-      <div class="footer-inner">
-        <div class="footer-left">© 2025 baucord</div>
-        <div class="footer-links">
-          <a href="https://github.com/baucord/baucord" target="_blank"
-            >GitHub</a
-          >
-        </div>
+    <!-- ═══ Footer ═══ -->
+    <footer class="b-subtle-t">
+      <div
+        class="max-w-5xl mx-auto px-6 py-8 flex flex-col sm:flex-row items-center justify-between gap-4"
+      >
+        <span class="font-mono text-[0.65rem] text-bone-muted"
+          >&copy; 2025 baucord</span
+        >
+        <a
+          href="https://github.com/baucord/baucord"
+          target="_blank"
+          class="font-mono text-[0.65rem] text-bone-muted hover:text-bone transition-colors"
+        >
+          <i class="fa-brands fa-github mr-1"></i>GitHub
+        </a>
       </div>
     </footer>
 
+    <!-- ═══ App Data ═══ -->
     <script>
-      // Fake online counter
-      const counter = document.getElementById("online-count");
-      let count = 247;
-      setInterval(() => {
-        count += Math.floor(Math.random() * 7) - 3;
-        count = Math.max(180, Math.min(350, count));
-        counter.textContent = count;
-      }, 4000);
+      function app() {
+        const defaults = {
+          "--surface-0": "#0C0C0E",
+          "--surface-1": "#111114",
+          "--surface-2": "#18181C",
+          "--surface-3": "#1F1F24",
+          "--text": "#E8E4DD",
+          "--text-dim": "#A8A29E",
+          "--text-muted": "#6B6560",
+          "--accent": "#C4B5FD",
+          "--accent-dim": "#8B7FD4",
+          "--accent-muted": "#5B4FA8",
+          "--live": "#6EE7B7",
+        };
+
+        return {
+          onlineCount: 247,
+          themeOpen: false,
+          copyLabel: "Copy :root",
+          themeColors: { ...defaults },
+
+          themeGroups: [
+            {
+              label: "60% · Surfaces",
+              vars: [
+                { prop: "--surface-0" },
+                { prop: "--surface-1" },
+                { prop: "--surface-2" },
+                { prop: "--surface-3" },
+              ],
+            },
+            {
+              label: "30% · Content",
+              vars: [
+                { prop: "--text" },
+                { prop: "--text-dim" },
+                { prop: "--text-muted" },
+              ],
+            },
+            {
+              label: "10% · Accent",
+              vars: [
+                { prop: "--accent" },
+                { prop: "--accent-dim" },
+                { prop: "--accent-muted" },
+              ],
+            },
+            {
+              label: "Special · Live",
+              vars: [{ prop: "--live" }],
+            },
+          ],
+
+          init() {
+            // Online counter
+            setInterval(() => {
+              this.onlineCount += Math.floor(Math.random() * 7) - 3;
+              this.onlineCount = Math.max(180, Math.min(350, this.onlineCount));
+            }, 4000);
+          },
+
+          setColor(prop, value) {
+            // Normalize to hex
+            if (!value.startsWith("#")) value = "#" + value;
+            this.themeColors[prop] = value;
+            document.documentElement.style.setProperty(prop, value);
+
+            // Auto-derive rgba variants
+            if (prop === "--accent") {
+              const r = parseInt(value.slice(1, 3), 16);
+              const g = parseInt(value.slice(3, 5), 16);
+              const b = parseInt(value.slice(5, 7), 16);
+              document.documentElement.style.setProperty(
+                "--accent-glass",
+                `rgba(${r}, ${g}, ${b}, 0.08)`,
+              );
+            }
+            if (prop === "--live") {
+              const r = parseInt(value.slice(1, 3), 16);
+              const g = parseInt(value.slice(3, 5), 16);
+              const b = parseInt(value.slice(5, 7), 16);
+              document.documentElement.style.setProperty(
+                "--live-bg",
+                `rgba(${r}, ${g}, ${b}, 0.10)`,
+              );
+              document.documentElement.style.setProperty(
+                "--live-border",
+                `rgba(${r}, ${g}, ${b}, 0.20)`,
+              );
+            }
+          },
+
+          resetTheme() {
+            Object.entries(defaults).forEach(([prop, val]) => {
+              this.themeColors[prop] = val;
+              document.documentElement.style.setProperty(prop, val);
+            });
+            // Reset derived
+            document.documentElement.style.setProperty(
+              "--accent-glass",
+              "rgba(196, 181, 253, 0.08)",
+            );
+            document.documentElement.style.setProperty(
+              "--live-bg",
+              "rgba(110, 231, 183, 0.10)",
+            );
+            document.documentElement.style.setProperty(
+              "--live-border",
+              "rgba(110, 231, 183, 0.20)",
+            );
+          },
+
+          async copyTheme() {
+            const c = this.themeColors;
+            // Derive rgba from current accent
+            const a = c["--accent"];
+            const ar = parseInt(a.slice(1, 3), 16),
+              ag = parseInt(a.slice(3, 5), 16),
+              ab = parseInt(a.slice(5, 7), 16);
+            const l = c["--live"];
+            const lr = parseInt(l.slice(1, 3), 16),
+              lg_ = parseInt(l.slice(3, 5), 16),
+              lb = parseInt(l.slice(5, 7), 16);
+
+            const css = `:root {
+  /* ── 60% · Surfaces ── */
+  --surface-0: ${c["--surface-0"]};
+  --surface-1: ${c["--surface-1"]};
+  --surface-2: ${c["--surface-2"]};
+  --surface-3: ${c["--surface-3"]};
+
+  /* ── 30% · Content ── */
+  --text:       ${c["--text"]};
+  --text-dim:   ${c["--text-dim"]};
+  --text-muted: ${c["--text-muted"]};
+  --border:     rgba(255, 255, 255, 0.06);
+  --border-hover: rgba(255, 255, 255, 0.12);
+
+  /* ── 10% · Accent ── */
+  --accent:       ${c["--accent"]};
+  --accent-dim:   ${c["--accent-dim"]};
+  --accent-muted: ${c["--accent-muted"]};
+  --accent-glass: rgba(${ar}, ${ag}, ${ab}, 0.08);
+
+  /* ── Special · Live ── */
+  --live:        ${c["--live"]};
+  --live-bg:     rgba(${lr}, ${lg_}, ${lb}, 0.10);
+  --live-border: rgba(${lr}, ${lg_}, ${lb}, 0.20);
+}`;
+            try {
+              await navigator.clipboard.writeText(css);
+              this.copyLabel = "Copied!";
+              setTimeout(() => (this.copyLabel = "Copy :root"), 2000);
+            } catch {
+              this.copyLabel = "Failed";
+              setTimeout(() => (this.copyLabel = "Copy :root"), 2000);
+            }
+          },
+
+          downloads: [
+            {
+              label: "Windows",
+              platform: "Windows",
+              arch: "x86_64",
+              href: "baucord-win-x64.zip",
+              iconClass: "fa-brands fa-windows",
+            },
+            {
+              label: "macOS arm64",
+              platform: "macOS",
+              arch: "ARM64 (Apple Silicon)",
+              href: "baucord-macos-arm64.zip",
+              iconClass: "fa-brands fa-apple",
+            },
+            {
+              label: "macOS Intel",
+              platform: "macOS",
+              arch: "Intel (AMD64)",
+              href: "baucord-macos-intel.zip",
+              iconClass: "fa-brands fa-apple",
+            },
+            {
+              label: "Linux",
+              platform: "Linux",
+              arch: "x86_64",
+              href: "baucord-linux-x64.zip",
+              iconClass: "fa-brands fa-linux",
+            },
+          ],
+
+          features: [
+            {
+              iconClass: "fa-solid fa-microphone",
+              title: "Voice Activity Detection",
+              desc: "Automatic voice detection or configurable push-to-talk. Start talking and it transmits.",
+            },
+            {
+              iconClass: "fa-solid fa-desktop",
+              title: "Screen Sharing",
+              desc: "H.264 via FFmpeg with aspect-ratio-preserving viewer, stream audio capture, and live stats.",
+            },
+            {
+              iconClass: "fa-solid fa-bolt",
+              title: "10ms Audio Frames",
+              desc: "Ultra low latency Opus codec with 10ms frames for responsive real-time voice.",
+            },
+            {
+              iconClass: "fa-solid fa-feather",
+              title: "~3.5MB RAM",
+              desc: "Lighter than a browser tab. Native Rust binary with minimal resource footprint.",
+            },
+            {
+              iconClass: "fa-solid fa-sliders",
+              title: "Per-User Audio",
+              desc: "Mute or adjust volume for any user individually. Full control over your mix.",
+            },
+            {
+              iconClass: "fa-solid fa-keyboard",
+              title: "Global Hotkeys",
+              desc: "Configurable shortcuts for mute, deafen, and screen share with live key capture.",
+            },
+            {
+              iconClass: "fa-solid fa-wave-square",
+              title: "Adaptive Jitter Buffer",
+              desc: "Arrival-time estimation, burst-safe drain, and per-peer limiting for smooth audio.",
+            },
+            {
+              iconClass: "fa-solid fa-server",
+              title: "Self-Hosted",
+              desc: "Simple relay server — no mixing, no transcoding. Your data, your infrastructure.",
+            },
+          ],
+        };
+      }
     </script>
   </body>
 </html>
