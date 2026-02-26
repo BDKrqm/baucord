@@ -71,9 +71,12 @@ jobs:
       - name: Download prebuilt FFmpeg (Windows)
         if: runner.os == 'Windows'
         run: |
-          Invoke-WebRequest -Uri "https://6bcc35de83e46a771896026baf11b4ac.r2.cloudflarestorage.com/baucord/ffmpeg-vcpkg-x64-windows-static-md.zip" -OutFile "ffmpeg-vcpkg.zip"
+          aws s3 cp s3://baucord/ffmpeg-vcpkg-x64-windows-static-md.zip ffmpeg-vcpkg.zip --endpoint-url https://6bcc35de83e46a771896026baf11b4ac.r2.cloudflarestorage.com
           7z x ffmpeg-vcpkg.zip -oC:\vcpkg\installed
         shell: pwsh
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }} 
       # ── Build ───────────────────────────────────────────────────────
 
       - name: Setup sccache
