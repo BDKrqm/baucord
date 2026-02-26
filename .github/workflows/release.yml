@@ -61,11 +61,12 @@ jobs:
         run: |
           brew install opus ffmpeg pkg-config
 
-      - name: Download prebuilt FFmpeg (Windows)
+      - name: Download and setup prebuilt FFmpeg (Windows)
         if: runner.os == 'Windows'
         run: |
           aws s3 cp s3://baucord/ffmpeg-vcpkg-x64-windows-static-md.zip ffmpeg-vcpkg.zip --endpoint-url https://6bcc35de83e46a771896026baf11b4ac.r2.cloudflarestorage.com
           7z x ffmpeg-vcpkg.zip -oC:\ffmpeg-prebuilt
+          echo "FFMPEG_DIR=C:\ffmpeg-prebuilt\x64-windows-static-md" >> $env:GITHUB_ENV
         shell: pwsh
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -81,7 +82,6 @@ jobs:
           RUSTC_WRAPPER: "sccache"
           RUSTFLAGS: ${{ matrix.rustflags }}
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
-          FFMPEG_DIR: ${{ runner.os == 'Windows' && 'C:\ffmpeg-prebuilt\x64-windows-static-md' || '' }}
           PKG_CONFIG_PATH: ${{ matrix.pkg_config_path || '' }}
         run: cargo build --profile deploy --target ${{ matrix.target }}
 
