@@ -69,7 +69,6 @@ jobs:
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
       # ── Build ───────────────────────────────────────────────────────
 
       - name: Setup sccache
@@ -82,6 +81,7 @@ jobs:
           RUSTFLAGS: ${{ matrix.rustflags }}
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
           FFMPEG_DIR: ${{ runner.os == 'Windows' && 'C:\ffmpeg-prebuilt\x64-windows-static-md' || '' }}
+          PKG_CONFIG_PATH: ${{ matrix.os == 'macos-15-intel' && '/usr/local/opt/ffmpeg/lib/pkgconfig' || '' }}
         run: cargo build --profile deploy --target ${{ matrix.target }}
 
       # ── Package ─────────────────────────────────────────────────────
