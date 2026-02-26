@@ -60,35 +60,28 @@ jobs:
         run: |
           brew install opus ffmpeg pkg-config
 
-      #- name: Install FFmpeg via vcpkg (Windows)
-      #  if: runner.os == 'Windows'
-      #  run: |
-      #    vcpkg install ffmpeg[x264,gpl]:x64-windows-static-md
-      #  env:
-      #    VCPKG_ROOT: C:\vcpkg
-      #    VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
-      # Windows: prebuilt FFmpeg static libs
       - name: Download prebuilt FFmpeg (Windows)
         if: runner.os == 'Windows'
         run: |
           aws s3 cp s3://baucord/ffmpeg-vcpkg-x64-windows-static-md.zip ffmpeg-vcpkg.zip --endpoint-url https://6bcc35de83e46a771896026baf11b4ac.r2.cloudflarestorage.com
-          7z x ffmpeg-vcpkg.zip -oC:\vcpkg\installed
+          7z x ffmpeg-vcpkg.zip -oC:\ffmpeg-prebuilt
         shell: pwsh
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }} 
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
       # ── Build ───────────────────────────────────────────────────────
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
+
       - name: Build
         env:
           SCCACHE_GHA_ENABLED: "true"
           RUSTC_WRAPPER: "sccache"
           RUSTFLAGS: ${{ matrix.rustflags }}
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
-          VCPKG_ROOT: ${{ runner.os == 'Windows' && 'C:\vcpkg' || '' }}
-          VCPKGRS_TRIPLET: ${{ runner.os == 'Windows' && 'x64-windows-static-md' || '' }}
+          FFMPEG_DIR: ${{ runner.os == 'Windows' && 'C:\ffmpeg-prebuilt\x64-windows-static-md' || '' }}
         run: cargo build --profile deploy --target ${{ matrix.target }}
 
       # ── Package ─────────────────────────────────────────────────────
