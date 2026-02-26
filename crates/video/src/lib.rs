@@ -10,15 +10,15 @@
 //! │ Capture │ ──▶ │ Encoder │ ──▶ │ encoded bytes │ ──▶ network / file
 //! └─────────┘     └─────────┘     └──────────────┘
 //!
-//! network / file ──▶ ┌─────────┐ ──▶ ┌────────────┐
-//!                    │ Decoder │     │ RGBA frame  │ ──▶ display
-//!                    └─────────┘     └────────────┘
+//! network ──▶ ┌──────────────┐ ──▶ ┌─────────┐ ──▶ ┌────────────┐
+//!             │ JitterBuffer │     │ Decoder │     │ RGBA frame  │ ──▶ display
+//!             └──────────────┘     └─────────┘     └────────────┘
 //! ```
 
+pub mod buffer;
 pub mod capture;
-pub mod color;
-
 pub mod codec;
+pub mod color;
 
 use std::fmt;
 
@@ -199,4 +199,10 @@ pub trait VideoDecoder {
     /// Avoids allocating a new buffer on the next `decode()` call.
     /// Optional — callers that don't recycle buffers can ignore this.
     fn return_buffer(&mut self, _buf: Vec<u8>) {}
+    /// Flush decoder state, clearing internal reference frame buffers.
+    ///
+    /// Must be called before decoding a keyframe after a gap — without
+    /// this, corrupted reference frames from the previous GOP leak into
+    /// the new one, producing horizontal tearing artifacts.
+    fn flush(&mut self) {}
 }
