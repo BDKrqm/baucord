@@ -71,7 +71,7 @@ jobs:
       - name: Download prebuilt FFmpeg (Windows)
         if: runner.os == 'Windows'
         run: |
-          Invoke-WebRequest -Uri "https://baucord.mpw.sh/ffmpeg-vcpkg-x64-windows-static-md.zip" -OutFile "ffmpeg-vcpkg.zip"
+          Invoke-WebRequest -Uri "https://6bcc35de83e46a771896026baf11b4ac.r2.cloudflarestorage.com/baucord/ffmpeg-vcpkg-x64-windows-static-md.zip" -OutFile "ffmpeg-vcpkg.zip"
           7z x ffmpeg-vcpkg.zip -oC:\vcpkg\installed
         shell: pwsh
       # ── Build ───────────────────────────────────────────────────────
