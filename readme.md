@@ -1,31 +1,30 @@
-## Description
+# baucord
 
-A lightweight voice and text chat application built with Rust, using `fltk` for the UI `renet` for network communication.
+A lightweight voice, text, and screen sharing application built with Rust.
+
+Uses `fltk` for the UI, `renet` for network communication, and `ffmpeg` for video encoding/decoding.
+
+Audio runs on dedicated threads with crossbeam channels.
+Screen sharing follows the same architecture: capture → encode → network → decode → viewer window.
+The server is a simple relay — no mixing, no transcoding.
 
 ## Features
 
-- **Voice Chat** with Voice Activity Detection (VAD)
-- **Per-user audio controls** (mute/volume adjustment via right-click)
-- **Ultra lightweight** - ~3.5MB RAM usage
-- **Low latency** - 10ms audio frames for responsive voice chat
-- **Cross-platform** - Works on Windows, Linux, and macOS
-
-## Screenshots
-
-![Client Interface 2](web/img/client2.png)
-
-*Connect to server and nickname setup*
-
-![Client Interface 1](web/img/client1.png)
-
-*Main chat interface with user list,voice indicators and settings page*
+- **Voice chat** with voice activity detection (VAD) and per-user volume controls
+- **Screen sharing** with H.264 encoding (FFmpeg), aspect-ratio-preserving viewer, and stream audio capture
+- **Text chat** with message history
+- **Global hotkeys** for toggle mute, toggle deafen, and toggle screen share (configurable in settings)
+- **Per-user audio controls** — right-click a user to mute or adjust their volume
+- **Adaptive jitter buffer** with arrival-time jitter estimation, burst-safe drain, and per-peer limiting
+- **Cross-platform** — Windows, Linux, and macOS
 
 ## Building and Running
 
 ### Prerequisites
 
-- Rust 1.87 or later
+- Rust 1.87+
 - CMake (for FLTK)
+- FFmpeg shared libraries (for screen share encode/decode)
 
 ### Server
 
@@ -33,23 +32,30 @@ A lightweight voice and text chat application built with Rust, using `fltk` for 
 cargo run --bin server --release
 ```
 
-The server starts on `127.0.0.1:5000` by default. Configuration can be adjusted in [config.yaml](config.yaml).
+Starts on `127.0.0.1:5000` by default. See `config.yaml` for configuration.
 
 ### Client
+
 ```bash
 cargo run --bin client --release
 ```
 
-Enter your nickname and server address (e.g., `127.0.0.1:5000`) to connect.
+Enter a nickname and server address to connect.
 
---
-### What works
+## What Works
 
-- Voice transmission starts automatically when you speak (VAD enabled)
-- "Mute" to toggle your microphone
-- Right-click on users to mute or adjust their volume individually
-- Very basic resampling to work with different audio interfaces (its bad)
-- Messages support up to 400 characters
-- Audio settings via the ⚙ Settings button
-- Configuration for VAD sensitivity, audio loopback, and default mute state
-- Settings persist between sessions (stored in `~/.config/baucord/`, or `%APPDATA%/Roaming` in windows)
+- Voice transmission via VAD (automatic) or push-to-talk (configurable)
+- Mute, deafen, and screen share toggles via UI buttons or global hotkeys
+- Screen sharing at 720p/1080p with configurable quality, viewer window with volume/mute controls and live stats (FPS, throughput, total data transferred)
+- Per-user mute and volume adjustment (right-click context menu)
+- Audio settings: input/output device selection, gain, gate threshold
+- Keyboard shortcut configuration with live key capture
+- Settings persist to `settings.json` next to the binary
+
+## Known Limitations
+
+- Resampling between different audio sample rates is basic
+- No end-to-end encryption
+- Server is a relay with no authentication
+- Screen share viewer creates a new FFmpeg decoder per keyframe (stateless recovery, not optimal for bandwidth)
+
