@@ -133,10 +133,12 @@ jobs:
         with:
           tag_name: ${{ github.event.release.tag_name }}
           files: artifacts/*.zip
-      - name: Prepare web files
+      - name: Prepare release files for R2
         run: |
-          cp artifacts/*.zip web/
-          grep '^version' crates/client/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/' > web/version
+          VERSION=$(grep '^version' crates/client/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          mkdir -p r2-upload
+          cp artifacts/*.zip r2-upload/
+          echo "$VERSION" > r2-upload/version
       - name: Upload to R2
         uses: jakejarvis/s3-sync-action@v0.5.1
         env:
@@ -144,4 +146,4 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_S3_ENDPOINT: https://6bcc35de83e46a771896026baf11b4ac.r2.cloudflarestorage.com
-          SOURCE_DIR: web
+          SOURCE_DIR: r2-upload
