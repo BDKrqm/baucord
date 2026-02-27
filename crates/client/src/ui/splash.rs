@@ -17,18 +17,26 @@ const VERSION_URL: &str = "https://baucord.mpw.sh/version";
 /// Compiled-in version of this binary.
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Platform-specific download URL.
+/// Base URL for downloads — append the platform-specific filename.
+const DOWNLOAD_BASE: &str = "https://baucord.mpw.sh";
+
+/// Platform-specific zip filename suffix.
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-pub const DOWNLOAD_URL: &str = "https://baucord.mpw.sh/baucord-win-x64.zip";
+const PLATFORM_SUFFIX: &str = "win-x64";
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub const DOWNLOAD_URL: &str = "https://baucord.mpw.sh/baucord-macos-arm64.zip";
+const PLATFORM_SUFFIX: &str = "macos-arm64";
 
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-pub const DOWNLOAD_URL: &str = "https://baucord.mpw.sh/baucord-macos-intel.zip";
+const PLATFORM_SUFFIX: &str = "macos-intel";
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-pub const DOWNLOAD_URL: &str = "https://baucord.mpw.sh/baucord-linux-x64.zip";
+const PLATFORM_SUFFIX: &str = "linux-x64";
+
+/// Build the versioned download URL for a given version string.
+pub fn download_url(version: &str) -> String {
+    format!("{DOWNLOAD_BASE}/baucord-v{version}-{PLATFORM_SUFFIX}.zip")
+}
 
 /// Handles returned to App.
 pub struct SplashHandles {

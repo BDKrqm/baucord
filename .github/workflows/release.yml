@@ -90,27 +90,32 @@ jobs:
 
       # ── Package ─────────────────────────────────────────────────────
 
+      - name: Get version
+        id: version
+        shell: bash
+        run: grep '^version' crates/client/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/' | xargs -I{} echo "version={}" >> "$GITHUB_OUTPUT"
+
       - name: Package (Unix)
         if: runner.os != 'Windows'
         run: |
-          mkdir -p staging/baucord
-          cp target/${{ matrix.target }}/deploy/client staging/baucord/baucord
-          cp target/${{ matrix.target }}/deploy/server staging/baucord/dedicated-server
+          mkdir -p staging
+          cp target/${{ matrix.target }}/deploy/client staging/baucord
+          cp target/${{ matrix.target }}/deploy/server staging/dedicated-server
           cd staging
-          zip -r ../baucord-${{ matrix.suffix }}.zip baucord/
+          zip -r ../baucord-v${{ steps.version.outputs.version }}-${{ matrix.suffix }}.zip baucord dedicated-server
       - name: Package (Windows)
         if: runner.os == 'Windows'
         run: |
-          mkdir staging\baucord
-          copy target\${{ matrix.target }}\deploy\client.exe staging\baucord\baucord.exe
-          copy target\${{ matrix.target }}\deploy\server.exe staging\baucord\dedicated-server.exe
+          mkdir staging
+          copy target\${{ matrix.target }}\deploy\client.exe staging\baucord.exe
+          copy target\${{ matrix.target }}\deploy\server.exe staging\dedicated-server.exe
           cd staging
-          Compress-Archive -Path baucord -DestinationPath ..\baucord-${{ matrix.suffix }}.zip
+          Compress-Archive -Path baucord.exe,dedicated-server.exe -DestinationPath ..\baucord-v${{ steps.version.outputs.version }}-${{ matrix.suffix }}.zip
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: baucord-${{ matrix.suffix }}
-          path: baucord-${{ matrix.suffix }}.zip
+          name: baucord-v${{ steps.version.outputs.version }}-${{ matrix.suffix }}
+          path: baucord-v${{ steps.version.outputs.version }}-${{ matrix.suffix }}.zip
   release:
     needs: build
     runs-on: ubuntu-latest
