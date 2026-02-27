@@ -167,16 +167,6 @@ impl ViewerWindow {
         sep2.set_color(theme::SUBTLE);
         toolbar.fixed(&sep2, 1);
 
-        // Buffer depth slider (50-300ms)
-        let mut buffer_slider = valuator::HorNiceSlider::default();
-        buffer_slider.set_minimum(20.0);
-        buffer_slider.set_maximum(300.0);
-        buffer_slider.set_value(80.0); // matches DEFAULT_BUFFER_DEPTH_MS
-        buffer_slider.set_step(10.0, 1);
-        buffer_slider.set_color(theme::BG_TERTIARY);
-        buffer_slider.set_selection_color(theme::ACCENT);
-        toolbar.fixed(&buffer_slider, 100);
-
         // Label for the slider
         let mut buf_label = frame::Frame::default().with_label("80ms");
         buf_label.set_label_color(theme::TEXT_MUTED);
@@ -272,17 +262,6 @@ impl ViewerWindow {
             s.send(UiMessage::UnwatchPeer { client_id });
         });
 
-        let s_buf = sender;
-        let mut buf_label_clone = buf_label.clone();
-        buffer_slider.set_callback(move |s| {
-            let ms = s.value() as u32;
-            buf_label_clone.set_label(&format!("{ms}ms"));
-            s_buf.send(UiMessage::SetBufferDepth {
-                client_id,
-                depth_ms: ms,
-            });
-        });
-
         // Window close → also unsubscribe
         wind.set_callback(move |w| {
             if app::event() == enums::Event::Close {
@@ -345,7 +324,16 @@ impl ViewerWindow {
     /// Handles resolution changes gracefully — the draw callback reads
     /// width/height from the shared pixel buffer, so a mid-stream
     /// resolution switch just works.
-    pub fn update_frame(&mut self, rgba: Vec<u8>, width: u32, height: u32, frame_bytes: usize) {
+    pub fn update_frame(
+        &mut self,
+        rgba: Vec<u8>,
+        width: u32,
+        height: u32,
+        frame_bytes: usize,
+        buffer_depth_ms: f32,
+        buffer_target_ms: f32,
+        buffer_jitter_ms: f32,
+    ) {
         // Update stream resolution tracking
         if width != self.width || height != self.height {
             log::info!(
@@ -387,7 +375,7 @@ impl ViewerWindow {
             let total_mb = self.total_bytes as f32 / (1024.0 * 1024.0);
             let res = format!("{}p", height);
             self.stats_label.set_label(&format!(
-                "{res} {fps}fps {throughput_kbps:.0}KB/s {total_mb:.1}MB"
+    "{res} {fps}fps {throughput_kbps:.0}KB/s {total_mb:.1}MB | buf {buffer_depth_ms:.0}/{buffer_target_ms:.0}ms jit {buffer_jitter_ms:.0}ms"
             ));
         }
 

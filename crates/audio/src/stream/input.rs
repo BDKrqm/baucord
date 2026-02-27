@@ -442,8 +442,8 @@ mod linux_loopback {
 /// # Usage
 ///
 /// ```rust,no_run
-/// use core::stream::input::SystemAudioCapture;
-/// use core::stats::AudioStats;
+/// use audio::stream::input::SystemAudioCapture;
+/// use audio::stats::AudioStats;
 /// use std::sync::Arc;
 ///
 /// let stats = Arc::new(AudioStats::new());
@@ -931,12 +931,12 @@ pub fn is_supported() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         Err("System audio capture on macOS requires ScreenCaptureKit integration (not yet implemented). \
-             See core::stream::input::coreaudio_loopback module docs for the implementation plan.".into())
+             See audio::stream::input::coreaudio_loopback module docs for the implementation plan.".into())
     }
     #[cfg(target_os = "linux")]
     {
         Err("System audio capture on Linux requires PipeWire or PulseAudio monitor integration (not yet implemented). \
-             See core::stream::input::linux_loopback module docs for the implementation plan.".into())
+             See audio::stream::input::linux_loopback module docs for the implementation plan.".into())
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {

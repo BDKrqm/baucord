@@ -43,13 +43,6 @@ use audio::{
     },
 };
 
-/// Default jitter buffer depth for video streams (milliseconds).
-///
-/// 80ms adds imperceptible latency while absorbing typical keyframe
-/// decode stalls (10-16ms) and minor network jitter. Users can adjust
-/// this at runtime via `ScreenControl::SetBufferDepth`.
-const DEFAULT_BUFFER_DEPTH_MS: u32 = 80;
-
 // ── Channel messages ────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -88,9 +81,6 @@ pub enum ScreenControl {
     SetStreamVolume { client_id: u64, volume: f32 },
     /// Mute/unmute the stream audio for a peer's viewer.
     MuteStream { client_id: u64, muted: bool },
-    /// Adjust the jitter buffer depth for a peer's stream (milliseconds).
-    /// Higher values add latency but absorb more jitter.
-    SetBufferDepth { client_id: u64, depth_ms: u32 },
     /// Clean shutdown.
     Shutdown,
 }
@@ -108,15 +98,15 @@ pub enum ScreenEvent {
         client_id: u64,
         width: u32,
         height: u32,
-        /// RGBA pixel data. Callers should process this promptly — the
-        /// screen thread will keep producing frames.
         rgba: Vec<u8>,
-        /// Size of the encoded H.264 frame in bytes (before decode).
         frame_bytes: usize,
         seq: u32,
         is_keyframe: bool,
         enqueued_at: Instant,
         decoded_at: Instant,
+        buffer_depth_ms: f32,
+        buffer_target_ms: f32,
+        buffer_jitter_ms: f32,
     },
     /// A remote peer started sharing (so UI can show "Watch" button).
     PeerStartedSharing {
@@ -445,6 +435,9 @@ fn drain_and_decode(
                             is_keyframe,
                             enqueued_at,
                             decoded_at,
+                            buffer_depth_ms: stream.jitter_buffer.depth_ms(),
+                            buffer_target_ms: stream.jitter_buffer.adaptive_target_ms(),
+                            buffer_jitter_ms: stream.jitter_buffer.adaptive_jitter_ms(),
                         })
                         .ok();
                     wake();
@@ -568,7 +561,7 @@ fn handle_control(
                 let decoder = create_decoder().expect("decoder creation failed");
                 // Assume 30fps initially; will be refined when Quality is known.
                 // The buffer adapts well even if the FPS guess is off.
-                let jitter_buffer = VideoJitterBuffer::new(DEFAULT_BUFFER_DEPTH_MS, 60);
+                let jitter_buffer = VideoJitterBuffer::new(30);
                 PeerStream {
                     decoder,
                     width,
@@ -634,17 +627,6 @@ fn handle_control(
                 && let Some(ref audio) = stream.stream_audio
             {
                 audio.set_muted(muted);
-            }
-        }
-
-        ScreenControl::SetBufferDepth {
-            client_id,
-            depth_ms,
-        } => {
-            if let Some(stream) = peer_streams.get_mut(&client_id) {
-                let old = stream.jitter_buffer.target_depth_ms();
-                stream.jitter_buffer.set_target_depth_ms(depth_ms);
-                info!("📺 Buffer depth for peer {client_id}: {old}ms → {depth_ms}ms");
             }
         }
 

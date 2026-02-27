@@ -298,6 +298,9 @@ impl App {
                 is_keyframe,
                 enqueued_at,
                 decoded_at,
+                buffer_depth_ms,
+                buffer_target_ms,
+                buffer_jitter_ms,
             } => {
                 use std::time::Instant;
                 let app_drain_at = Instant::now();
@@ -306,26 +309,30 @@ impl App {
                 let screen_to_app_ms =
                     app_drain_at.duration_since(decoded_at).as_secs_f32() * 1000.0;
                 let total_ms = app_drain_at.duration_since(enqueued_at).as_secs_f32() * 1000.0;
-
                 let frame_type = if is_keyframe { "K" } else { "P" };
-
-                // Log every frame — filter with RUST_LOG=info or grep for 📊
                 log::debug!(
                     "📊 [seq={seq} {frame_type} {:.0}KB] net→decode: {net_to_screen_ms:.1}ms | \
-                    decode→app: {screen_to_app_ms:.1}ms | total: {total_ms:.1}ms",
+        decode→app: {screen_to_app_ms:.1}ms | total: {total_ms:.1}ms | \
+        buf: {buffer_depth_ms:.0}/{buffer_target_ms:.0}ms jit: {buffer_jitter_ms:.0}ms",
                     frame_bytes as f64 / 1024.0,
                 );
-
-                // Warn on slow frames (>25ms = would miss 30fps budget)
                 if total_ms > 25.0 {
                     log::warn!(
                         "📊 SLOW FRAME seq={seq}: {total_ms:.1}ms total \
-                        (net→decode: {net_to_screen_ms:.1}ms, decode→app: {screen_to_app_ms:.1}ms)"
+            (net→decode: {net_to_screen_ms:.1}ms, decode→app: {screen_to_app_ms:.1}ms)"
                     );
                 }
                 if let Some(viewer) = self.viewer_windows.get_mut(&client_id) {
                     let blit_start = Instant::now();
-                    viewer.update_frame(rgba, width, height, frame_bytes);
+                    viewer.update_frame(
+                        rgba,
+                        width,
+                        height,
+                        frame_bytes,
+                        buffer_depth_ms,
+                        buffer_target_ms,
+                        buffer_jitter_ms,
+                    );
                     let blit_ms = blit_start.elapsed().as_secs_f32() * 1000.0;
                     if blit_ms > 5.0 {
                         log::warn!("📊 Slow blit: {blit_ms:.1}ms for seq {seq}");
@@ -477,18 +484,6 @@ impl App {
             }
             UiMessage::QuitFromTray => {
                 self.app.quit(); // triggers shutdown() after loop exits
-            }
-            UiMessage::SetBufferDepth {
-                client_id,
-                depth_ms,
-            } => {
-                self.screen
-                    .tx
-                    .send(ScreenControl::SetBufferDepth {
-                        client_id,
-                        depth_ms,
-                    })
-                    .ok();
             }
             UiMessage::UpdateStreamStats => {
                 if self.screen.shared.is_sharing.load(Ordering::Relaxed) {

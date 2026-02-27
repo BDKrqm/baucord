@@ -120,11 +120,6 @@ pub enum UiMessage {
         action: crate::config::BindableAction,
         bind: String,
     },
-    /// Viewer buffer depth slider changed.
-    SetBufferDepth {
-        client_id: u64,
-        depth_ms: u32,
-    },
     /// User clicked "Show" in tray menu — restore the main window.
     RestoreFromTray,
     /// User clicked "Quit" in tray menu — actually shut down.

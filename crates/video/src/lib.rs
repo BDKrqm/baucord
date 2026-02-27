@@ -1,8 +1,3 @@
-//! screencap — Lightweight screen capture + H.264 encode/decode wrapper.
-//!
-//! Built on `xcap` (screen capture) with pluggable codec backends:
-//! - `ffmpeg-codec` — fast, hardware-accelerated, needs FFmpeg installed
-//!
 //! # Architecture
 //!
 //! ```text
