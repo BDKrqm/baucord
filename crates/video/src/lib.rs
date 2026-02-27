@@ -18,9 +18,6 @@
 pub mod buffer;
 pub mod capture;
 pub mod codec;
-pub mod color;
-
-use std::fmt;
 
 /// Quality preset for screen sharing.
 ///
@@ -36,6 +33,16 @@ pub enum Quality {
     FHD30,
     /// 1920×1080 @ 60 FPS — best quality, needs hardware encoder.
     FHD60,
+}
+impl std::fmt::Display for Quality {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::HD30 => write!(f, "720p 30fps"),
+            Self::HD60 => write!(f, "720p 60fps"),
+            Self::FHD30 => write!(f, "1080p 30fps"),
+            Self::FHD60 => write!(f, "1080p 60fps"),
+        }
+    }
 }
 
 impl Quality {
@@ -96,17 +103,6 @@ impl Quality {
     }
 
     pub const ALL: &[Quality] = &[Self::HD30, Self::HD60, Self::FHD30, Self::FHD60];
-}
-
-impl fmt::Display for Quality {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::HD30 => f.write_str("720p 30fps"),
-            Self::HD60 => f.write_str("720p 60fps"),
-            Self::FHD30 => f.write_str("1080p 30fps"),
-            Self::FHD60 => f.write_str("1080p 60fps"),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

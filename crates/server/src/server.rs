@@ -122,21 +122,13 @@ impl ChatServer {
             send_type: SendType::Unreliable,
         };
 
-        let reliable_video = ChannelConfig {
-            channel_id: channels.reliable_video_channel_id,
-            max_memory_usage_bytes: channels.reliable_video_buffer_size_mb * 1024 * 1024,
-            send_type: SendType::ReliableOrdered {
-                resend_time: Duration::from_millis(200),
-            },
-        };
-
         let system_audio = ChannelConfig {
             channel_id: protocol::SYSTEM_AUDIO_CHANNEL,
             max_memory_usage_bytes: SYSTEM_AUDIO_BUFFER_BYTES,
             send_type: SendType::Unreliable,
         };
 
-        let configs = vec![reliable, voice, video, reliable_video, system_audio];
+        let configs = vec![reliable, voice, video, system_audio];
 
         ConnectionConfig {
             available_bytes_per_tick: channels.bytes_per_tick,
@@ -164,7 +156,6 @@ impl ChatServer {
         self.video.process(
             &mut self.server,
             self.config.channels.video_channel_id,
-            self.config.channels.reliable_video_channel_id,
         );
         self.video
             .process_system_audio(&mut self.server, protocol::SYSTEM_AUDIO_CHANNEL);
@@ -354,6 +345,7 @@ impl ChatServer {
             ClientMessage::UnsubscribeScreen { target_id } => {
                 self.video.unsubscribe(client_id, target_id);
             }
+            _ => log::info!("Got unknown message"),
         }
     }
 
