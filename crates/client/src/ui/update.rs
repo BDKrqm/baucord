@@ -367,10 +367,11 @@ fn download_zip(
         .and_then(|p| p.parent().map(|p| p.to_path_buf()))
         .unwrap_or_else(|| PathBuf::from("."));
 
-    let filename = format!("baucord-v{version}.zip");
-    let dest = exe_dir.join(&filename);
+    let url = splash::download_url(version);
+    let filename = url.rsplit('/').next().unwrap_or("baucord-update.zip");
+    let dest = exe_dir.join(filename);
 
-    info!("Downloading {} → {}", splash::DOWNLOAD_URL, dest.display());
+    info!("Downloading {} → {}", url, dest.display());
 
     let agent: ureq::Agent = ureq::config::Config::builder()
         .timeout_global(Some(std::time::Duration::from_secs(30)))
@@ -378,7 +379,7 @@ fn download_zip(
         .into();
 
     let mut resp = agent
-        .get(splash::DOWNLOAD_URL)
+        .get(&url)
         .call()
         .map_err(|e| format!("Download request failed: {e}"))?;
 
