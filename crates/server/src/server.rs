@@ -66,8 +66,22 @@ impl ChatServer {
         let addr = config.socket_addr()?;
         let socket = UdpSocket::bind(addr)?;
         socket.set_nonblocking(true)?;
-        let public_addr = socket.local_addr()?;
 
+        // Increase OS-level UDP buffer to handle video relay bursts
+        let sock_ref = socket2::SockRef::from(&socket);
+        sock_ref
+            .set_send_buffer_size(protocol::UDP_SOCKET_BUFFER_BYTES)
+            .ok();
+        sock_ref
+            .set_recv_buffer_size(protocol::UDP_SOCKET_BUFFER_BYTES)
+            .ok();
+        info!(
+            "UDP buffers — send: {} KB, recv: {} KB",
+            sock_ref.send_buffer_size().unwrap_or(0) / 1024,
+            sock_ref.recv_buffer_size().unwrap_or(0) / 1024,
+        );
+
+        let public_addr = socket.local_addr()?;
         info!("{} starting on {public_addr}", config.server.name);
 
         let server_config = ServerConfig {
@@ -87,19 +101,6 @@ impl ChatServer {
         let transport = NetcodeServerTransport::new(server_config, socket)?;
         let connection_config = Self::create_connection_config(&config.channels);
         let server = RenetServer::new(connection_config);
-        let socket = UdpSocket::bind(addr)?;
-        socket.set_nonblocking(true)?;
-
-        // Increase OS-level UDP buffer to handle video relay bursts
-        let sock_ref = socket2::SockRef::from(&socket);
-        let target_buf = 4 * 1024 * 1024; // 4 MB
-        sock_ref.set_send_buffer_size(target_buf).ok();
-        sock_ref.set_recv_buffer_size(target_buf).ok();
-        log::info!(
-            "UDP buffers — send: {} KB, recv: {} KB",
-            sock_ref.send_buffer_size().unwrap_or(0) / 1024,
-            sock_ref.recv_buffer_size().unwrap_or(0) / 1024,
-        );
 
         Ok(Self {
             config,
