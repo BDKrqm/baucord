@@ -87,6 +87,19 @@ impl ChatServer {
         let transport = NetcodeServerTransport::new(server_config, socket)?;
         let connection_config = Self::create_connection_config(&config.channels);
         let server = RenetServer::new(connection_config);
+        let socket = UdpSocket::bind(addr)?;
+        socket.set_nonblocking(true)?;
+
+        // Increase OS-level UDP buffer to handle video relay bursts
+        let sock_ref = socket2::SockRef::from(&socket);
+        let target_buf = 4 * 1024 * 1024; // 4 MB
+        sock_ref.set_send_buffer_size(target_buf).ok();
+        sock_ref.set_recv_buffer_size(target_buf).ok();
+        log::info!(
+            "UDP buffers — send: {} KB, recv: {} KB",
+            sock_ref.send_buffer_size().unwrap_or(0) / 1024,
+            sock_ref.recv_buffer_size().unwrap_or(0) / 1024,
+        );
 
         Ok(Self {
             config,
@@ -153,12 +166,15 @@ impl ChatServer {
         self.process_reliable_messages();
         self.voice
             .process(&mut self.server, self.config.channels.voice_channel_id);
-        self.video.process(
-            &mut self.server,
-            self.config.channels.video_channel_id,
-        );
+        self.video
+            .process(&mut self.server, self.config.channels.video_channel_id);
         self.video
             .process_system_audio(&mut self.server, protocol::SYSTEM_AUDIO_CHANNEL);
+
+        // ── Channel pressure monitoring ─────────────────────────────
+        // Log warnings when any client's reliable channel is nearing capacity.
+        // This fires *before* send_packets so we catch pressure building up.
+        self.monitor_channel_pressure();
 
         self.transport.send_packets(&mut self.server);
 
@@ -234,8 +250,39 @@ impl ChatServer {
     fn handle_client_disconnected(&mut self, client_id: ClientId, reason: renet::DisconnectReason) {
         let reliable = self.config.channels.reliable_channel_id;
 
-        if let Some(username) = self.usernames.remove(&client_id) {
-            info!("{username} ({client_id}) disconnected: {reason}");
+        let username = self
+            .usernames
+            .remove(&client_id)
+            .unwrap_or_else(|| format!("User{client_id}"));
+
+        // ── Detailed disconnect diagnostics ─────────────────────────
+        warn!(
+            "CLIENT DISCONNECTED: {username} ({client_id}) reason={reason:?} display=\"{reason}\""
+        );
+
+        match reason {
+            renet::DisconnectReason::SendChannelError { channel_id, error } => {
+                let ch_name = self.channel_name(channel_id);
+                warn!("  → Send channel error on {ch_name} (id={channel_id}): {error:?}");
+                warn!("  → This usually means the channel's max_memory_usage_bytes was exceeded.");
+                warn!("  → Consider increasing the buffer size for channel {channel_id}.");
+            }
+            renet::DisconnectReason::ReceiveChannelError { channel_id, error } => {
+                let ch_name = self.channel_name(channel_id);
+                warn!("  → Receive channel error on {ch_name} (id={channel_id}): {error:?}");
+            }
+            renet::DisconnectReason::Transport => {
+                warn!("  → Transport-level disconnect (netcode timeout or socket error)");
+            }
+            renet::DisconnectReason::DisconnectedByClient => {
+                info!("  → Clean disconnect initiated by the client");
+            }
+            renet::DisconnectReason::DisconnectedByServer => {
+                info!("  → Server kicked this client");
+            }
+            _ => {
+                warn!("  → Reason details: {reason:?}");
+            }
         }
 
         // Clean up screen share state — if they were sharing, notify everyone
@@ -356,6 +403,44 @@ impl ChatServer {
             .get(&client_id)
             .cloned()
             .unwrap_or_else(|| format!("User{client_id}"))
+    }
+
+    /// Human-readable name for a channel ID, for diagnostics.
+    fn channel_name(&self, channel_id: u8) -> &'static str {
+        if channel_id == self.config.channels.reliable_channel_id {
+            "reliable"
+        } else if channel_id == self.config.channels.voice_channel_id {
+            "voice"
+        } else if channel_id == self.config.channels.video_channel_id {
+            "video"
+        } else if channel_id == protocol::SYSTEM_AUDIO_CHANNEL {
+            "system_audio"
+        } else {
+            "unknown"
+        }
+    }
+
+    /// Log warnings when any client's channel buffers are getting full.
+    /// Only checks the reliable channel since unreliable just drops silently.
+    #[allow(clippy::cast_precision_loss)]
+    fn monitor_channel_pressure(&self) {
+        let reliable_id = self.config.channels.reliable_channel_id;
+        let max_bytes = RELIABLE_BUFFER_BYTES;
+        // Warn at 75% capacity
+        let threshold = max_bytes / 4;
+
+        for client_id in self.server.clients_id() {
+            let available = self.server.channel_available_memory(client_id, reliable_id);
+            if available < threshold {
+                let username = self.get_username(client_id);
+                let used_pct = (1.0 - available as f64 / max_bytes as f64) * 100.0;
+                warn!(
+                    "CHANNEL PRESSURE: {username} ({client_id}) reliable channel at {used_pct:.0}% \
+                     ({} bytes remaining of {})",
+                    available, max_bytes,
+                );
+            }
+        }
     }
 
     #[allow(clippy::cast_precision_loss)]

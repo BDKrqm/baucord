@@ -304,7 +304,7 @@ impl VideoRelay {
         // All video arrives as chunks on the unreliable channel
         for client_id in &clients {
             while let Some(message) = server.receive_message(*client_id, video_channel_id) {
-                self.relay_video_chunk(server, *client_id, message, video_channel_id);
+                self.relay_video_chunk(server, *client_id, &message, video_channel_id);
             }
         }
     }
@@ -318,7 +318,7 @@ impl VideoRelay {
         &mut self,
         server: &mut RenetServer,
         client_id: ClientId,
-        message: bytes::Bytes,
+        message: &bytes::Bytes,
         outbound_channel: u8,
     ) {
         self.stats.chunks_received += 1;
@@ -384,7 +384,7 @@ impl VideoRelay {
                 self.relay_system_audio_packet(
                     server,
                     *client_id,
-                    message,
+                    &message,
                     system_audio_channel_id,
                 );
             }
@@ -395,7 +395,7 @@ impl VideoRelay {
         &mut self,
         server: &mut RenetServer,
         client_id: ClientId,
-        message: bytes::Bytes,
+        message: &bytes::Bytes,
         system_audio_channel_id: u8,
     ) {
         self.stats.sys_audio_received += 1;

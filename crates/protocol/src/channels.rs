@@ -32,7 +32,8 @@ pub const SYSTEM_AUDIO_CHANNEL: u8 = 6;
 // ── Buffer sizes ────────────────────────────────────────────────────────
 
 /// Default memory budget for the reliable channel (bytes).
-pub const RELIABLE_BUFFER_BYTES: usize = 1024 * 1024; // 1 MB
+pub const RELIABLE_BUFFER_BYTES: usize = 5 * 1024 * 1024; // 5 MB
+
 
 /// Default memory budget for the voice channel (bytes).
 pub const VOICE_BUFFER_BYTES: usize = 5 * 1024 * 1024; // 5 MB
@@ -46,3 +47,13 @@ pub const VIDEO_BUFFER_BYTES: usize = 10 * 1024 * 1024; // 10 MB
 /// 512 KB gives ~32 seconds of buffering — more than enough for renet's
 /// internal bookkeeping on an unreliable channel.
 pub const SYSTEM_AUDIO_BUFFER_BYTES: usize = 512 * 1024; // 512 KB
+
+/// Target OS-level UDP socket buffer size (send and receive).
+///
+/// The Linux default is 208 KB, which is too small for relaying video
+/// keyframes (~136 chunks × ~1300 bytes = ~177 KB per burst). When the
+/// OS send buffer fills, `send_to` fails silently and keepalive packets
+/// get dropped, causing netcode timeouts.
+///
+/// 4 MB gives comfortable headroom for multiple keyframes in flight.
+pub const UDP_SOCKET_BUFFER_BYTES: usize = 4 * 1024 * 1024; // 4 MB

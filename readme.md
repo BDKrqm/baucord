@@ -48,6 +48,8 @@ Enter a nickname and server address to connect.
 sudo systemctl disable docker
 sudo systemctl disable containerd
 
+echo "net.core.wmem_max=7500000" | sudo tee -a /etc/sysctl.conf
+echo "net.core.wmem_default=7500000" | sudo tee -a /etc/sysctl.conf
 echo "net.core.rmem_max=8388608" | sudo tee -a /etc/sysctl.d/99-udp-tuning.conf
 echo "net.core.rmem_default=1048576" | sudo tee -a /etc/sysctl.d/99-udp-tuning.conf
 sudo sysctl --system
