@@ -78,6 +78,8 @@ jobs:
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          key: sccache-${{ matrix.target }}
 
       - name: Build
         env:
