@@ -80,6 +80,14 @@ impl ChatServer {
             sock_ref.send_buffer_size().unwrap_or(0) / 1024,
             sock_ref.recv_buffer_size().unwrap_or(0) / 1024,
         );
+        let actual_send = sock_ref.send_buffer_size().unwrap_or(0);
+        if actual_send < protocol::UDP_SOCKET_BUFFER_BYTES {
+            warn!(
+                "UDP send buffer is {} KB, wanted {} KB — apply sysctl tuning on the host",
+                actual_send / 1024,
+                protocol::UDP_SOCKET_BUFFER_BYTES / 1024,
+            );
+        }
 
         let public_addr = socket.local_addr()?;
         info!("{} starting on {public_addr}", config.server.name);
