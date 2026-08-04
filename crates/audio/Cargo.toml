@@ -22,7 +22,7 @@ rtrb = "0.3"
 crossbeam-channel = "0.5"
 
 # Opus codec
-opus = { git = "https://github.com/mpwsh/opus-rs" }
+#opus = { git = "https://github.com/mpwsh/opus-rs" }
 
 # Resampling
 rubato = "1.0.1"
@@ -31,7 +31,9 @@ audioadapter-buffers = "2.0"
 # Noise suppression (Mozilla RNNoise, pure Rust)
 nnnoiseless = "0.5"
 
-earshot = { git = "https://github.com/mpwsh/earshot" }
+#earshot = { git = "https://github.com/mpwsh/earshot" }
+earshot = { git = "https://github.com/mpwsh/earshot", rev = "6e650a3f2c8e072509a956b12b5776bb848f0b0f" }
+opus = { git = "https://github.com/SpaceManiac/opus-rs", rev = "559876660603dc8079a053e03e6438766f669e69" }
 serde = { version = "1", features = ["derive"], optional = true }
 
 

@@ -4,7 +4,8 @@ version = "0.2.0"
 edition = "2021"
 
 [dependencies]
-xcap = { git = "https://github.com/nashaofu/xcap" }
+#xcap = { git = "https://github.com/nashaofu/xcap" }
+xcap = "0.8.2"
 log = "0.4"
 thiserror = "2"
 # Windows static: vcpkg install ffmpeg[x264,gpl]:x64-windows-static-md
