@@ -27,6 +27,7 @@
 
 mod config;
 mod decoder;
+mod platform;
 mod encoder;
 mod input;
 mod input_config;
@@ -86,7 +87,7 @@ pub struct VoiceChat {
 
     // ── Thread handles ───────────────────────────────────────────────
     encoder_thread: Option<std::thread::JoinHandle<()>>,
-    decoder_pool: Option<decoder::DecoderPool>,
+    decoder_thread: Option<std::thread::JoinHandle<()>>,
     should_stop: Arc<AtomicBool>,
 
     // ── Shared state ─────────────────────────────────────────────────
@@ -98,6 +99,8 @@ pub struct VoiceChat {
     deafened: Arc<AtomicBool>,
 
     config: VoiceChatConfig,
+    /// Holds the OS timer at 1 ms resolution for the session (Windows).
+    _timer_guard: platform::TimerResolutionGuard,
 }
 
 impl VoiceChat {
@@ -111,6 +114,9 @@ impl VoiceChat {
         let (decoder_to_audio_tx, decoder_to_audio_rx) = bounded(max_peers * 2);
         let (sound_tx, sound_rx) = bounded::<sounds::SoundType>(4);
 
+        // Build marker: lets a log capture prove which build is running.
+        log::info!("audio crate [latency-patch r11] initializing");
+
         // ── Shared atomics (created once, passed to children) ───────
         let output_gain = Arc::new(AtomicU32::new(config.output_gain.to_bits()));
         let deafened = Arc::new(AtomicBool::new(false));
@@ -122,8 +128,8 @@ impl VoiceChat {
         let encoder_thread =
             encoder::spawn(audio_to_encoder_rx, encoder_to_network_tx, stats.clone());
 
-        // ── Spawn decoder pool ──────────────────────────────────────
-        let decoder_pool = decoder::spawn_pool(
+        // ── Spawn decoder thread ────────────────────────────────────
+        let decoder_thread = decoder::spawn(
             network_to_decoder_rx,
             decoder_to_audio_tx.clone(),
             stats.clone(),
@@ -134,9 +140,9 @@ impl VoiceChat {
             config.noise_suppression,
             config.input_gain,
             config.gate_threshold,
-            true, // compressor_enabled
-            true, // agc_enabled
-            0.10, // agc_target_rms
+            config.compressor_enabled,
+            config.agc_enabled,
+            config.agc_target_rms,
         ));
 
         Ok(Self {
@@ -151,7 +157,7 @@ impl VoiceChat {
             input_config,
             sound_rx: Some(sound_rx),
             encoder_thread: Some(encoder_thread),
-            decoder_pool: Some(decoder_pool),
+            decoder_thread: Some(decoder_thread),
             should_stop,
             user_settings: Arc::new(Mutex::new(HashMap::new())),
             removed_peers,
@@ -160,6 +166,7 @@ impl VoiceChat {
             output_gain,
             deafened,
             config,
+            _timer_guard: platform::TimerResolutionGuard::acquire(),
         })
     }
 
@@ -167,8 +174,29 @@ impl VoiceChat {
     ///
     /// Encoder and decoder threads are already running from `new()`.
     pub fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.start_input()?;
-        self.start_output()?;
+        // Output first, and don't let a missing microphone abort playback:
+        // a user with no capture device should still hear the room. (Field
+        // incident: a machine with zero enabled recording endpoints went
+        // completely silent because input was started first and `?` bailed
+        // before output ever came up.)
+        let output_result = self.start_output();
+        let input_result = self.start_input();
+
+        if let Err(e) = &output_result {
+            log::error!("Voice output failed to start: {e}");
+        }
+        if let Err(e) = &input_result {
+            log::error!(
+                "Voice input failed to start (playback {}): {e}",
+                if output_result.is_ok() { "is still running" } else { "also failed" }
+            );
+        }
+
+        // Report the first failure, but note: callers that get an Err while
+        // output started successfully can keep this instance alive and hear
+        // peers — dropping it on input failure silences everything.
+        output_result?;
+        input_result?;
         Ok(())
     }
 
@@ -405,6 +433,24 @@ impl VoiceChat {
     }
 
     pub fn list_input_devices() -> Result<Vec<(String, bool)>, Box<dyn std::error::Error>> {
+        // Real enumeration is expensive (per-device property queries via
+        // CoreAudio/WASAPI) and callers are known to poll this from UI
+        // timers every couple of seconds — a plausible periodic staller
+        // for the audio path, and definite log spam. Cache for 10 s:
+        // callers can poll as fast as they like, the OS gets asked ~4×
+        // less often, and a hot-plugged device shows up within 10 s.
+        // (If the periodic receive-side underruns thin out after this
+        // change, enumeration stalls were indeed the cause.)
+        static CACHE: Mutex<Option<(std::time::Instant, Vec<(String, bool)>)>> =
+            Mutex::new(None);
+        if let Ok(cache) = CACHE.lock() {
+            if let Some((at, list)) = cache.as_ref() {
+                if at.elapsed() < std::time::Duration::from_secs(10) {
+                    return Ok(list.clone());
+                }
+            }
+        }
+
         let host = cpal::default_host();
         let default_name = host.default_input_device().and_then(|d| d.name().ok());
         let mut devices = Vec::new();
@@ -424,10 +470,24 @@ impl VoiceChat {
             }
         }
         info!("Found {} input devices", devices.len());
+        if let Ok(mut cache) = CACHE.lock() {
+            *cache = Some((std::time::Instant::now(), devices.clone()));
+        }
         Ok(devices)
     }
 
     pub fn list_output_devices() -> Result<Vec<(String, bool)>, Box<dyn std::error::Error>> {
+        // Same 10 s cache as list_input_devices — see the note there.
+        static CACHE: Mutex<Option<(std::time::Instant, Vec<(String, bool)>)>> =
+            Mutex::new(None);
+        if let Ok(cache) = CACHE.lock() {
+            if let Some((at, list)) = cache.as_ref() {
+                if at.elapsed() < std::time::Duration::from_secs(10) {
+                    return Ok(list.clone());
+                }
+            }
+        }
+
         let host = cpal::default_host();
         let default_name = host.default_output_device().and_then(|d| d.name().ok());
         let mut devices = Vec::new();
@@ -447,6 +507,9 @@ impl VoiceChat {
             }
         }
         info!("Found {} output devices", devices.len());
+        if let Ok(mut cache) = CACHE.lock() {
+            *cache = Some((std::time::Instant::now(), devices.clone()));
+        }
         Ok(devices)
     }
 }
@@ -470,11 +533,127 @@ impl Drop for VoiceChat {
             let _ = thread.join();
         }
 
-        if let Some(pool) = self.decoder_pool.take() {
-            let _ = pool.dispatcher.join();
-            for thread in pool.workers {
-                let _ = thread.join();
-            }
+        // Decoder thread checks `should_stop` every ≤10 ms and only ever
+        // try_sends, so this join cannot hang even if the application still
+        // holds `incoming_sender()` clones.
+        if let Some(thread) = self.decoder_thread.take() {
+            let _ = thread.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod headless_tests {
+    use super::*;
+    use std::time::Duration as StdDuration;
+
+    /// Prove the receive path works with no audio devices: packets fed via
+    /// the public API must reach the decoder and register in stats.
+    /// Mirrors exactly what client/voice.rs does with incoming packets.
+    #[test]
+    fn receive_path_processes_packets_headless() {
+        let vc = VoiceChat::new(VoiceChatConfig::default()).expect("new");
+
+        // Real Opus payloads (the decoder rejects garbage)
+        let mut enc = opus::Encoder::new(48000, opus::Channels::Mono, opus::Application::Voip)
+            .expect("encoder");
+        let pcm: Vec<f32> = (0..FRAME_SIZE)
+            .map(|i| (i as f32 * 440.0 * std::f32::consts::TAU / 48000.0).sin() * 0.5)
+            .collect();
+        let mut buf = vec![0u8; 512];
+
+        for seq in 0..20u32 {
+            let n = enc.encode_float(&pcm, &mut buf).expect("encode");
+            let pkt = AudioPacket::new(seq, seq * FRAME_SIZE as u32, 42, buf[..n].to_vec());
+            vc.receive_packet(pkt);
+            std::thread::sleep(StdDuration::from_millis(2));
+        }
+        std::thread::sleep(StdDuration::from_millis(100));
+
+        let received = vc
+            .stats()
+            .packets_received
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert!(received >= 15, "decoder only processed {received}/20 packets");
+
+        // outgoing_receiver must be a live owned clone usable in select!
+        let rx = vc.outgoing_receiver();
+        assert!(rx.try_recv().is_err()); // empty, but connected
+    }
+}
+
+#[cfg(test)]
+mod voice_loop_repro {
+    use super::*;
+    use crossbeam_channel::{bounded as cb_bounded, select};
+    use std::time::Duration as StdDuration;
+
+    enum Ctrl {
+        Incoming(AudioPacket),
+        Shutdown,
+    }
+
+    /// Replicates client/voice.rs's select loop shape (post-fix) against a
+    /// real VoiceChat: per-iteration outgoing clone, three-arm select with
+    /// dead-channel fallback, control drain, take_outgoing_packets poll.
+    #[test]
+    fn voice_loop_select_shape_processes_incoming() {
+        let (ctrl_tx, ctrl_rx) = cb_bounded::<Ctrl>(64);
+        let (stats_tx, stats_rx) = cb_bounded(1);
+        let loop_thread = std::thread::spawn(move || {
+            // VoiceChat is !Send (cpal streams) — created on the loop
+            // thread, exactly like client/voice.rs does.
+            let vc = VoiceChat::new(VoiceChatConfig::default()).expect("new");
+            stats_tx.send(vc.stats.clone()).unwrap();
+            let (_dead_tx, dead_rx) = cb_bounded::<AudioPacket>(1);
+            let mut forwarded = 0u32;
+            let mut running = true;
+            while running {
+                let outgoing = Some(vc.outgoing_receiver());
+                select! {
+                    recv(ctrl_rx) -> msg => match msg {
+                        Ok(Ctrl::Incoming(p)) => vc.receive_packet(p),
+                        Ok(Ctrl::Shutdown) | Err(_) => running = false,
+                    },
+                    recv(outgoing.as_ref().unwrap_or(&dead_rx)) -> pkt => {
+                        if pkt.is_ok() { forwarded += 1; }
+                    },
+                    default(StdDuration::from_millis(5)) => {}
+                }
+                for _ in 0..32 {
+                    match ctrl_rx.try_recv() {
+                        Ok(Ctrl::Incoming(p)) => vc.receive_packet(p),
+                        Ok(Ctrl::Shutdown) => running = false,
+                        Err(_) => break,
+                    }
+                }
+                let _ = vc.take_outgoing_packets();
+                let _ = vc.input_level();
+                let _ = vc.is_speaking();
+            }
+            forwarded
+        });
+
+        let mut enc = opus::Encoder::new(48000, opus::Channels::Mono, opus::Application::Voip)
+            .expect("encoder");
+        let pcm: Vec<f32> = (0..FRAME_SIZE)
+            .map(|i| (i as f32 * 330.0 * std::f32::consts::TAU / 48000.0).sin() * 0.4)
+            .collect();
+        let mut buf = vec![0u8; 512];
+        for seq in 0..30u32 {
+            let n = enc.encode_float(&pcm, &mut buf).expect("encode");
+            let pkt = AudioPacket::new(seq, seq * FRAME_SIZE as u32, 7, buf[..n].to_vec());
+            ctrl_tx.send(Ctrl::Incoming(pkt)).unwrap();
+            std::thread::sleep(StdDuration::from_millis(2));
+        }
+        std::thread::sleep(StdDuration::from_millis(100));
+        ctrl_tx.send(Ctrl::Shutdown).unwrap();
+        let _forwarded = loop_thread.join().expect("loop thread must not panic or hang");
+
+        let stats = stats_rx.recv().expect("stats from loop thread");
+        let received = stats
+            .packets_received
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert!(received >= 25, "loop only processed {received}/30 incoming packets");
     }
 }
