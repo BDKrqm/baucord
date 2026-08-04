@@ -76,14 +76,23 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       # ── Build ───────────────────────────────────────────────────────
 
+      # sccache >= 0.17.0 is required: older versions re-spawn rustc with the
+      # full inline command line, which exceeds the 32,767-char CreateProcess
+      # limit on Windows for ffmpeg-sys-next (its build script emits ~24KB of
+      # --cfg flags). 0.17.0 added rustc @argfile support (mozilla/sccache#2782).
+      # Note: this action has no `key` input; caches are keyed automatically.
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
         with:
-          key: sccache-${{ matrix.target }}
+          version: "v0.17.0"
 
       - name: Build
         env:
           SCCACHE_GHA_ENABLED: "true"
+          # If the Windows leg ever hits "filename or extension is too long"
+          # again, disable the wrapper for Windows only (empty string = no
+          # wrapper, per the Cargo book):
+          #   RUSTC_WRAPPER: ${{ runner.os == 'Windows' && '' || 'sccache' }}
           RUSTC_WRAPPER: "sccache"
           RUSTFLAGS: ${{ matrix.rustflags }}
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
