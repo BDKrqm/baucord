@@ -76,24 +76,26 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       # ── Build ───────────────────────────────────────────────────────
 
-      # sccache >= 0.17.0 is required: older versions re-spawn rustc with the
-      # full inline command line, which exceeds the 32,767-char CreateProcess
-      # limit on Windows for ffmpeg-sys-next (its build script emits ~24KB of
-      # --cfg flags). 0.17.0 added rustc @argfile support (mozilla/sccache#2782).
+      # sccache cannot build ffmpeg-sys-next on Windows: its build script emits
+      # ~24KB of --cfg flags, and sccache spawns rustc with the full inline
+      # command line, exceeding the 32,767-char CreateProcess limit (os error
+      # 206). Cargo avoids this with @argfiles; sccache (verified through
+      # v0.17.0, src/compiler/rust.rs generate_compile_commands) does not —
+      # it flattens args even when cargo passed an @argfile. So the wrapper is
+      # disabled on Windows below; sccache still caches Linux/macOS builds.
       # Note: this action has no `key` input; caches are keyed automatically.
       - name: Setup sccache
+        if: runner.os != 'Windows'
         uses: mozilla-actions/sccache-action@v0.0.9
         with:
           version: "v0.17.0"
 
       - name: Build
         env:
-          SCCACHE_GHA_ENABLED: "true"
-          # If the Windows leg ever hits "filename or extension is too long"
-          # again, disable the wrapper for Windows only (empty string = no
-          # wrapper, per the Cargo book):
-          #   RUSTC_WRAPPER: ${{ runner.os == 'Windows' && '' || 'sccache' }}
-          RUSTC_WRAPPER: "sccache"
+          SCCACHE_GHA_ENABLED: ${{ runner.os != 'Windows' && 'true' || 'false' }}
+          # Empty string = no wrapper (documented Cargo behavior). Windows must
+          # not use sccache — see the comment on the Setup sccache step.
+          RUSTC_WRAPPER: ${{ runner.os != 'Windows' && 'sccache' || '' }}
           RUSTFLAGS: ${{ matrix.rustflags }}
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
           PKG_CONFIG_PATH: ${{ matrix.pkg_config_path || '' }}
