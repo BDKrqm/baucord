@@ -133,5 +133,12 @@ pub enum UiMessage {
     QuitFromTray,
 
     // ── Application lifecycle ───────────────────────────────────────
+    /// OS close button on the main window. App decides what it means:
+    /// hide to tray when connected, quit from the connect view.
+    MainWindowClose,
+    /// Explicit quit — the Quit button on the connect view.
     Shutdown,
+    /// Deferred voice-engine stop after a disconnect, so the leave
+    /// sound can finish before the output stream is torn down.
+    StopVoiceAfterDisconnect,
 }
