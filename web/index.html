@@ -4,16 +4,12 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>baucord — self-hosted voice chat</title>
-    <!-- Stays English: crawlers and link unfurlers (Discord, etc.) read
-       this without running JS, and one URL can only carry one language. -->
     <meta
       name="description"
       content="A small, self-hosted voice, text and screen sharing app for you and your friends. Client and server ship together in one zip."
     />
     <meta name="theme-color" content="#1A1D21" />
 
-    <!-- One font. Body text uses the system stack — the site is on the
-       same diet as the app. -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -625,8 +621,9 @@
           <span>~/baucord</span>
           <span>v__VERSION__</span>
         </div>
-        <!-- prettier-ignore -->
-        <pre class="term-body"><span class="c" x-i18n="term-c-host"># on whoever's hosting:</span>
+        <pre
+          class="term-body"
+        ><span class="c" x-i18n="term-c-host"># on whoever's hosting:</span>
 <span class="p">$</span> unzip baucord-v__VERSION__-linux-x64.zip
 <span class="p">$</span> ./dedicated-server
 
