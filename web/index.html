@@ -164,24 +164,58 @@
       .nav-links a.dl:hover {
         background: var(--cobalt-deep);
       }
-      /* language toggle — pointless without JS, so hidden until .js */
-      .lang-toggle {
+      /* language picker — a real <select>, so keyboard nav and native
+       menus come for free. Pointless without JS: hidden until .js. */
+      .lang-select {
         display: none;
         font-family: var(--mono);
         font-size: 0.78rem;
         color: var(--steel);
-        background: none;
+        background: var(--graphite);
         border: 1px solid var(--line);
         border-radius: 5px;
-        padding: 0.25rem 0.5rem;
+        padding: 0.25rem 1.6rem 0.25rem 0.5rem;
         cursor: pointer;
+        appearance: none;
+        -webkit-appearance: none;
+        /* chevron rendered as a background SVG so it inherits color and
+         doesn't need an extra element */
+        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6' fill='none' stroke='%23ABADB0' stroke-width='1.5'><path d='M1 1l4 4 4-4'/></svg>");
+        background-repeat: no-repeat;
+        background-position: right 0.5rem center;
+        background-size: 0.6rem auto;
       }
-      .js .lang-toggle {
+      .js .lang-select {
         display: inline-block;
       }
-      .lang-toggle:hover {
+      .lang-select:hover {
         color: var(--fog);
         border-color: var(--cobalt);
+      }
+      .lang-select option {
+        background: var(--gunmetal);
+        color: var(--fog);
+      }
+
+      /* language picker in the download footer note — same select,
+       inline with the "Apache-licensed" facts line. Hidden without JS. */
+      .lang-note {
+        display: none;
+        align-items: baseline;
+        justify-content: center;
+        gap: 0.55rem;
+        margin: 2.25rem 0 0;
+        font-family: var(--mono);
+        font-size: 0.72rem;
+        color: var(--muted);
+        letter-spacing: 0.02em;
+      }
+      .js .lang-note {
+        display: flex;
+      }
+      .lang-note .lang-select {
+        display: inline-block;
+        font-size: 0.72rem;
       }
 
       /* ── hero ────────────────────────────────── */
@@ -380,13 +414,21 @@
       }
 
       /* lightbox — a native <dialog>; Esc-to-close and the backdrop
-       come from the platform, not from us */
+       come from the platform, not from us. Some browsers don't center
+       an open <dialog> reliably from the UA stylesheet alone, so pin
+       it ourselves. */
       .lightbox {
+        position: fixed;
+        inset: 0;
+        margin: auto;
         border: 1px solid var(--line);
         border-radius: 8px;
         background: var(--gunmetal);
         padding: 0.75rem;
         max-width: min(92vw, 1400px);
+        max-height: 92vh;
+        width: fit-content;
+        height: fit-content;
         cursor: zoom-out;
       }
       .lightbox img {
@@ -520,7 +562,9 @@
         <a class="wordmark" href="#">bau<b>cord</b></a>
         <div class="nav-links">
           <a class="plain" href="#features" x-i18n="nav-features">features</a>
-          <a class="plain" href="#screenshots" x-i18n="nav-interface">interface</a>
+          <a class="plain" href="#screenshots" x-i18n="nav-interface"
+            >interface</a
+          >
           <a
             class="plain"
             href="https://github.com/baucord/baucord"
@@ -529,19 +573,16 @@
             x-i18n="nav-source"
             >source</a
           >
-          <button
-            class="lang-toggle"
-            type="button"
-            @click="$store.i18n.toggle()"
-            :aria-label="
-              $store.i18n.lang === 'es'
-                ? 'Switch language to English'
-                : 'Cambiar idioma a español'
-            "
-            x-text="$store.i18n.lang === 'es' ? 'en' : 'es'"
+          <select
+            class="lang-select"
+            aria-label="Language"
+            @change="$store.i18n.set($event.target.value, true)"
+            x-model="$store.i18n.lang"
           >
-            es
-          </button>
+            <option value="en">EN</option>
+            <option value="es">ES</option>
+            <option value="pt-BR">PT-BR</option>
+          </select>
           <a class="dl" href="#download" x-i18n="nav-download">download</a>
         </div>
       </div>
@@ -557,7 +598,9 @@
           and a server you control.
         </p>
         <div class="btn-row">
-          <a class="btn solid" href="#download" x-i18n="hero-download">Download</a>
+          <a class="btn solid" href="#download" x-i18n="hero-download"
+            >Download</a
+          >
           <a
             class="btn ghost"
             href="https://github.com/baucord/baucord"
@@ -573,7 +616,11 @@
         </p>
       </div>
 
-      <div class="term" aria-label="deployment example" x-i18n:aria-label="term-aria">
+      <div
+        class="term"
+        aria-label="deployment example"
+        x-i18n:aria-label="term-aria"
+      >
         <div class="term-bar">
           <span>~/baucord</span>
           <span>v__VERSION__</span>
@@ -639,7 +686,9 @@
           </div>
           <div class="spec-row">
             <dt x-i18n="spec-chat-t">text chat</dt>
-            <dd x-i18n="spec-chat-d">For links, and for whoever's mic just died.</dd>
+            <dd x-i18n="spec-chat-d">
+              For links, and for whoever's mic just died.
+            </dd>
           </div>
           <div class="spec-row">
             <dt x-i18n="spec-machine-t">your machine</dt>
@@ -678,7 +727,9 @@
                 loading="lazy"
               />
             </a>
-            <figcaption x-i18n="shot-connect-cap">connect — nickname and server address, done</figcaption>
+            <figcaption x-i18n="shot-connect-cap">
+              connect — nickname and server address, done
+            </figcaption>
           </figure>
           <figure>
             <a class="shot-link" href="img/client1.png">
@@ -689,7 +740,9 @@
                 loading="lazy"
               />
             </a>
-            <figcaption x-i18n="shot-call-cap">a call — voices, chat, per-user controls</figcaption>
+            <figcaption x-i18n="shot-call-cap">
+              a call — voices, chat, per-user controls
+            </figcaption>
           </figure>
         </div>
       </div>
@@ -739,6 +792,20 @@
           reach — a spare box, a cheap VPS, a homelab — then hand them the
           address. That's the whole deployment.
         </p>
+
+        <p class="lang-note">
+          <label for="lang-select-footer" x-i18n="lang-label">Language</label>
+          <select
+            id="lang-select-footer"
+            class="lang-select"
+            @change="$store.i18n.set($event.target.value, true)"
+            x-model="$store.i18n.lang"
+          >
+            <option value="en">English</option>
+            <option value="es">Español</option>
+            <option value="pt-BR">Português (Brasil)</option>
+          </select>
+        </p>
       </div>
     </section>
 
@@ -754,9 +821,15 @@
       </div>
     </footer>
 
-    <dialog class="lightbox" aria-label="screenshot viewer" x-i18n:aria-label="lightbox-aria">
+    <dialog
+      class="lightbox"
+      aria-label="screenshot viewer"
+      x-i18n:aria-label="lightbox-aria"
+    >
       <img alt="" />
-      <p class="lightbox-hint" x-i18n="lightbox-hint">click anywhere or press esc to close</p>
+      <p class="lightbox-hint" x-i18n="lightbox-hint">
+        click anywhere or press esc to close
+      </p>
     </dialog>
 
     <script>
@@ -787,64 +860,88 @@
     </script>
 
     <script>
-      // i18n. English lives in the markup and is the fallback — this
-      // only swaps text when Spanish is active, so no-JS visitors,
-      // crawlers and link unfurlers keep the English page.
+      // i18n. English lives in the markup and is the fallback — non-English
+      // strings are fetched on demand, so no-JS visitors, crawlers and link
+      // unfurlers keep the English page.
       //
       //   x-i18n="key"            swap text content
       //   x-i18n.html="key"       swap innerHTML (our own strings only)
       //   x-i18n:alt="key"        swap an attribute (alt, aria-label, …)
       //
-      // Spanish strings: i18n/es.json. Keys missing there fall back to
-      // the cached English, so a half-translated file never blanks text.
+      // Add a language:
+      //   1. drop a JSON file into i18n/  (e.g. i18n/fr.json)
+      //   2. add it to LANGS below
+      //   3. add an <option> to the two <select class="lang-select">
+      // Missing keys fall back to the English left in the markup, so a
+      // half-translated file never blanks text.
       document.addEventListener("alpine:init", function () {
         var STORAGE_KEY = "baucord-lang";
         var originalTitle = document.title;
 
+        // Non-English languages only — English is the baked-in fallback.
+        //   file:   filename under i18n/ (without the .json)
+        //   match:  navigator.language prefixes that auto-select this lang
+        var LANGS = {
+          es: { file: "es", match: ["es"] },
+          "pt-BR": { file: "pt-BR", match: ["pt"] },
+        };
+
+        function detect() {
+          var nav = (navigator.language || "").toLowerCase();
+          for (var code in LANGS) {
+            var prefixes = LANGS[code].match;
+            for (var i = 0; i < prefixes.length; i++) {
+              if (nav.indexOf(prefixes[i].toLowerCase()) === 0) return code;
+            }
+          }
+          return "en";
+        }
+
         Alpine.store("i18n", {
           lang: "en",
-          dict: {},
-          loaded: false,
+          dicts: {}, // code -> loaded dictionary
+          loading: {}, // code -> in-flight promise, dedupes fetches
           init: function () {
             var saved = null;
             try {
               saved = localStorage.getItem(STORAGE_KEY);
             } catch (e) {}
-            var auto =
-              (navigator.language || "").toLowerCase().indexOf("es") === 0
-                ? "es"
-                : "en";
-            this.set(saved || auto, false);
-          },
-          toggle: function () {
-            this.set(this.lang === "es" ? "en" : "es", true);
+            // Ignore a saved value we no longer ship a dictionary for.
+            if (saved && saved !== "en" && !LANGS[saved]) saved = null;
+            this.set(saved || detect(), false);
           },
           set: function (lang, persist) {
             var store = this;
-            if (lang === "es" && !store.loaded) {
-              fetch("i18n/es.json")
+            if (lang === "en" || !LANGS[lang]) {
+              store.apply("en", persist);
+              return;
+            }
+            if (store.dicts[lang]) {
+              store.apply(lang, persist);
+              return;
+            }
+            if (!store.loading[lang]) {
+              store.loading[lang] = fetch("i18n/" + LANGS[lang].file + ".json")
                 .then(function (r) {
                   return r.json();
                 })
                 .then(function (dict) {
-                  store.dict = dict;
-                  store.loaded = true;
-                  store.apply("es", persist);
-                })
-                .catch(function () {
-                  store.apply("en", persist); // fetch failed — stay English
+                  store.dicts[lang] = dict;
                 });
-            } else {
-              store.apply(lang, persist);
             }
+            store.loading[lang]
+              .then(function () {
+                store.apply(lang, persist);
+              })
+              .catch(function () {
+                store.apply("en", persist);
+              });
           },
           apply: function (lang, persist) {
             this.lang = lang;
             document.documentElement.lang = lang;
-            document.title =
-              lang === "es"
-                ? this.dict["meta-title"] || originalTitle
-                : originalTitle;
+            var dict = this.dicts[lang];
+            document.title = (dict && dict["meta-title"]) || originalTitle;
             if (persist) {
               try {
                 localStorage.setItem(STORAGE_KEY, lang);
@@ -864,8 +961,8 @@
               : el.textContent;
           utils.effect(function () {
             var store = Alpine.store("i18n");
-            var text =
-              store.lang === "es" ? store.dict[key] || original : original;
+            var dict = store.dicts[store.lang];
+            var text = (dict && dict[key]) || original;
             if (attr) el.setAttribute(attr, text);
             else if (html) el.innerHTML = text;
             else el.textContent = text;

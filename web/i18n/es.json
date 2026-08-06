@@ -41,5 +41,6 @@
   "dl-note-top": "Cada zip trae el cliente y el servidor dedicado para esa plataforma. Agarrá el que necesites; el que hostea también necesita el del lado del servidor.",
   "dl-note-bottom": "Descomprimí, corré <code>dedicated-server</code> en algún lugar que tus amigos puedan alcanzar — una máquina de sobra, un VPS barato, un homelab — y pasales la dirección. Ese es todo el despliegue.",
   "lightbox-aria": "visor de capturas",
-  "lightbox-hint": "hacé clic en cualquier lado o presioná esc para cerrar"
+  "lightbox-hint": "hacé clic en cualquier lado o presioná esc para cerrar",
+  "lang-label": "Idioma"
 }
