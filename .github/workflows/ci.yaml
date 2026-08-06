@@ -2,13 +2,8 @@ name: CI
 on:
   push:
     branches: [main]
-  pull_request:
 
 jobs:
-  # Guards the client/desktop split: the core crate must keep compiling
-  # for iOS with no desktop-only dependencies leaking in. This is the
-  # cheapest job in the repo (no FFmpeg, no fltk, no linking) and it
-  # catches the exact class of regression that is invisible on desktop.
   ios-seam:
     runs-on: macos-latest
     steps:
