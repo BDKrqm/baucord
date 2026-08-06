@@ -47,6 +47,11 @@ pub const LOCALES: &[Locale] = &[
         native_name: "Español (Argentina)",
         ftl: include_str!("../locales/es-AR.ftl"),
     },
+    Locale {
+        code: "pt-BR",
+        native_name: "Português (Brasil)",
+        ftl: include_str!("../locales/pt-BR.ftl"),
+    },
 ];
 
 struct State {
@@ -67,9 +72,7 @@ pub fn init(preferred: Option<&str>) -> &'static str {
 /// Switch locale at runtime. Already-constructed widgets keep their
 /// labels — frontends re-set or rebuild per their own strategy.
 pub fn set_locale(preferred: Option<&str>) -> &'static str {
-    let requested = preferred
-        .map(str::to_owned)
-        .or_else(sys_locale::get_locale);
+    let requested = preferred.map(str::to_owned).or_else(sys_locale::get_locale);
     let locale = resolve(requested.as_deref());
     let fallback = (locale.code != "en").then(|| build_bundle(&LOCALES[0]));
     let state = State {
@@ -84,11 +87,7 @@ pub fn set_locale(preferred: Option<&str>) -> &'static str {
 
 /// The active locale code ("en" before `init`).
 pub fn current_locale() -> &'static str {
-    STATE
-        .read()
-        .unwrap()
-        .as_ref()
-        .map_or("en", |s| s.code)
+    STATE.read().unwrap().as_ref().map_or("en", |s| s.code)
 }
 
 /// Translate a message id. Prefer the [`t!`] macro.
