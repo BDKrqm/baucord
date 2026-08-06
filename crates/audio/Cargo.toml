@@ -4,12 +4,15 @@ version = "0.4.3"
 edition = "2021"
 description = "audio components for baucord"
 
+[lints]
+workspace = true
+
 [features]
 serde = ["dep:serde"]
 
 [dependencies]
 # Audio I/O
-cpal = "0.15"
+cpal = "0.18"
 dasp_sample = "0.11"
 
 # Wav reading
@@ -19,30 +22,38 @@ hound = "3.5"
 rtrb = "0.3"
 
 # Bounded channels
-crossbeam-channel = "0.5"
+crossbeam-channel.workspace = true
 
 # Opus codec
 #opus = { git = "https://github.com/mpwsh/opus-rs" }
 
 # Resampling
-rubato = "1.0.1"
-audioadapter-buffers = "2.0"
+rubato = "4.0"
+# NOTE: must track the audioadapter major that rubato depends on (4.x for
+# rubato 4.0) — a newer audioadapter here would resolve as a second copy
+# with incompatible adapter types at the rubato boundary.
+audioadapter-buffers = "4.0"
 
 # Noise suppression (Mozilla RNNoise, pure Rust)
 nnnoiseless = "0.5"
 
-#earshot = { git = "https://github.com/mpwsh/earshot" }
-earshot = { git = "https://github.com/mpwsh/earshot", rev = "6e650a3f2c8e072509a956b12b5776bb848f0b0f" }
+# Fork retired: upstream 1.x ships quantized weights in its default
+# predictor, which was the fork's whole reason to exist.
+earshot = "1.2"
+# Deliberately pinned AHEAD of crates.io: this rev (== current master)
+# uses the opusic-sys backend; the crates.io 0.3.1 release predates that
+# switch. Do not "downgrade" to the registry version.
 opus = { git = "https://github.com/SpaceManiac/opus-rs", rev = "559876660603dc8079a053e03e6438766f669e69" }
-serde = { version = "1", features = ["derive"], optional = true }
+serde = { workspace = true, optional = true }
 
 
 # Logging
-log = "0.4"
-env_logger = "0.11"
+log.workspace = true
 
 [dev-dependencies]
-fltk = { version = "1.5", features = ["fltk-bundled"] }
+# examples only — the library itself never initializes a logger
+env_logger = "0.11"
+fltk.workspace = true
 ui = { path = "../ui" }
 
 [[example]]
