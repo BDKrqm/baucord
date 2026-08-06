@@ -1,4 +1,4 @@
-name: CI
+name: ios compile test
 on:
   push:
     branches: [main]
@@ -14,7 +14,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ios-seam
-      - name: Core compiles for iOS
+      - name: Core
         run: cargo check -p client --target aarch64-apple-ios
-      - name: Audio compiles for iOS
+      - name: Protocol
+        run: cargo check -p protocol --target aarch64-apple-ios
+      - name: Audio
         run: cargo check -p audio --target aarch64-apple-ios
