@@ -6,20 +6,21 @@
 use client::config::Settings;
 use crate::ui::messages::UiMessage;
 use fltk::{prelude::*, *};
+use i18n::t;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 use ui::theme;
 use ui::widgets::{controls, labels, layout, meter};
 
 fn format_sensitivity(value: f64) -> String {
-    let name = match value {
-        v if v < 0.010 => "Very High",
-        v if v < 0.020 => "High",
-        v if v < 0.040 => "Medium",
-        v if v < 0.065 => "Low",
-        _ => "Very Low",
-    };
-    format!("Sensitivity: {name}  (threshold: {value:.3} RMS)")
+    let name = t!(match value {
+        v if v < 0.010 => "sensitivity-very-high",
+        v if v < 0.020 => "sensitivity-high",
+        v if v < 0.040 => "sensitivity-medium",
+        v if v < 0.065 => "sensitivity-low",
+        _ => "sensitivity-very-low",
+    });
+    t!("audio-sensitivity-line", "name" => name, "threshold" => format!("{value:.3}"))
 }
 
 /// Build the audio settings panel.
@@ -48,34 +49,34 @@ pub fn build(
 
     // ── Devices ─────────────────────────────────────────────────
 
-    labels::section_header(&mut col, "\u{1f3a7}", "DEVICES");
+    labels::section_header(&mut col, "\u{1f3a7}", &t!("audio-devices-header"));
 
-    labels::field_label(&mut col, "Input Device (Microphone)");
+    labels::field_label(&mut col, &t!("audio-input-device"));
     let mut input_choice = controls::dropdown(&mut col);
     let input_names: Vec<&str> = input_devices.iter().map(|(n, _)| n.as_str()).collect();
     controls::populate_dropdown(
         &mut input_choice,
-        "System Default",
+        &t!("audio-system-default"),
         &input_names,
         settings.audio.input.device.as_deref(),
     );
 
-    labels::field_label(&mut col, "Output Device (Speakers/Headphones)");
+    labels::field_label(&mut col, &t!("audio-output-device"));
     let mut output_choice = controls::dropdown(&mut col);
     let output_names: Vec<&str> = output_devices.iter().map(|(n, _)| n.as_str()).collect();
     controls::populate_dropdown(
         &mut output_choice,
-        "System Default",
+        &t!("audio-system-default"),
         &output_names,
         settings.audio.output.device.as_deref(),
     );
 
     labels::hint_label(
         &mut col,
-        &format!(
-            "{} input, {} output devices",
-            input_devices.len(),
-            output_devices.len()
+        &t!(
+            "audio-device-count",
+            "inputs" => input_devices.len() as u32,
+            "outputs" => output_devices.len() as u32,
         ),
     );
 
@@ -83,13 +84,13 @@ pub fn build(
 
     // ── Input ───────────────────────────────────────────────────
 
-    labels::section_header(&mut col, "\u{1f3a4}", "INPUT");
+    labels::section_header(&mut col, "\u{1f3a4}", &t!("audio-input-header"));
 
-    labels::field_label(&mut col, "Capture Level");
+    labels::field_label(&mut col, &t!("audio-capture-level"));
     let threshold_rc = std::rc::Rc::new(std::cell::RefCell::new(settings.audio.gate_threshold));
     let vu_input = meter::gate(&mut col, denoised_level.clone(), threshold_rc.clone(), 22);
 
-    labels::field_label(&mut col, "Input Gain");
+    labels::field_label(&mut col, &t!("audio-input-gain"));
     let mut input_gain_slider = controls::slider(
         &mut col,
         0.0,
@@ -100,10 +101,10 @@ pub fn build(
     );
     let input_gain_lbl = labels::hint_label(
         &mut col,
-        &format!("Gain: {}%", (settings.audio.input.gain * 100.0) as i32),
+        &t!("audio-gain-value", "percent" => (settings.audio.input.gain * 100.0) as i32),
     );
 
-    labels::field_label(&mut col, "Input Sensitivity");
+    labels::field_label(&mut col, &t!("audio-input-sensitivity"));
     let mut vad_slider = controls::slider(
         &mut col,
         0.005,
@@ -116,23 +117,23 @@ pub fn build(
         &mut col,
         &format_sensitivity(settings.audio.gate_threshold as f64),
     );
-    labels::hint_label(&mut col, "Audio below the red line won't be transmitted");
+    labels::hint_label(&mut col, &t!("audio-gate-hint"));
 
-    let mut test_mic_btn = controls::button("\u{1f3a4}  Test Microphone");
+    let mut test_mic_btn = controls::button(&t!("audio-test-mic"));
     col.fixed(&test_mic_btn, 30);
 
     let test_mic_info =
-        labels::hint_label(&mut col, "Listen to your own mic (others won't hear you)");
+        labels::hint_label(&mut col, &t!("audio-test-hint"));
 
     layout::separator(&mut col);
 
     // ── Output ──────────────────────────────────────────────────
 
-    labels::section_header(&mut col, "\u{1f50a}", "OUTPUT");
+    labels::section_header(&mut col, "\u{1f50a}", &t!("audio-output-header"));
 
     let vu_output = meter::vu(&mut col, output_level.clone(), 22, theme::CYAN);
 
-    labels::field_label(&mut col, "Master Volume");
+    labels::field_label(&mut col, &t!("audio-master-volume"));
     let mut output_gain_slider = controls::slider(
         &mut col,
         0.0,
@@ -143,7 +144,7 @@ pub fn build(
     );
     let output_gain_lbl = labels::hint_label(
         &mut col,
-        &format!("Volume: {}%", (settings.audio.output.gain * 100.0) as i32),
+        &t!("audio-volume-value", "percent" => (settings.audio.output.gain * 100.0) as i32),
     );
 
     col.end();
@@ -178,7 +179,7 @@ pub fn build(
     let mut lbl = input_gain_lbl.clone();
     input_gain_slider.set_callback(move |sl| {
         let val = sl.value() as f32;
-        lbl.set_label(&format!("Gain: {}%", (val * 100.0) as i32));
+        lbl.set_label(&t!("audio-gain-value", "percent" => (val * 100.0) as i32));
         s.send(UiMessage::SetInputGain(val));
     });
 
@@ -186,7 +187,7 @@ pub fn build(
     let mut lbl = output_gain_lbl.clone();
     output_gain_slider.set_callback(move |sl| {
         let val = sl.value() as f32;
-        lbl.set_label(&format!("Volume: {}%", (val * 100.0) as i32));
+        lbl.set_label(&t!("audio-volume-value", "percent" => (val * 100.0) as i32));
         s.send(UiMessage::SetOutputGain(val));
     });
 
@@ -199,16 +200,16 @@ pub fn build(
         *testing_cb.borrow_mut() = is_testing;
 
         if is_testing {
-            btn.set_label("\u{1f534}  Stop Testing");
+            btn.set_label(&t!("audio-stop-testing"));
             btn.set_color(theme::ACCENT_HOVER);
             btn.set_label_color(theme::BUTTON_TEXT);
-            info_lbl.set_label("Listening to your mic... others can't hear you");
+            info_lbl.set_label(&t!("audio-testing-hint"));
             info_lbl.set_label_color(theme::WARNING);
         } else {
-            btn.set_label("\u{1f3a4}  Test Microphone");
+            btn.set_label(&t!("audio-test-mic"));
             btn.set_color(theme::BG_TERTIARY);
             btn.set_label_color(theme::TEXT_PRIMARY);
-            info_lbl.set_label("Listen to your own mic (others won't hear you)");
+            info_lbl.set_label(&t!("audio-test-hint"));
             info_lbl.set_label_color(theme::TEXT_MUTED);
         }
 
