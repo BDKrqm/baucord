@@ -250,6 +250,12 @@ struct CaptureState {
     pace_changed: Instant,
     /// Since when viewer loss has been continuously low (recovery hold).
     pace_good_since: Option<Instant>,
+    /// Consecutive over-threshold StreamHealth samples (spike filter).
+    pace_bad_samples: u32,
+    /// Recent viewer keyframe-request arrivals (distress detector).
+    kf_request_times: Vec<Instant>,
+    /// Last time viewer distress stepped the pace down.
+    last_distress: Option<Instant>,
 }
 
 // ── Sender-side fps adaptation ──────────────────────────────────────────
@@ -271,6 +277,27 @@ const PACE_LOSS_RECOVERED: f32 = 0.02;
 const PACE_STEP_COOLDOWN: Duration = Duration::from_secs(2);
 /// How long loss must stay low before stepping back up.
 const PACE_RECOVER_HOLD: Duration = Duration::from_secs(5);
+/// Ignore StreamHealth samples with implausible loss. renet computes
+/// loss over a 6 s window that excludes the newest 900 ms; on a quiet
+/// or freshly-subscribed connection that window holds a handful of
+/// packets (idle exchanges even end with a terminal ack packet that is
+/// never acked), so a perfect link can read 50–100% "loss". A link
+/// that genuinely loses half its packets can't watch a stream at all —
+/// adaptation has nothing useful to do with such a sample either way.
+const PACE_LOSS_IMPLAUSIBLE: f32 = 0.5;
+/// Consecutive over-threshold samples (1/s each) required to step down —
+/// a single spike is measurement noise, three seconds of it is weather.
+const PACE_STEP_DOWN_SAMPLES: u32 = 3;
+/// Repeated viewer keyframe requests mean a viewer keeps failing to
+/// keep a picture — from loss we can't see, or a decoder that can't
+/// keep up with the frame rate. Either way, fewer frames per second is
+/// the remedy. This many requests within PACE_DISTRESS_WINDOW steps
+/// the pace down.
+const PACE_DISTRESS_REQUESTS: usize = 4;
+const PACE_DISTRESS_WINDOW: Duration = Duration::from_secs(5);
+/// Don't step back up for this long after viewer distress — stepping up
+/// the moment the viewer recovers just re-chokes them in a slow cycle.
+const PACE_DISTRESS_HOLD: Duration = Duration::from_secs(30);
 
 /// The capture interval at the current pace.
 fn effective_frame_interval(state: &CaptureState) -> Duration {
@@ -284,41 +311,54 @@ fn effective_frame_interval(state: &CaptureState) -> Duration {
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn adapt_pace(state: &mut CaptureState, worst_loss: f32, shared: &SharedScreenState) {
     let now = Instant::now();
-    if worst_loss >= PACE_LOSS_STEP_DOWN {
+    if worst_loss >= PACE_LOSS_IMPLAUSIBLE {
+        // Measurement artifact (or a dead link, where fps changes help
+        // nobody): display it, adapt on nothing, hold all timers.
+        state.pace_bad_samples = 0;
+    } else if worst_loss >= PACE_LOSS_STEP_DOWN {
         state.pace_good_since = None;
-        if state.pace_idx + 1 < PACE_SCALES.len()
+        state.pace_bad_samples += 1;
+        if state.pace_bad_samples >= PACE_STEP_DOWN_SAMPLES
+            && state.pace_idx + 1 < PACE_SCALES.len()
             && now.duration_since(state.pace_changed) >= PACE_STEP_COOLDOWN
         {
             state.pace_idx += 1;
             state.pace_changed = now;
+            state.pace_bad_samples = 0;
             info!(
-                "📺 Viewer loss {:.1}% — reducing capture to {:.0}% fps (clarity preserved)",
+                "Viewer loss {:.1}% sustained — reducing capture to {:.0}% fps (clarity preserved)",
                 worst_loss * 100.0,
                 PACE_SCALES[state.pace_idx] * 100.0
             );
         }
     } else if worst_loss <= PACE_LOSS_RECOVERED {
+        state.pace_bad_samples = 0;
         if state.pace_idx > 0 {
             let since = *state.pace_good_since.get_or_insert(now);
             if now.duration_since(since) >= PACE_RECOVER_HOLD
                 && now.duration_since(state.pace_changed) >= PACE_STEP_COOLDOWN
+                && state
+                    .last_distress
+                    .is_none_or(|t| now.duration_since(t) >= PACE_DISTRESS_HOLD)
             {
                 state.pace_idx -= 1;
                 state.pace_changed = now;
                 state.pace_good_since = Some(now);
                 info!(
-                    "📺 Viewer link recovered — restoring capture to {:.0}% fps",
+                    "Viewer link recovered — restoring capture to {:.0}% fps",
                     PACE_SCALES[state.pace_idx] * 100.0
                 );
             }
         }
     } else {
-        // Middle band: hold the current pace, restart the recovery clock.
+        // Middle band: hold the current pace, restart both clocks.
+        state.pace_bad_samples = 0;
         state.pace_good_since = None;
     }
-    shared
-        .fps_scale_pct
-        .store((PACE_SCALES[state.pace_idx] * 100.0) as u32, Ordering::Relaxed);
+    shared.fps_scale_pct.store(
+        (PACE_SCALES[state.pace_idx] * 100.0) as u32,
+        Ordering::Relaxed,
+    );
 }
 
 // ── Decoder state for incoming streams ──────────────────────────────────
@@ -503,7 +543,14 @@ fn drain_and_decode(
     network_tx: &Sender<NetworkControl>,
     wake: &WakeFn,
 ) {
+    // Cap decode work per pass. An unbounded pass on a backlog spends
+    // seconds decoding stale frames inside one loop iteration; bounded,
+    // the loop stays live and a real backlog resolves via the buffer's
+    // overflow jump-to-freshest-keyframe — skipping stale video instead
+    // of replaying it, which is what a live viewer wants.
+    const DECODE_BUDGET: Duration = Duration::from_millis(24);
     for (&client_id, stream) in peer_streams.iter_mut() {
+        let pass_start = Instant::now();
         while let Some(packet) = stream.jitter_buffer.pull_next() {
             let seq = packet.seq;
             let is_keyframe = packet.is_keyframe;
@@ -541,7 +588,11 @@ fn drain_and_decode(
                 Ok(Some(decoded)) => {
                     let decode_ms = t0.elapsed().as_secs_f32() * 1000.0;
                     let decoded_at = Instant::now();
-                    if decode_ms > 10.0 {
+                    // 1080p keyframes cost 12–15 ms in software decode —
+                    // that's normal and the jitter buffer absorbs it.
+                    // Only flag decodes that actually threaten cadence.
+                    let slow_threshold = if is_keyframe { 33.0 } else { 15.0 };
+                    if decode_ms > slow_threshold {
                         log::warn!("Slow decode: {decode_ms:.1}ms for seq {seq}");
                     }
                     event_tx
@@ -566,6 +617,9 @@ fn drain_and_decode(
                 Err(e) => {
                     warn!("Decode error for peer {client_id} seq {seq}: {e}");
                 }
+            }
+            if pass_start.elapsed() >= DECODE_BUDGET {
+                break;
             }
         }
 
@@ -649,6 +703,9 @@ fn handle_control(
                 pace_idx: 0,
                 pace_changed: Instant::now(),
                 pace_good_since: None,
+                pace_bad_samples: 0,
+                kf_request_times: Vec::new(),
+                last_distress: None,
             });
 
             shared.is_sharing.store(true, Ordering::Relaxed);
@@ -834,6 +891,29 @@ fn handle_control(
             if let Some(state) = &mut st.capture {
                 info!("📺 Viewer requested keyframe — forcing IDR");
                 state.encoder.force_keyframe();
+
+                let now = Instant::now();
+                state.kf_request_times.push(now);
+                state
+                    .kf_request_times
+                    .retain(|&t| now.duration_since(t) < PACE_DISTRESS_WINDOW);
+                if state.kf_request_times.len() >= PACE_DISTRESS_REQUESTS
+                    && state.pace_idx + 1 < PACE_SCALES.len()
+                    && now.duration_since(state.pace_changed) >= PACE_STEP_COOLDOWN
+                {
+                    state.pace_idx += 1;
+                    state.pace_changed = now;
+                    state.last_distress = Some(now);
+                    state.kf_request_times.clear();
+                    info!(
+                        "📺 Viewer repeatedly requesting keyframes — reducing capture to {:.0}% fps",
+                        PACE_SCALES[state.pace_idx] * 100.0
+                    );
+                    shared.fps_scale_pct.store(
+                        (PACE_SCALES[state.pace_idx] * 100.0) as u32,
+                        Ordering::Relaxed,
+                    );
+                }
             }
         }
 
@@ -917,9 +997,21 @@ fn capture_and_encode(
             .store(encoded.data.len() as u32, Ordering::Relaxed);
         shared.frames_encoded.fetch_add(1, Ordering::Relaxed);
 
-        // Actual encoded dimensions (aspect-preserving fit inside the
-        // quality bound) — NOT the quality preset's nominal size. A
-        // 1920×1200 monitor at HD30 sends 1152×720.
+        // A frame the chunker can't carry must not become a silent seq
+        // gap: every viewer would freeze and burn a PLI round trip
+        // (~700 ms) recovering. Drop it AND restart the GOP on the next
+        // frame — a one-frame hiccup instead. (Rate control also reacts
+        // to the oversized frame, so the retried IDR comes out smaller.)
+        if encoded.data.len() > protocol::MAX_VIDEO_FRAME_BYTES {
+            warn!(
+                "📺 Encoded frame seq={seq} too large to send ({} bytes, max {}) — dropping and forcing a fresh keyframe",
+                encoded.data.len(),
+                protocol::MAX_VIDEO_FRAME_BYTES,
+            );
+            state.encoder.force_keyframe();
+            continue;
+        }
+
         let _ = network_tx.try_send(NetworkControl::SendVideoFrame {
             seq,
             is_keyframe: encoded.is_keyframe,
