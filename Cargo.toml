@@ -36,7 +36,7 @@ panic = "abort"   # ~10% smaller binary, no unwind overhead
 [profile.deploy]
 inherits = "release"
 strip = "symbols"
-lto = "fat"          # squeeze out the last few % at link time
+lto = "thin"
 
 # ── Debug-opt: release speed with debug symbols ────────────────────────
 [profile.debug-opt]
