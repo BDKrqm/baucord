@@ -9,3 +9,4 @@ baucord-*.log
 server.log
 netcode.key
 fltk-ui
+./crates/*.tar.gz

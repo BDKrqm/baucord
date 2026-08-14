@@ -129,6 +129,11 @@ export component MainWindow inherits Window {
         background: #000000CC;
         TouchArea { clicked => { Logic.viewer-close(); } }
         VerticalLayout {
+            // A layout inside a plain element sizes to its preferred
+            // height unless told otherwise — pin it to the scrim so
+            // the picture row actually stretches.
+            width: 100%;
+            height: 100%;
             padding: Theme.gap-lg;
             spacing: Theme.gap-md;
             HorizontalLayout {
@@ -154,27 +159,39 @@ export component MainWindow inherits Window {
             HorizontalLayout {
                 spacing: Theme.gap-md;
                 vertical-stretch: 1;
-                IconBtn {
-                    y: (parent.height - self.height) / 2;
-                    icon: @image-url("icons/chevron-left.svg");
-                    opacity: State.viewer-has-prev ? 1.0 : 0.25;
-                    clicked => { if (State.viewer-has-prev) { Logic.viewer-step(-1); } }
+                // The chevrons must not sit directly in this row:
+                // IconBtn pins `height: size` (40px), and a fixed-height
+                // child caps a HorizontalLayout's max-height — the whole
+                // row collapsed to 40px and the picture rendered as a
+                // thumbnail. Height-unconstrained wrappers keep the row
+                // stretchable; each button centers itself inside.
+                Rectangle {
+                    width: nav-l.width;
+                    nav-l := IconBtn {
+                        y: (parent.height - self.height) / 2;
+                        icon: @image-url("icons/chevron-left.svg");
+                        opacity: State.viewer-has-prev ? 1.0 : 0.25;
+                        clicked => { if (State.viewer-has-prev) { Logic.viewer-step(-1); } }
+                    }
                 }
                 Rectangle {
                     horizontal-stretch: 1;
                     TouchArea { }   // swallow clicks over the picture
-                    Image {
+                    viewer-img := Image {
                         width: parent.width;
                         height: parent.height;
                         source: State.viewer-image;
                         image-fit: contain;
                     }
                 }
-                IconBtn {
-                    y: (parent.height - self.height) / 2;
-                    icon: @image-url("icons/chevron-right.svg");
-                    opacity: State.viewer-has-next ? 1.0 : 0.25;
-                    clicked => { if (State.viewer-has-next) { Logic.viewer-step(1); } }
+                Rectangle {
+                    width: nav-r.width;
+                    nav-r := IconBtn {
+                        y: (parent.height - self.height) / 2;
+                        icon: @image-url("icons/chevron-right.svg");
+                        opacity: State.viewer-has-next ? 1.0 : 0.25;
+                        clicked => { if (State.viewer-has-next) { Logic.viewer-step(1); } }
+                    }
                 }
             }
         }

@@ -31,7 +31,12 @@ component UserRowView inherits Rectangle {
         : transparent;
     animate background { duration: 150ms; }
 
+    // The whole row is the click target — a hover-gated button was
+    // impossible to hit (its own TouchArea stole the hover that made
+    // it visible). Left or right click anywhere opens the menu.
     touch := TouchArea {
+        mouse-cursor: user.is-us ? MouseCursor.default : MouseCursor.pointer;
+        clicked => { if (!user.is-us) { Logic.user-menu(root.index); } }
         pointer-event(ev) => {
             if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right
                 && !user.is-us) {
@@ -118,11 +123,11 @@ component UserRowView inherits Rectangle {
                 clicked => { if (!user.is-us) { Logic.user-menu(root.index); } }
             }
         }
-        if !user.sharing && !user.is-us && touch.has-hover : IconBtn {
-            size: 26px;
-            icon-size: 14px;
-            icon: @image-url("icons/dots.svg");
-            clicked => { Logic.user-menu(root.index); }
+        // Pure affordance — clicks land on the row's own TouchArea.
+        if !user.sharing && !user.is-us && touch.has-hover : Image {
+            width: 14px;
+            source: @image-url("icons/dots.svg");
+            colorize: Theme.text-muted;
         }
     }
 }
@@ -185,6 +190,11 @@ export component Sidebar inherits Rectangle {
                 color: Theme.text-muted;
                 font-size: Theme.font-xs;
                 overflow: elide;
+            }
+            if State.upload-line != "" : Text {
+                text: State.upload-line;
+                color: Theme.accent;
+                font-size: Theme.font-xs;
             }
         }
 

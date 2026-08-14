@@ -354,7 +354,9 @@ fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
-/// Fill and open the in-window preview overlay.
+/// Fill and open the in-window preview overlay. Animated GIFs play in
+/// the preview (looping via the app's animation ticker), same as the
+/// FLTK build.
 fn show_preview(app: &mut AppState, bytes: Vec<u8>) {
     match ui::convert::decode_to_image(&bytes) {
         Ok((image, w, h)) => {
@@ -363,6 +365,19 @@ fn show_preview(app: &mut AppState, bytes: Vec<u8>) {
             s.set_preview_image(image);
             s.set_preview_caption(format!("{w}×{h} — {kb} KB").into());
             s.set_preview_open(true);
+
+            app.preview_gif = None;
+            if bytes.starts_with(b"GIF8") && images::gif_is_animated(&bytes)
+                && let Ok(anim) = gif::decode_animation(&bytes)
+                    && !anim.frames.is_empty() {
+                        app.preview_gif = Some(crate::viewers::GalleryGif {
+                            anim: Rc::new(anim),
+                            idx: 0,
+                            in_frame_ms: 0.0,
+                        });
+                        app.ensure_gif_ticker();
+                    }
+
             app.set_pending_preview(bytes);
         }
         Err(e) => app.show_error(&describe(&e)),
@@ -380,7 +395,11 @@ pub fn save_image_dialog(app: &mut AppState, row_id: i32) {
     } else {
         ("png", &["png"][..])
     };
-    let default_name = format!("baucord-image.{ext}");
+    // Timestamped so several saves land side by side without renaming.
+    let default_name = format!(
+        "baucord-{}.{ext}",
+        chrono::Local::now().format("%Y%m%d-%H%M%S")
+    );
     let filter_name = if entry.is_gif {
         t!("image-save-filter-gif")
     } else {

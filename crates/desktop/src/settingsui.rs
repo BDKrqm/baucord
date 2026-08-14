@@ -490,8 +490,7 @@ fn credits_text() -> String {
         "Scryer",
     ];
     format!(
-        "{}\n\n{}\n{}\n\n{}\n{}",
-        t!("credits-header"),
+        "{}\n{}\n\n{}\n{}",
         t!("credits-super-testers"),
         SUPER_TESTERS.join("\n"),
         t!("credits-beta-testers"),

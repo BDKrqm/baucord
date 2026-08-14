@@ -99,7 +99,7 @@ jobs:
           RUSTFLAGS: ${{ matrix.rustflags }}
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
           PKG_CONFIG_PATH: ${{ matrix.pkg_config_path || '' }}
-        run: cargo build --profile deploy --target ${{ matrix.target }}
+        run: cargo build --profile deploy --target ${{ matrix.target }} --features tray
 
       # ── Package ─────────────────────────────────────────────────────
 

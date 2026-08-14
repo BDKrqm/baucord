@@ -218,3 +218,4 @@ tech-slint = Slint - Interface de usuário
 chat-image-too-large = A imagem é grande demais para enviar ({ $kb } KB após redimensionar)
 chat-image-save-error = Não foi possível salvar a imagem: { $error }
 chat-downloading-image = Baixando imagem…
+tab-misc = Diversos

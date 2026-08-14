@@ -118,6 +118,9 @@ pub struct AppState {
     /// state while that row is an animated GIF.
     pub gallery_row: Option<i32>,
     pub gallery_gif: Option<crate::viewers::GalleryGif>,
+    /// GIF playback for the *send preview* overlay (the FLTK preview
+    /// animated GIFs too).
+    pub preview_gif: Option<crate::viewers::GalleryGif>,
 
     // Update flow
     update_version: Option<String>,
@@ -180,8 +183,22 @@ fn spawn_workers(
     (voice, screen, network)
 }
 
+/// Prefer the Skia renderer when compiled in: femtovg (the default)
+/// can't rasterize many color-emoji glyph formats, which shows as tofu
+/// boxes in the emoji palette. Skia renders them all.
+fn select_renderer() {
+    #[cfg(feature = "skia")]
+    if let Err(e) = slint::BackendSelector::new()
+        .renderer_name("skia".into())
+        .select()
+    {
+        warn!("Skia renderer unavailable, using default: {e}");
+    }
+}
+
 /// Build everything and run the event loop until quit.
 pub fn run() {
+    select_renderer();
     let is_testing_mic_shared = Arc::new(AtomicBool::new(false));
     let (voice, screen, network) = spawn_workers(&is_testing_mic_shared);
 
@@ -251,6 +268,7 @@ pub fn run() {
         viewers: HashMap::new(),
         gallery_row: None,
         gallery_gif: None,
+        preview_gif: None,
         update_version: None,
         update_zip_path: None,
         download_cancelled: Arc::new(AtomicBool::new(false)),
@@ -292,6 +310,13 @@ pub fn run() {
     crate::updater::spawn_version_check();
 
     state.borrow().main.show().expect("failed to show the main window");
+
+    // Tray icon: created from inside the running event loop (macOS
+    // wants the NSApplication loop live before status items appear).
+    #[cfg(feature = "tray")]
+    slint::Timer::single_shot(Duration::from_millis(1), || {
+        with_current(tray::setup);
+    });
 
     // The loop keeps running while every window is hidden (tray) —
     // the FLTK build needed an off-screen sentinel window for this.
@@ -496,6 +521,7 @@ fn wire_logic(state: &Rc<RefCell<AppState>>) {
                 // included), so no local echo is needed here.
                 app.network.tx.send(NetworkControl::SendImage(png)).ok();
             }
+            app.preview_gif = None;
             app.main.global::<State>().set_preview_open(false);
         });
     });
@@ -503,6 +529,7 @@ fn wire_logic(state: &Rc<RefCell<AppState>>) {
     logic.on_preview_cancel(move || {
         with_app(&w, |app| {
             app.pending_preview = None;
+            app.preview_gif = None;
             app.main.global::<State>().set_preview_open(false);
         });
     });
@@ -562,7 +589,7 @@ fn wire_logic(state: &Rc<RefCell<AppState>>) {
     main.window().on_close_requested(move || {
         let mut response = slint::CloseRequestResponse::HideWindow;
         with_app(&w, |app| {
-            if app.connected && cfg!(feature = "tray") {
+            if cfg!(feature = "tray") {
                 response = slint::CloseRequestResponse::HideWindow;
             } else {
                 app.save_window_geometry();
@@ -1003,8 +1030,6 @@ impl AppState {
         self.gifs.clear();
 
         self.main.global::<State>().set_phase(Phase::Main);
-        #[cfg(feature = "tray")]
-        crate::app::tray::setup(self);
 
         self.our_client_id = Some(client_id);
         let default_audio = PeerAudioSettings::default();
@@ -1765,6 +1790,25 @@ impl AppState {
         use crate::media::GifStep;
         const DT_MS: f64 = 33.0;
 
+        // (fn defined at top of gif_tick to satisfy items-after-statements)
+        fn step_overlay(g: &mut crate::viewers::GalleryGif, dt_ms: f64) -> Option<slint::Image> {
+            g.in_frame_ms += dt_ms;
+            let mut advanced = false;
+            for _ in 0..g.anim.frames.len() {
+                let delay = f64::from(g.anim.frames[g.idx].delay_ms);
+                if g.in_frame_ms < delay {
+                    break;
+                }
+                g.in_frame_ms -= delay;
+                g.idx = (g.idx + 1) % g.anim.frames.len();
+                advanced = true;
+            }
+            advanced.then(|| {
+                let frame = &g.anim.frames[g.idx];
+                ui::convert::rgba_image(&frame.rgba, g.anim.width, g.anim.height)
+            })
+        }
+
         let mut any_playing = false;
         let mut blits: Vec<(i32, Rc<app_core::gif::GifAnimation>, usize, bool)> = Vec::new();
         for (&row_id, player) in &mut self.gifs {
@@ -1788,24 +1832,17 @@ impl AppState {
             }
         }
 
+
         if let Some(g) = &mut self.gallery_gif {
             any_playing = true;
-            g.in_frame_ms += DT_MS;
-            let mut advanced = false;
-            for _ in 0..g.anim.frames.len() {
-                let delay = f64::from(g.anim.frames[g.idx].delay_ms);
-                if g.in_frame_ms < delay {
-                    break;
-                }
-                g.in_frame_ms -= delay;
-                g.idx = (g.idx + 1) % g.anim.frames.len();
-                advanced = true;
+            if let Some(img) = step_overlay(g, DT_MS) {
+                self.main.global::<State>().set_viewer_image(img);
             }
-            if advanced {
-                let frame = &g.anim.frames[g.idx];
-                self.main.global::<State>().set_viewer_image(
-                    ui::convert::rgba_image(&frame.rgba, g.anim.width, g.anim.height),
-                );
+        }
+        if let Some(g) = &mut self.preview_gif {
+            any_playing = true;
+            if let Some(img) = step_overlay(g, DT_MS) {
+                self.main.global::<State>().set_preview_image(img);
             }
         }
 
@@ -1968,6 +2005,14 @@ impl AppState {
     // ════════════════════════════════════════════════════════════════
     //  MISC
     // ════════════════════════════════════════════════════════════════
+
+    /// Persist geometry + settings immediately (tray Quit path — the
+    /// normal shutdown also does this, but only after the loop exits).
+    #[cfg_attr(not(feature = "tray"), allow(dead_code))]
+    pub fn save_settings_now(&mut self) {
+        self.save_window_geometry();
+        self.settings.save();
+    }
 
     /// Keep a timer alive for the app's lifetime.
     pub fn hold_timer(&mut self, timer: slint::Timer) {
@@ -2175,6 +2220,7 @@ pub fn fill_tr(tr: &Tr) {
     tr.set_stop_watching(t!("stop-watching").into());
     tr.set_settings_title(t!("settings-title").into());
     tr.set_tab_general(t!("tab-general").into());
+    tr.set_tab_misc(t!("tab-misc").into());
     tr.set_tab_audio(t!("tab-audio").into());
     tr.set_tab_keyboard(t!("tab-keyboard").into());
     tr.set_tab_credits(t!("tab-credits").into());
@@ -2215,12 +2261,78 @@ pub fn fill_tr(tr: &Tr) {
 
 #[cfg(feature = "tray")]
 pub mod tray {
-    //! System tray via the trayicon crate (same dependency as the FLTK
-    //! build; the fork is re-enabled in the real workspace manifest).
-    use super::AppState;
+    //! System tray via the `tray-icon` crate (crates.io — no git dep).
+    //! With this feature on, closing the main window hides it and the
+    //! tray keeps the app reachable: Show reopens, Quit exits.
+    use std::sync::OnceLock;
+
+    use log::warn;
+    use slint::ComponentHandle;
+    use tray_icon::menu::{Menu, MenuEvent, MenuItem};
+    use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+
+    use super::{with_current, AppState};
+    use i18n::t;
+
+    /// Keeps the OS tray item alive for the app's lifetime.
+    struct TrayState {
+        _tray: TrayIcon,
+    }
+
+    thread_local! {
+        static TRAY: std::cell::RefCell<Option<TrayState>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    static IDS: OnceLock<(tray_icon::menu::MenuId, tray_icon::menu::MenuId)> = OnceLock::new();
+
+    /// The app icon, decoded from the same .ico `build.rs` embeds on
+    /// Windows. Compile-time include, so the shipped binary stays
+    /// self-contained.
+    fn icon() -> Option<Icon> {
+        let bytes: &[u8] = include_bytes!("../../../assets/icons/icon.ico");
+        let img = image::load_from_memory(bytes).ok()?.to_rgba8();
+        let (w, h) = (img.width(), img.height());
+        Icon::from_rgba(img.into_raw(), w, h).ok()
+    }
+
     pub fn setup(_app: &mut AppState) {
-        // Wire TrayIconBuilder with Show/Quit entries → wake() +
-        // main.show() / quit_event_loop(). Kept behind the `tray`
-        // feature so default builds don't depend on the git fork.
+        let show = MenuItem::new(t!("tray-show"), true, None);
+        let quit = MenuItem::new(t!("tray-quit"), true, None);
+        let show_id = show.id().clone();
+        let quit_id = quit.id().clone();
+        let menu = Menu::new();
+        if let Err(e) = menu.append_items(&[&show, &quit]) {
+            warn!("Tray menu build failed: {e}");
+            return;
+        }
+
+        // Menu events arrive on an arbitrary thread — hop to the loop.
+        let _ = IDS.set((show_id, quit_id));
+        MenuEvent::set_event_handler(Some(|event: MenuEvent| {
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some((show_id, quit_id)) = IDS.get() else { return };
+                if event.id() == show_id {
+                    with_current(|app| {
+                        let _ = app.main.show();
+                    });
+                } else if event.id() == quit_id {
+                    with_current(AppState::save_settings_now);
+                    let _ = slint::quit_event_loop();
+                }
+            });
+        }));
+
+        let mut builder = TrayIconBuilder::new()
+            .with_menu(Box::new(menu))
+            .with_tooltip("baucord");
+        if let Some(icon) = icon() {
+            builder = builder.with_icon(icon);
+        }
+        match builder.build() {
+            Ok(tray) => TRAY.with(|slot| {
+                *slot.borrow_mut() = Some(TrayState { _tray: tray });
+            }),
+            Err(e) => warn!("Tray icon unavailable: {e}"),
+        }
     }
 }

@@ -1,6 +1,6 @@
 // settings.slint — the settings window.
 //
-// Left nav (General / Audio / Keyboard / Credits / About), scrollable
+// Left nav (Audio / Keyboard / Misc / Credits / About), scrollable
 // content, Save & close + Reset row — the FLTK layout, rounded.
 //
 // Live semantics carry over: every control applies immediately through
@@ -91,7 +91,7 @@ component NavItem inherits Rectangle {
 
 component GeneralPanel inherits VerticalLayout {
     spacing: Theme.gap-md;
-    SectionHeader { text: Tr.tab-general; }
+    SectionHeader { text: Tr.tab-misc; }
     FieldLabel { text: Tr.language; }
     Dropdown {
         options: SettingsState.languages;
@@ -268,9 +268,9 @@ export component SettingsWindow inherits Window {
             VerticalLayout {
                 padding: Theme.gap-md;
                 spacing: Theme.gap-xs;
-                NavItem { text: Tr.tab-general;  active: root.tab == 0; clicked => { root.tab = 0; } }
-                NavItem { text: Tr.tab-audio;    active: root.tab == 1; clicked => { root.tab = 1; } }
-                NavItem { text: Tr.tab-keyboard; active: root.tab == 2; clicked => { root.tab = 2; } }
+                NavItem { text: Tr.tab-audio;    active: root.tab == 0; clicked => { root.tab = 0; } }
+                NavItem { text: Tr.tab-keyboard; active: root.tab == 1; clicked => { root.tab = 1; } }
+                NavItem { text: Tr.tab-misc;     active: root.tab == 2; clicked => { root.tab = 2; } }
                 NavItem { text: Tr.tab-credits;  active: root.tab == 3; clicked => { root.tab = 3; } }
                 NavItem { text: Tr.tab-about;    active: root.tab == 4; clicked => { root.tab = 4; } }
                 Rectangle { }
@@ -282,9 +282,9 @@ export component SettingsWindow inherits Window {
                 vertical-stretch: 1;
                 VerticalLayout {
                     padding: Theme.gap-xl;
-                    if root.tab == 0 : GeneralPanel { }
-                    if root.tab == 1 : AudioPanel { }
-                    if root.tab == 2 : KeyboardPanel { }
+                    if root.tab == 0 : AudioPanel { }
+                    if root.tab == 1 : KeyboardPanel { }
+                    if root.tab == 2 : GeneralPanel { }
                     if root.tab == 3 : TextPanel {
                         heading: Tr.tab-credits;
                         body: SettingsState.credits-text;
