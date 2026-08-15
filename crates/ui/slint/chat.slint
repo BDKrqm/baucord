@@ -88,6 +88,8 @@ component MessageRow inherits Rectangle {
                     text: data.body-styled;
                     default-color: Theme.text-secondary;
                     default-font-size: Theme.font-body;
+                    link-color: Theme.accent;
+                    link-clicked(url) => { Logic.link-clicked(url); }
                 }
             }
         }
@@ -107,38 +109,6 @@ component SystemRow inherits Rectangle {
             font-size: Theme.font-sm;
             font-italic: true;
             wrap: word-wrap;
-        }
-    }
-}
-
-component LinkRow inherits Rectangle {
-    in property <ChatRow> data;
-    height: 24px;
-    ContextMenuArea {
-        Menu {
-            MenuItem {
-                title: Tr.menu-open-link;
-                activated => { Logic.link-clicked(data.body); }
-            }
-            MenuItem {
-                title: Tr.menu-copy-link;
-                activated => { Logic.copy-text(data.body); }
-            }
-        }
-        HorizontalLayout {
-            padding-left: 28px;   // indent under the message body
-            link := Text {
-                text: data.body;
-                color: touch.has-hover ? Theme.accent.brighter(0.3) : Theme.accent;
-                font-size: Theme.font-body;
-                vertical-alignment: center;
-                overflow: elide;
-                touch := TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => { Logic.link-clicked(data.body); }
-                }
-            }
-            Rectangle { }   // spacer — keep the hit target on the text
         }
     }
 }
@@ -349,18 +319,27 @@ export component ChatPane inherits Rectangle {
             // scroll-after-push, which reads stale viewport-height and
             // lands short (permanently, once an image row overshoots
             // the 40px slack).
-            // Unpin ONLY on upward movement (user scrolling back);
-            // re-pin whenever the bottom is reached. Downward or
-            // programmatic movement never unpins — sampling
-            // at-bottom() indiscriminately here used to unpin during
-            // layout transitions (e.g. the composer growing a line
-            // while messages arrive), where geometry is briefly
-            // inconsistent.
+            // Pin/unpin rules, in priority order:
+            //   1. Landing EXACTLY at the bottom pins — regardless of
+            //      direction, so programmatic scroll-to-end (including
+            //      the upward correction after history-cap shrinks)
+            //      keeps following.
+            //   2. Any other upward movement unpins immediately. The
+            //      old at-bottom() 40px slack must NOT keep the pin
+            //      here: a virtualized ListView refines its estimated
+            //      viewport-height while older rows instantiate, and a
+            //      still-pinned state snap-scrolls the user back on
+            //      every wheel notch ("impossible to scroll up").
+            //   3. Downward-but-not-bottom keeps the current state, so
+            //      mid-layout geometry never unpins spuriously.
             private property <length> last-viewport-y;
+            pure function at-exact-bottom() -> bool {
+                self.viewport-y <= -(self.viewport-height - self.visible-height) + 2px
+            }
             changed viewport-y => {
-                if (root.at-bottom()) {
+                if (self.at-exact-bottom()) {
                     root.stick-to-bottom = true;
-                } else if (self.viewport-y > self.last-viewport-y) {
+                } else if (self.viewport-y > self.last-viewport-y + 0.25px) {
                     root.stick-to-bottom = false;
                 }
                 self.last-viewport-y = self.viewport-y;
@@ -374,13 +353,11 @@ export component ChatPane inherits Rectangle {
                 height: row.kind == 0 ? msg.height
                     : row.kind == 1 ? sys.height
                     : row.kind == 2 ? img.height
-                    : row.kind == 3 ? lnk.height
                     : cod.height;
                 msg := MessageRow { data: row; visible: row.kind == 0; }
                 sys := SystemRow  { data: row; visible: row.kind == 1; }
                 img := ImageRow   { data: row; visible: row.kind == 2; }
-                lnk := LinkRow    { data: row; visible: row.kind == 3; }
-                cod := CodeRow    { data: row; visible: row.kind == 4; }
+                cod := CodeRow    { data: row; visible: row.kind == 3; }
             }
         }
 
@@ -520,6 +497,9 @@ export component ChatPane inherits Rectangle {
         y: root.height - 400px;
         width: Math.min(392px, root.width - 2 * Theme.gap-md);
         height: 340px;
+        // Shortcode of the hovered cell, shown in the footer bar
+        // (Slack-style): ":heart:" while the heart is under the mouse.
+        property <string> hovered-code;
         Rectangle {
             background: Theme.bg-tertiary;
             border-radius: Theme.radius-lg;
@@ -529,7 +509,7 @@ export component ChatPane inherits Rectangle {
             Flickable {
                 x: Theme.gap-sm; y: Theme.gap-sm;
                 width: parent.width - 2 * Theme.gap-sm;
-                height: parent.height - 2 * Theme.gap-sm;
+                height: parent.height - 2 * Theme.gap-sm - 26px;
                 viewport-height: grid.preferred-height;
                 grid := VerticalLayout {
                     // 8 columns of 40px cells, gap-xs breathing room
@@ -546,9 +526,26 @@ export component ChatPane inherits Rectangle {
                             if idx < State.emoji.length : Text {
                                 text: State.emoji[idx].glyph;
                                 font-size: 24px;
+                                // Ask the platform's color-emoji face
+                                // directly: generic fallback mishandles
+                                // VS16 sequences on the Skia raster
+                                // path (the palette's tofu boxes).
+                                font-family: Platform.os == OperatingSystemType.macos
+                                    ? "Apple Color Emoji"
+                                    : Platform.os == OperatingSystemType.windows
+                                        ? "Segoe UI Emoji"
+                                        : "Noto Color Emoji";
                             }
                             et := TouchArea {
                                 mouse-cursor: pointer;
+                                changed has-hover => {
+                                    if (self.has-hover && idx < State.emoji.length) {
+                                        emoji-pop.hovered-code = ":\{State.emoji[idx].code}:";
+                                    } else if (!self.has-hover && idx < State.emoji.length
+                                        && emoji-pop.hovered-code == ":\{State.emoji[idx].code}:") {
+                                        emoji-pop.hovered-code = "";
+                                    }
+                                }
                                 clicked => {
                                     if (idx < State.emoji.length) {
                                         Logic.emoji-picked(State.emoji[idx].glyph);
@@ -557,6 +554,22 @@ export component ChatPane inherits Rectangle {
                             }
                         }
                     }
+                }
+            }
+            // Footer bar: hovered shortcode.
+            Rectangle {
+                x: 1px;
+                y: parent.height - 25px;
+                width: parent.width - 2px;
+                height: 24px;
+                background: Theme.surface;
+                Text {
+                    x: Theme.gap-sm;
+                    height: 100%;
+                    vertical-alignment: center;
+                    text: emoji-pop.hovered-code;
+                    color: Theme.text-muted;
+                    font-size: Theme.font-sm;
                 }
             }
         }
