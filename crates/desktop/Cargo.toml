@@ -1,6 +1,6 @@
 [package]
 name = "desktop"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 
 [lints]
@@ -14,16 +14,13 @@ path = "src/main.rs"
 
 [features]
 default = []
-# System tray via the tray-icon crate (crates.io). Closing the window
-# then hides to the tray instead of quitting. Off by default because
-# Linux builds need libappindicator system packages; enable it in the
-# release workflow: `--features tray`.
-tray = ["dep:tray-icon"]
-# Prefer the Skia renderer. femtovg (the default renderer) cannot
-# rasterize several color-emoji glyph formats — the tofu boxes in the
-# emoji palette. Build with `--features skia` to fix them.
-skia = ["slint/renderer-skia"]
-
+# System tray via Slint's builtin SystemTrayIcon (1.17+; native
+# Shell_NotifyIconW / AppKit / StatusNotifier backends — the Linux one
+# speaks the StatusNotifier D-Bus protocol directly, no
+# libappindicator system packages). Closing the window then hides to
+# the tray instead of quitting. Enable it in the release workflow:
+# `--features tray`.
+tray = ["slint/system-tray"]
 [dependencies]
 client = { path = "../client" }
 i18n = { path = "../i18n" }
@@ -40,7 +37,6 @@ chrono = "0.4.41"
 ureq = "3.2.0"
 open = "5.3.3"
 global-hotkey = "0.7"
-tray-icon = { version = "0.21", optional = true }
 # png/gif are the wire formats; the rest let attach/paste/drop decode
 # the common disk formats (re-encoded to PNG before sending). 0.25.9
 # floor guarantees the root ImageReader/Limits API used for bounded
