@@ -2,9 +2,14 @@ name: Build and Release
 on:
   release:
     types: [published]
-  #push:
-  #  branches:
-  #    - "chunk"
+  # Cache seeding: release runs execute on a tag ref, and tag runs can only
+  # restore GitHub Actions caches that were created on the repository's
+  # DEFAULT branch. Without a trigger on the default branch, every release
+  # starts cold (this run: 0% sccache hits on all 4 platforms, and
+  # rust-cache logged "No cache found"). Point this at your default branch.
+  push:
+    branches:
+      - "chunk" # ← must be the repo's default branch for releases to see the caches
 jobs:
   build:
     strategy:
@@ -40,6 +45,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+          # Release runs are on tag refs; caches saved there can never be
+          # restored by other refs, so saving is pure wasted time/quota.
+          # Only the default-branch (push) runs should save.
+          save-if: ${{ github.event_name != 'release' }}
 
       # ── System dependencies ─────────────────────────────────────────
 
@@ -77,19 +86,30 @@ jobs:
 
       # ── Build ───────────────────────────────────────────────────────
 
-      # sccache v0.17.0 added Rust @argfile support (PR #2782), which fixes
-      # the CreateProcess 32K limit that previously broke ffmpeg-sys-next on
-      # Windows. Keep the version pinned so a future sccache release can't
-      # regress this without us noticing.
+      # sccache v0.17.0 (PR #2782) can PARSE the @argfile that cargo passes
+      # when a rustc command line exceeds the Windows 32,767-char limit, but
+      # it still RE-SPAWNS rustc with all arguments flattened back onto the
+      # command line (dep-info, --print file-names, and the compile itself in
+      # src/compiler/rust.rs). ffmpeg-sys-next's build script emits ~680
+      # --cfg flags (~40K chars), so that spawn dies with os error 206.
+      # The shim below routes @argfile invocations straight to rustc (which
+      # supports @argfile natively) and everything else through sccache, so
+      # only ffmpeg-sys-next skips the cache. Remove the shim once sccache
+      # writes argfiles when spawning rustc on Windows.
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.11
         with:
           version: "v0.17.0"
 
+      - name: Build rustc shim (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: rustc -O ci/rustc-shim.rs -o C:\rustc-shim.exe
+
       - name: Build
         env:
           SCCACHE_GHA_ENABLED: "true"
-          RUSTC_WRAPPER: "sccache"
+          RUSTC_WRAPPER: ${{ runner.os == 'Windows' && 'C:\rustc-shim.exe' || 'sccache' }}
           RUSTFLAGS: ${{ matrix.rustflags }}
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
           PKG_CONFIG_PATH: ${{ matrix.pkg_config_path || '' }}
@@ -100,6 +120,8 @@ jobs:
         run: sccache --show-stats
 
       # ── Package ─────────────────────────────────────────────────────
+      # Packaging/upload only matter for release runs; push runs on the
+      # default branch exist purely to build and warm the caches.
 
       - name: Get version
         id: version
@@ -107,7 +129,7 @@ jobs:
         run: grep '^version' crates/desktop/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/' | xargs -I{} echo "version={}" >> "$GITHUB_OUTPUT"
 
       - name: Package (Unix)
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && github.event_name == 'release'
         # The desktop crate pins `[[bin]] name = "baucord"` (the updater
         # and release zips expect that exact name), so cargo's output is
         # `baucord`, not `desktop`.
@@ -119,7 +141,7 @@ jobs:
           zip -r ../baucord-v${{ steps.version.outputs.version }}-${{ matrix.suffix }}.zip baucord dedicated-server
 
       - name: Package (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && github.event_name == 'release'
         # Same as Unix: the binary is already named baucord.exe.
         run: |
           mkdir staging
@@ -129,12 +151,14 @@ jobs:
           Compress-Archive -Path baucord.exe,dedicated-server.exe -DestinationPath ..\baucord-v${{ steps.version.outputs.version }}-${{ matrix.suffix }}.zip
 
       - name: Upload artifacts
+        if: github.event_name == 'release'
         uses: actions/upload-artifact@v4
         with:
           name: baucord-v${{ steps.version.outputs.version }}-${{ matrix.suffix }}
           path: baucord-v${{ steps.version.outputs.version }}-${{ matrix.suffix }}.zip
   release:
     needs: build
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     permissions:
       contents: write
