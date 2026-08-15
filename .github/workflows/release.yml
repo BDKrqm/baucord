@@ -75,32 +75,30 @@ jobs:
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
       # ── Build ───────────────────────────────────────────────────────
 
-      # sccache cannot build ffmpeg-sys-next on Windows: its build script emits
-      # ~24KB of --cfg flags, and sccache spawns rustc with the full inline
-      # command line, exceeding the 32,767-char CreateProcess limit (os error
-      # 206). Cargo avoids this with @argfiles; sccache (verified through
-      # v0.17.0, src/compiler/rust.rs generate_compile_commands) does not —
-      # it flattens args even when cargo passed an @argfile. So the wrapper is
-      # disabled on Windows below; sccache still caches Linux/macOS builds.
-      # Note: this action has no `key` input; caches are keyed automatically.
+      # sccache v0.17.0 added Rust @argfile support (PR #2782), which fixes
+      # the CreateProcess 32K limit that previously broke ffmpeg-sys-next on
+      # Windows. Keep the version pinned so a future sccache release can't
+      # regress this without us noticing.
       - name: Setup sccache
-        if: runner.os != 'Windows'
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.11
         with:
           version: "v0.17.0"
 
       - name: Build
         env:
-          SCCACHE_GHA_ENABLED: ${{ runner.os != 'Windows' && 'true' || 'false' }}
-          # Empty string = no wrapper (documented Cargo behavior). Windows must
-          # not use sccache — see the comment on the Setup sccache step.
-          RUSTC_WRAPPER: ${{ runner.os != 'Windows' && 'sccache' || '' }}
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: "sccache"
           RUSTFLAGS: ${{ matrix.rustflags }}
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
           PKG_CONFIG_PATH: ${{ matrix.pkg_config_path || '' }}
         run: cargo build --profile deploy --target ${{ matrix.target }} --features tray
+
+      - name: Show sccache stats
+        shell: bash
+        run: sccache --show-stats
 
       # ── Package ─────────────────────────────────────────────────────
 
@@ -120,6 +118,7 @@ jobs:
           cp target/${{ matrix.target }}/deploy/server staging/dedicated-server
           cd staging
           zip -r ../baucord-v${{ steps.version.outputs.version }}-${{ matrix.suffix }}.zip baucord dedicated-server
+
       - name: Package (Windows)
         if: runner.os == 'Windows'
         # Same as Unix: the binary is already named baucord.exe.
@@ -129,6 +128,7 @@ jobs:
           copy target\${{ matrix.target }}\deploy\server.exe staging\dedicated-server.exe
           cd staging
           Compress-Archive -Path baucord.exe,dedicated-server.exe -DestinationPath ..\baucord-v${{ steps.version.outputs.version }}-${{ matrix.suffix }}.zip
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
