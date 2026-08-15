@@ -666,17 +666,38 @@ fn start_timers(state: &Rc<RefCell<AppState>>) {
     // dependency.)
     let w = Rc::downgrade(state);
     let t = slint::Timer::default();
-    let mut was_minimized = false;
+    let mut main_was_minimized = false;
+    let mut settings_was_minimized = false;
+    let mut viewers_were_minimized: HashMap<u64, bool> = HashMap::new();
     t.start(
         slint::TimerMode::Repeated,
         Duration::from_millis(250),
         move || {
             with_app(&w, |app| {
                 let minimized = app.main.window().is_minimized();
-                if was_minimized && !minimized {
+                if main_was_minimized && !minimized {
                     app.main.set_repaint_flip(!app.main.get_repaint_flip());
                 }
-                was_minimized = minimized;
+                main_was_minimized = minimized;
+
+                if let Some(sw) = &app.settings_win {
+                    let minimized = sw.window().is_minimized();
+                    if settings_was_minimized && !minimized {
+                        sw.set_repaint_flip(!sw.get_repaint_flip());
+                    }
+                    settings_was_minimized = minimized;
+                } else {
+                    settings_was_minimized = false;
+                }
+
+                viewers_were_minimized.retain(|id, _| app.viewers.contains_key(id));
+                for (id, viewer) in &app.viewers {
+                    let minimized = viewer.is_minimized();
+                    let was = viewers_were_minimized.insert(*id, minimized).unwrap_or(false);
+                    if was && !minimized {
+                        viewer.flip_repaint();
+                    }
+                }
             });
         },
     );

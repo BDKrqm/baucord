@@ -291,6 +291,16 @@ export component SettingsWindow inherits Window {
 
     in-out property <int> tab: 0;
 
+    // Same Windows minimize→restore workaround as MainWindow: the OS
+    // clears the surface while damage tracking trusts the back buffer;
+    // flipping this dirties the full window for one complete repaint.
+    in property <bool> repaint-flip;
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: root.repaint-flip ? #FFFFFF01 : transparent;
+    }
+
     public function focus-capture() { keys.focus(); }
 
     keys := FocusScope {
