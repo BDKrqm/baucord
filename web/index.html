@@ -6,7 +6,7 @@
     <title>baucord — self-hosted voice chat</title>
     <meta
       name="description"
-      content="A small, self-hosted voice, text and screen sharing app for you and your friends. Client and server ship together in one zip."
+      content="A small, free, self-hosted voice chat app for you and your friends — channels, text, images and screen sharing, in about 40 MB of RAM. Client and server ship together in one zip."
     />
     <meta name="theme-color" content="#1A1D21" />
 
@@ -275,6 +275,75 @@
         letter-spacing: 0.02em;
       }
 
+      /* hero screenshot — the product, front and center */
+      .hero-shot {
+        margin: 0;
+        min-width: 0;
+      }
+      .hero-shot img {
+        display: block;
+        width: 100%;
+        height: auto;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+      }
+      .hero-shot a {
+        display: block;
+        cursor: zoom-in;
+      }
+      .hero-shot a:hover img {
+        border-color: var(--cobalt);
+      }
+      .hero-shot figcaption {
+        font-family: var(--mono);
+        font-size: 0.7rem;
+        color: var(--muted);
+        margin-top: 0.7rem;
+        text-align: center;
+      }
+
+      /* self-host steps */
+      .steps {
+        counter-reset: step;
+        display: grid;
+        gap: 1.4rem;
+        margin-bottom: 2.5rem;
+        max-width: 56ch;
+      }
+      .step {
+        display: grid;
+        grid-template-columns: 2rem 1fr;
+        gap: 1rem;
+        align-items: baseline;
+      }
+      .step::before {
+        counter-increment: step;
+        content: counter(step);
+        font-family: var(--mono);
+        font-weight: 700;
+        color: var(--cobalt-bright);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        width: 2rem;
+        height: 2rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 0.85rem;
+      }
+      .step h3 {
+        font-family: var(--mono);
+        font-size: 0.9rem;
+        font-weight: 500;
+        color: var(--fog);
+        margin-bottom: 0.15rem;
+      }
+      .step p {
+        color: var(--steel);
+        font-size: 0.92rem;
+      }
+
       /* the one indulgence: a terminal, because that is genuinely
        how you deploy this thing */
       .term {
@@ -386,7 +455,7 @@
       .shots {
         display: grid;
         grid-template-columns: 1fr 1fr;
-        gap: 1.25rem;
+        gap: 1.5rem 1.25rem;
       }
       .shots img {
         display: block;
@@ -433,12 +502,77 @@
         max-height: 82vh;
         border-radius: 4px;
       }
+      /* prev / next — stopPropagation keeps them from triggering the
+       dialog's click-anywhere-to-close */
+      .lb-nav {
+        position: absolute;
+        top: 50%;
+        transform: translateY(-50%);
+        width: 2.4rem;
+        height: 2.4rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: var(--mono);
+        font-size: 1.5rem;
+        line-height: 1;
+        padding: 0 0 0.2rem;
+        color: var(--fog);
+        background: rgba(26, 29, 33, 0.85);
+        border: 1px solid var(--line);
+        border-radius: 50%;
+        cursor: pointer;
+        appearance: none;
+        -webkit-appearance: none;
+      }
+      .lb-nav:hover {
+        border-color: var(--cobalt);
+        color: var(--paper);
+      }
+      .lb-nav.prev {
+        left: 1rem;
+      }
+      .lb-nav.next {
+        right: 1rem;
+      }
+      @media (max-width: 820px) {
+        .lb-nav {
+          width: 2rem;
+          height: 2rem;
+          font-size: 1.25rem;
+        }
+        .lb-nav.prev {
+          left: 0.5rem;
+        }
+        .lb-nav.next {
+          right: 0.5rem;
+        }
+      }
+      .lightbox-bar {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        gap: 1rem;
+        margin-top: 0.6rem;
+        font-family: var(--mono);
+        font-size: 0.72rem;
+      }
+      .lightbox-cap {
+        color: var(--steel);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .lightbox-count {
+        color: var(--muted);
+        flex-shrink: 0;
+      }
       .lightbox-hint {
         font-family: var(--mono);
         font-size: 0.68rem;
         color: var(--muted);
         text-align: center;
-        margin-top: 0.6rem;
+        margin-top: 0.35rem;
       }
       .lightbox::backdrop {
         background: rgba(10, 11, 13, 0.82);
@@ -561,6 +695,7 @@
           <a class="plain" href="#screenshots" x-i18n="nav-interface"
             >interface</a
           >
+          <a class="plain" href="#selfhost" x-i18n="nav-selfhost">host it</a>
           <a
             class="plain"
             href="https://github.com/baucord/baucord"
@@ -588,10 +723,10 @@
       <div>
         <h1>bau<b>cord</b></h1>
         <p x-i18n="hero-lede">
-          Voice, text and screen sharing you host yourself. Written in Rust,
-          tuned for low decoding latency, and small enough to leave running
-          without noticing. No accounts, no telemetry — just you, your friends,
-          and a server you control.
+          Voice, text and screen sharing on a server you or a friend run.
+          Free, fast, and so lightweight you forget it's there — it sits in
+          the tray using less memory than a browser tab. No accounts, no
+          telemetry, no feed. Just your people, talking.
         </p>
         <div class="btn-row">
           <a class="btn solid" href="#download" x-i18n="hero-download"
@@ -607,32 +742,24 @@
           >
         </div>
         <p class="facts" x-i18n="hero-facts">
-          Windows / macOS / Linux &nbsp;·&nbsp; client + server in one zip
-          &nbsp;·&nbsp; Apache-licensed
+          Windows / macOS / Linux &nbsp;·&nbsp; ~30–50 MB of RAM
+          &nbsp;·&nbsp; free &amp; open source
         </p>
       </div>
 
-      <div
-        class="term"
-        aria-label="deployment example"
-        x-i18n:aria-label="term-aria"
-      >
-        <div class="term-bar">
-          <span>~/baucord</span>
-          <span>v__VERSION__</span>
-        </div>
-        <pre
-          class="term-body"
-        ><span class="c" x-i18n="term-c-host"># on whoever's hosting:</span>
-<span class="p">$</span> unzip baucord-v__VERSION__-linux-x64.zip
-<span class="p">$</span> ./dedicated-server
-
-<span class="c" x-i18n="term-c-everyone"># everyone else:</span>
-<span class="p">$</span> ./baucord <span class="c" x-i18n="term-c-run"># enter host:port, pick a name</span>
-
-<span class="c" x-i18n="term-c-tagline"># we have discord at home</span>
-<span class="p">$</span> <span class="cursor"></span></pre>
-      </div>
+      <figure class="hero-shot">
+        <a class="shot-link" href="img/call.png">
+          <img
+            src="img/call.png"
+            alt="baucord during a call — voice channels in the sidebar, chat on the right, someone streaming in another channel"
+            x-i18n:alt="shot-call-alt"
+          />
+        </a>
+        <figcaption x-i18n="hero-shot-cap">
+          tuesday on someone's spare machine — movie in one channel, snacks in
+          another
+        </figcaption>
+      </figure>
     </header>
 
     <section id="features">
@@ -660,11 +787,21 @@
             </dd>
           </div>
           <div class="spec-row">
+            <dt x-i18n="spec-channels-t">channels</dt>
+            <dd x-i18n="spec-channels-d">
+              Everyone lands in the Lobby, then splits off — a room for the
+              game, one for the movie, an AFK corner. Lock a channel with a
+              password or cap how many fit. Whoever hosts can edit the list
+              while everyone's connected; the sidebar just updates.
+            </dd>
+          </div>
+          <div class="spec-row">
             <dt x-i18n="spec-share-t">screen share</dt>
             <dd x-i18n="spec-share-d">
-              H.264 via FFmpeg, with the source's audio along for the ride. 720p
-              or 1080p, quality is a slider. Viewers get a resizable window with
-              live stats if they want to see them.
+              Share your screen with its audio, 720p or 1080p, up to 60 fps.
+              Show it to just your channel or to the whole server — anyone
+              allowed to watch can hop in and out, in a resizable window with
+              live stats if they're curious.
             </dd>
           </div>
           <div class="spec-row">
@@ -684,23 +821,32 @@
           <div class="spec-row">
             <dt x-i18n="spec-chat-t">text chat</dt>
             <dd x-i18n="spec-chat-d">
-              For links, and for whoever's mic just died.
+              One shared room for the whole server, whatever channel you're
+              in. Links, images, gifs, emoji — and whoever's mic just died.
             </dd>
           </div>
           <div class="spec-row">
             <dt x-i18n="spec-machine-t">your machine</dt>
             <dd x-i18n="spec-machine-d">
-              Closes to the tray and keeps the call running. Settings live in a
-              JSON file next to the binary — no installer, no registry, no
-              background services.
+              The whole app idles around 30–50 MB of RAM. Closes to the tray
+              and keeps the call running. Settings live in one small file next
+              to the app — no installer, no registry, no background services.
+            </dd>
+          </div>
+          <div class="spec-row">
+            <dt x-i18n="spec-lang-t">your language</dt>
+            <dd x-i18n="spec-lang-d">
+              English, Español and Português out of the box, in the app and on
+              this page.
             </dd>
           </div>
           <div class="spec-row">
             <dt x-i18n="spec-server-t">the server</dt>
             <dd x-i18n="spec-server-d">
               A dumb relay. It forwards packets, that's it — no mixing, no
-              transcoding, no accounts to manage. Ships in the same zip as the
-              client.
+              transcoding, no accounts to manage. One small file describes the
+              whole thing, channels included, and it ships in the same zip as
+              the client.
             </dd>
           </div>
         </dl>
@@ -709,38 +855,154 @@
 
     <section id="screenshots">
       <div class="wrap">
-        <h2 x-i18n="shots-title">The interface</h2>
+        <h2 x-i18n="shots-title">A look around</h2>
         <p class="section-note" x-i18n="shots-note">
-          Native widgets, one window. This is the whole app.
+          One window, native widgets, nothing to learn. Click any shot to
+          zoom.
         </p>
 
         <div class="shots">
           <figure>
-            <a class="shot-link" href="img/client2.png">
+            <a class="shot-link" href="img/share.png">
               <img
-                src="img/client2.png"
-                alt="baucord connect screen — nickname and server address"
+                src="img/share.png"
+                alt="baucord share screen dialog — monitor, quality, and who can watch"
+                x-i18n:alt="shot-share-alt"
+                loading="lazy"
+              />
+            </a>
+            <figcaption x-i18n="shot-share-cap">
+              sharing — pick a monitor, a quality, and who gets to watch
+            </figcaption>
+          </figure>
+          <figure>
+            <a class="shot-link" href="img/popover.png">
+              <img
+                src="img/popover.png"
+                alt="baucord per-user volume popover — one friend turned up to 125%"
+                x-i18n:alt="shot-popover-alt"
+                loading="lazy"
+              />
+            </a>
+            <figcaption x-i18n="shot-popover-cap">
+              per-person volume — the quiet friend, turned up, remembered
+            </figcaption>
+          </figure>
+          <figure>
+            <a class="shot-link" href="img/prompt.png">
+              <img
+                src="img/prompt.png"
+                alt="baucord asking for a locked channel's password"
+                x-i18n:alt="shot-prompt-alt"
+                loading="lazy"
+              />
+            </a>
+            <figcaption x-i18n="shot-prompt-cap">
+              locked channels ask once — the password is remembered
+            </figcaption>
+          </figure>
+          <figure>
+            <a class="shot-link" href="img/settings-servers.png">
+              <img
+                src="img/settings-servers.png"
+                alt="baucord server list settings — two saved servers, one marked default"
+                x-i18n:alt="shot-servers-alt"
+                loading="lazy"
+              />
+            </a>
+            <figcaption x-i18n="shot-servers-cap">
+              your servers — save a few, set a default, hop between them
+            </figcaption>
+          </figure>
+          <figure>
+            <a class="shot-link" href="img/settings-audio.png">
+              <img
+                src="img/settings-audio.png"
+                alt="baucord audio settings — devices, mic test, voice sensitivity"
+                x-i18n:alt="shot-audio-alt"
+                loading="lazy"
+              />
+            </a>
+            <figcaption x-i18n="shot-audio-cap">
+              audio — test your mic, set how sensitive it is, done
+            </figcaption>
+          </figure>
+          <figure>
+            <a class="shot-link" href="img/connect.png">
+              <img
+                src="img/connect.png"
+                alt="baucord connect screen — a nickname and a saved server"
                 x-i18n:alt="shot-connect-alt"
                 loading="lazy"
               />
             </a>
             <figcaption x-i18n="shot-connect-cap">
-              connect — nickname and server address, done
+              connecting — a nickname and a saved server, that's the login
             </figcaption>
           </figure>
-          <figure>
-            <a class="shot-link" href="img/client1.png">
-              <img
-                src="img/client1.png"
-                alt="baucord main window — user list, chat and per-user controls"
-                x-i18n:alt="shot-call-alt"
-                loading="lazy"
-              />
-            </a>
-            <figcaption x-i18n="shot-call-cap">
-              a call — voices, chat, per-user controls
-            </figcaption>
-          </figure>
+        </div>
+      </div>
+    </section>
+
+    <section id="selfhost">
+      <div class="wrap">
+        <h2 x-i18n="selfhost-title">Hosting it is the easy part</h2>
+        <p class="section-note" x-i18n="selfhost-note">
+          There's no company in the middle. One of you runs the server —
+          everyone else just connects to it. No sign-ups, nothing to
+          configure unless you want channels with passwords.
+        </p>
+
+        <div class="steps">
+          <div class="step">
+            <div>
+              <h3 x-i18n="step-1-t">one friend runs the server</h3>
+              <p x-i18n="step-1-d">
+                On anything that stays on: a spare computer, a cheap rented
+                box, the homelab. Unzip, run it, done.
+              </p>
+            </div>
+          </div>
+          <div class="step">
+            <div>
+              <h3 x-i18n="step-2-t">share the address</h3>
+              <p x-i18n="step-2-d">
+                That's the invite. There are no accounts to create — a
+                nickname is all anyone needs.
+              </p>
+            </div>
+          </div>
+          <div class="step">
+            <div>
+              <h3 x-i18n="step-3-t">everyone types it once</h3>
+              <p x-i18n="step-3-d">
+                baucord remembers it. From then on it's open the app, hit
+                connect, start talking.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div
+          class="term"
+          aria-label="deployment example"
+          x-i18n:aria-label="term-aria"
+        >
+          <div class="term-bar">
+            <span>~/baucord</span>
+            <span>v__VERSION__</span>
+          </div>
+          <pre
+            class="term-body"
+          ><span class="c" x-i18n="term-c-host"># on whoever's hosting:</span>
+<span class="p">$</span> unzip baucord-v__VERSION__-linux-x64.zip
+<span class="p">$</span> ./dedicated-server
+
+<span class="c" x-i18n="term-c-everyone"># everyone else:</span>
+<span class="p">$</span> ./baucord <span class="c" x-i18n="term-c-run"># enter host:port, pick a name</span>
+
+<span class="c" x-i18n="term-c-tagline"># we have discord at home</span>
+<span class="p">$</span> <span class="cursor"></span></pre>
         </div>
       </div>
     </section>
@@ -824,8 +1086,29 @@
       x-i18n:aria-label="lightbox-aria"
     >
       <img alt="" />
+      <button
+        class="lb-nav prev"
+        type="button"
+        aria-label="previous screenshot"
+        x-i18n:aria-label="lightbox-prev"
+      >
+        &lsaquo;
+      </button>
+      <button
+        class="lb-nav next"
+        type="button"
+        aria-label="next screenshot"
+        x-i18n:aria-label="lightbox-next"
+      >
+        &rsaquo;
+      </button>
+      <div class="lightbox-bar">
+        <span class="lightbox-cap"></span>
+        <span class="lightbox-count"></span>
+      </div>
       <p class="lightbox-hint" x-i18n="lightbox-hint">
-        click anywhere or press esc to close
+        &larr; &rarr; to switch &nbsp;·&nbsp; click anywhere or press esc to
+        close
       </p>
     </dialog>
 
@@ -840,19 +1123,67 @@
       }).observe(document.querySelector(".hero h1"));
 
       // Screenshot lightbox. The thumbnails are plain links to the image
-      // file, so without JS a click still opens the full-size PNG.
+      // file, so without JS a click still opens the full-size PNG. With
+      // JS, every .shot-link (hero included) joins one cycle: ← / → keys
+      // or the on-screen arrows move through it, wrapping at the ends.
+      var shots = Array.prototype.slice.call(
+        document.querySelectorAll(".shot-link"),
+      );
       var box = document.querySelector(".lightbox");
       var boxImg = box.querySelector("img");
-      document.querySelectorAll(".shot-link").forEach(function (a) {
+      var boxCap = box.querySelector(".lightbox-cap");
+      var boxCount = box.querySelector(".lightbox-count");
+      var current = 0;
+
+      function show(i) {
+        current = (i + shots.length) % shots.length;
+        var a = shots[current];
+        boxImg.src = a.href;
+        boxImg.alt = a.querySelector("img").alt;
+        // Caption comes from the figure, so it follows the current
+        // language for free.
+        var fig = a.closest("figure");
+        var cap = fig && fig.querySelector("figcaption");
+        boxCap.textContent = cap ? cap.textContent.trim() : "";
+        boxCount.textContent = current + 1 + " / " + shots.length;
+        // Warm the neighbors so arrowing feels instant.
+        [current + 1, current - 1].forEach(function (j) {
+          new Image().src = shots[(j + shots.length) % shots.length].href;
+        });
+      }
+
+      shots.forEach(function (a, i) {
         a.addEventListener("click", function (ev) {
           ev.preventDefault();
-          boxImg.src = a.href;
-          boxImg.alt = a.querySelector("img").alt;
+          show(i);
           box.showModal();
         });
       });
       box.addEventListener("click", function () {
         box.close();
+      });
+      box.querySelector(".lb-nav.prev").addEventListener(
+        "click",
+        function (ev) {
+          ev.stopPropagation();
+          show(current - 1);
+        },
+      );
+      box.querySelector(".lb-nav.next").addEventListener(
+        "click",
+        function (ev) {
+          ev.stopPropagation();
+          show(current + 1);
+        },
+      );
+      box.addEventListener("keydown", function (ev) {
+        if (ev.key === "ArrowRight") {
+          ev.preventDefault();
+          show(current + 1);
+        } else if (ev.key === "ArrowLeft") {
+          ev.preventDefault();
+          show(current - 1);
+        }
       });
     </script>
 
