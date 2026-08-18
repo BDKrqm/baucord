@@ -3,6 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/x-icon" href="/img/favicon.ico" />
     <title>baucord — self-hosted voice chat</title>
     <meta
       name="description"
@@ -723,10 +724,10 @@
       <div>
         <h1>bau<b>cord</b></h1>
         <p x-i18n="hero-lede">
-          Voice, text and screen sharing on a server you or a friend run.
-          Free, fast, and so lightweight you forget it's there — it sits in
-          the tray using less memory than a browser tab. No accounts, no
-          telemetry, no feed. Just your people, talking.
+          Voice, text and screen sharing on a server you or a friend run. Free,
+          fast, and so lightweight you forget it's there — it sits in the tray
+          using less memory than a browser tab. No accounts, no telemetry, no
+          feed. Just your people, talking.
         </p>
         <div class="btn-row">
           <a class="btn solid" href="#download" x-i18n="hero-download"
@@ -742,8 +743,8 @@
           >
         </div>
         <p class="facts" x-i18n="hero-facts">
-          Windows / macOS / Linux &nbsp;·&nbsp; ~30–50 MB of RAM
-          &nbsp;·&nbsp; free &amp; open source
+          Windows / macOS / Linux &nbsp;·&nbsp; ~30–50 MB of RAM &nbsp;·&nbsp;
+          free &amp; open source
         </p>
       </div>
 
@@ -821,16 +822,16 @@
           <div class="spec-row">
             <dt x-i18n="spec-chat-t">text chat</dt>
             <dd x-i18n="spec-chat-d">
-              One shared room for the whole server, whatever channel you're
-              in. Links, images, gifs, emoji — and whoever's mic just died.
+              One shared room for the whole server, whatever channel you're in.
+              Links, images, gifs, emoji — and whoever's mic just died.
             </dd>
           </div>
           <div class="spec-row">
             <dt x-i18n="spec-machine-t">your machine</dt>
             <dd x-i18n="spec-machine-d">
-              The whole app idles around 30–50 MB of RAM. Closes to the tray
-              and keeps the call running. Settings live in one small file next
-              to the app — no installer, no registry, no background services.
+              The whole app idles around 30–50 MB of RAM. Closes to the tray and
+              keeps the call running. Settings live in one small file next to
+              the app — no installer, no registry, no background services.
             </dd>
           </div>
           <div class="spec-row">
@@ -857,8 +858,7 @@
       <div class="wrap">
         <h2 x-i18n="shots-title">A look around</h2>
         <p class="section-note" x-i18n="shots-note">
-          One window, native widgets, nothing to learn. Click any shot to
-          zoom.
+          One window, native widgets, nothing to learn. Click any shot to zoom.
         </p>
 
         <div class="shots">
@@ -949,8 +949,8 @@
         <h2 x-i18n="selfhost-title">Hosting it is the easy part</h2>
         <p class="section-note" x-i18n="selfhost-note">
           There's no company in the middle. One of you runs the server —
-          everyone else just connects to it. No sign-ups, nothing to
-          configure unless you want channels with passwords.
+          everyone else just connects to it. No sign-ups, nothing to configure
+          unless you want channels with passwords.
         </p>
 
         <div class="steps">
@@ -958,8 +958,8 @@
             <div>
               <h3 x-i18n="step-1-t">one friend runs the server</h3>
               <p x-i18n="step-1-d">
-                On anything that stays on: a spare computer, a cheap rented
-                box, the homelab. Unzip, run it, done.
+                On anything that stays on: a spare computer, a cheap rented box,
+                the homelab. Unzip, run it, done.
               </p>
             </div>
           </div>
@@ -967,8 +967,8 @@
             <div>
               <h3 x-i18n="step-2-t">share the address</h3>
               <p x-i18n="step-2-d">
-                That's the invite. There are no accounts to create — a
-                nickname is all anyone needs.
+                That's the invite. There are no accounts to create — a nickname
+                is all anyone needs.
               </p>
             </div>
           </div>
@@ -1162,20 +1162,18 @@
       box.addEventListener("click", function () {
         box.close();
       });
-      box.querySelector(".lb-nav.prev").addEventListener(
-        "click",
-        function (ev) {
+      box
+        .querySelector(".lb-nav.prev")
+        .addEventListener("click", function (ev) {
           ev.stopPropagation();
           show(current - 1);
-        },
-      );
-      box.querySelector(".lb-nav.next").addEventListener(
-        "click",
-        function (ev) {
+        });
+      box
+        .querySelector(".lb-nav.next")
+        .addEventListener("click", function (ev) {
           ev.stopPropagation();
           show(current + 1);
-        },
-      );
+        });
       box.addEventListener("keydown", function (ev) {
         if (ev.key === "ArrowRight") {
           ev.preventDefault();
