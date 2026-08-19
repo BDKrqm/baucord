@@ -103,12 +103,26 @@ pub struct LimitSettings {
     pub max_viewers_per_stream: usize,
     /// Chat messages longer than this (bytes) are truncated.
     pub max_chat_bytes: usize,
-    /// Chat images allowed per client per minute (sliding window);
-    /// images beyond this are dropped with a warning. `0` disables
-    /// image relay entirely. Size (≤ 1 MiB each) is enforced by the
-    /// protocol codec, so this bounds relay egress: worst case
-    /// ≈ `max_images_per_minute` MiB/min per chatty client.
-    pub max_images_per_minute: usize,
+    /// Per-client image *bandwidth* budget: KiB of accepted chat
+    /// images per sliding minute. Bytes are the resource being
+    /// protected — a burst of tiny stickers is harmless while two
+    /// 1 MiB monsters back-to-back are not, so the budget weighs each
+    /// image by its size instead of counting them. Images that would
+    /// exceed the window are dropped with a warning. `0` disables
+    /// image relay entirely. Note the amplification: every accepted
+    /// KiB is relayed to every connected client, so per-client egress
+    /// pressure ≈ this budget × connected clients. A budget smaller
+    /// than an image rejects that image outright: the wire allows
+    /// images up to 10 MiB (10240 KiB), so the default of 4096 also
+    /// acts as a per-image size ceiling of ~4 MiB — raise it past
+    /// 10240 if you want single full-size images through.
+    pub max_image_kb_per_minute: usize,
+    /// Same budget across the *whole server* (all senders combined,
+    /// same sliding minute). The per-client budget bounds one chatty
+    /// client; this bounds the coordinated case where several clients
+    /// bursting together multiply into `clients × bytes` of relay
+    /// egress. `0` disables image relay entirely.
+    pub max_image_kb_per_minute_global: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -299,7 +313,12 @@ impl Default for LimitSettings {
             max_sharers: 2,
             max_viewers_per_stream: 8,
             max_chat_bytes: 2000,
-            max_images_per_minute: 12,
+            // 4 MiB/min per client (four full-size images or a pile of
+            // stickers), 16 MiB/min for the room — bursty enough for a
+            // meme volley, bounded enough that a handful of spammers
+            // can't multiply into hundreds of MB/min of relay egress.
+            max_image_kb_per_minute: 4096,
+            max_image_kb_per_minute_global: 16_384,
         }
     }
 }
