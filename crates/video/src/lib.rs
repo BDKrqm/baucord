@@ -18,6 +18,8 @@
 
 pub mod buffer;
 pub mod capture;
+#[cfg(target_os = "windows")]
+pub mod dxgi;
 
 // The real codec module is FFmpeg top to bottom, so it's swapped
 // wholesale on targets without an FFmpeg build. The stub exposes the
@@ -139,15 +141,48 @@ impl Quality {
         Self::FHD60,
         Self::QHD30,
     ];
+
+    /// Stable string key for persisting a preset in settings files.
+    ///
+    /// Unlike an index into [`Quality::ALL`], these survive reordering
+    /// or insertion of new presets in future versions.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::HD30 => "hd30",
+            Self::HD60 => "hd60",
+            Self::FHD30 => "fhd30",
+            Self::FHD60 => "fhd60",
+            Self::QHD30 => "qhd30",
+        }
+    }
+
+    /// Inverse of [`Quality::key`]. Returns `None` for unknown keys
+    /// (e.g. a settings file written by a newer version).
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|q| q.key() == key)
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Frame types
 // ---------------------------------------------------------------------------
 
-/// An RGBA frame ready for encoding or display.
+/// Byte layout of a [`Frame`]'s pixel data (4 bytes per pixel either way).
 ///
-/// Not `Clone` by design — RGBA buffers are large (3.7 MB at 1080p).
+/// The DXGI streaming backend delivers **BGRA** exactly as the desktop
+/// stores it; converting to RGBA on the CPU would be a wasted full-frame
+/// pass, since swscale accepts BGRA input directly. The screenshot
+/// backend (and everything else) stays RGBA.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PixelFormat {
+    Rgba,
+    Bgra,
+}
+
+/// A raw captured frame ready for encoding (see [`PixelFormat`] for the
+/// byte layout).
+///
+/// Not `Clone` by design — pixel buffers are large (3.7 MB at 1080p).
 /// Pass by reference or transfer ownership explicitly.
 pub struct Frame {
     pub data: Vec<u8>,
@@ -157,6 +192,7 @@ pub struct Frame {
     /// Used as the encoder PTS, so it also drives keyframe cadence and
     /// rate control under variable capture rates.
     pub timestamp_ms: u64,
+    pub format: PixelFormat,
 }
 
 /// Encoded H.264 data for one frame (one access unit).
@@ -217,6 +253,49 @@ pub enum CodecError {
 // ---------------------------------------------------------------------------
 
 /// Encoder that converts RGBA frames into an H.264 bitstream.
+/// Human-readable list of H.264 NAL unit types in an Annex-B access
+/// unit, e.g. `"SPS,PPS,IDR"` — a diagnostic aid for verifying what an
+/// encoder actually emitted. Hardware encoder wrappers have quirks
+/// (missing in-band parameter sets, I-slices flagged as keyframes),
+/// and this makes them visible from the sender's log alone.
+pub fn describe_annexb_nals(data: &[u8]) -> String {
+    let mut names: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    while i + 3 < data.len() {
+        if data[i] != 0 || data[i + 1] != 0 {
+            i += 1;
+            continue;
+        }
+        let hdr = if data[i + 2] == 1 {
+            i + 3
+        } else if data[i + 2] == 0 && i + 4 < data.len() && data[i + 3] == 1 {
+            i + 4
+        } else {
+            i += 1;
+            continue;
+        };
+        if hdr >= data.len() {
+            break;
+        }
+        let name = match data[hdr] & 0x1F {
+            1 => "slice".to_string(),
+            5 => "IDR".to_string(),
+            6 => "SEI".to_string(),
+            7 => "SPS".to_string(),
+            8 => "PPS".to_string(),
+            9 => "AUD".to_string(),
+            t => format!("nal{t}"),
+        };
+        names.push(name);
+        i = hdr + 1;
+    }
+    if names.is_empty() {
+        "no start codes found".to_string()
+    } else {
+        names.join(",")
+    }
+}
+
 pub trait VideoEncoder {
     /// Encode one RGBA frame.
     ///
@@ -240,6 +319,28 @@ pub trait VideoEncoder {
     /// unrecoverable gap — they need an IDR with SPS/PPS parameter sets
     /// before they can decode any P-frames.
     fn force_keyframe(&mut self);
+
+    /// Whether a forced keyframe is queued but not yet encoded.
+    ///
+    /// With change-driven capture backends, no frames flow while the
+    /// screen is static — the capture loop uses this to know it must
+    /// re-encode the held frame *now* (a viewer is waiting on an IDR)
+    /// instead of waiting for the next refresh tick.
+    fn keyframe_pending(&self) -> bool {
+        false
+    }
+
+    /// Whether [`VideoEncoder::force_keyframe`] can actually produce an
+    /// IDR on demand.
+    ///
+    /// FFmpeg's AMF wrapper (through 7.1) ignores frame-level keyframe
+    /// requests — IDRs only appear when the encoder's own period
+    /// elapses, counted in *submitted frames*. When this is `false`,
+    /// the capture loop must keep frames flowing (even on a static
+    /// screen) after a keyframe request so that period actually passes.
+    fn supports_forced_keyframes(&self) -> bool {
+        true
+    }
 }
 
 /// Decoder that converts H.264 bitstream back into RGBA frames.

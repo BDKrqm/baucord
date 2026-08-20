@@ -52,10 +52,16 @@ use ffmpeg::software::scaling::{Context as SwsContext, Flags};
 use ffmpeg::util::frame::video::Video as VideoFrame;
 use ffmpeg::{Dictionary, Rational};
 
-use crate::{CodecError, DecodedFrame, EncodedFrame, Frame, Quality, VideoDecoder, VideoEncoder};
+use crate::{CodecError, DecodedFrame, EncodedFrame, Frame, PixelFormat, Quality, VideoDecoder, VideoEncoder};
 
 /// Time between IDR keyframes, in milliseconds of *capture time*.
 pub const KEYFRAME_INTERVAL_MS: u64 = 2_000;
+
+/// Minimum spacing between IDR-via-session-reopen events (see the
+/// reopen logic in [`FfmpegEncoder::encode`]): each reopen costs a
+/// rate-control reset and ~10-30 ms, so even under a keyframe-request
+/// storm we cap it at roughly one per interval.
+const MIN_IDR_REOPEN_INTERVAL_MS: u64 = 700;
 
 /// Codec-level GOP backstop, in seconds. The primary keyframe cadence is
 /// the time-based forcing above; this only guarantees an eventual refresh
@@ -88,6 +94,13 @@ pub struct FfmpegEncoder {
     enc_name: &'static str,
     quality: Quality,
     force_next_keyframe: bool,
+    /// Capture timestamp of the most recent keyframe AU this encoder
+    /// actually emitted — ground truth, independent of what the codec
+    /// promised. Drives the reopen-for-IDR backstop in [`Self::encode`].
+    last_idr_out_ms: Option<u64>,
+    /// Last time [`Self::encode`] reopened the session to force an IDR
+    /// (rate limiting, capture-timestamp clock).
+    last_idr_reopen_ms: Option<u64>,
     /// Capture timestamp of the last IDR we forced (drives cadence).
     last_keyframe_ms: Option<u64>,
     /// Last PTS handed to the encoder — used to keep PTS strictly increasing.
@@ -101,6 +114,7 @@ struct EncSession {
     sws: SwsContext,
     src_w: u32,
     src_h: u32,
+    src_format: PixelFormat,
     out_w: u32,
     out_h: u32,
     /// Reusable FFmpeg frame for RGBA input (source resolution).
@@ -139,8 +153,17 @@ impl FfmpegEncoder {
 
             // The probe: actually open a session. `find_by_name` succeeding
             // only means the encoder was compiled in, not that the hardware
-            // behind it exists.
-            match open_session(codec, name, quality, quality.width(), quality.height()) {
+            // behind it exists. (The probe's pixel format is arbitrary —
+            // this session is discarded; the real one opens lazily from
+            // the first frame's actual dimensions and format.)
+            match open_session(
+                codec,
+                name,
+                quality,
+                quality.width(),
+                quality.height(),
+                PixelFormat::Rgba,
+            ) {
                 Ok(_probe) => {
                     log::info!("Using FFmpeg encoder: {name}");
                     return Ok(Self {
@@ -148,6 +171,8 @@ impl FfmpegEncoder {
                         enc_name: name,
                         quality,
                         force_next_keyframe: false,
+                        last_idr_out_ms: None,
+                        last_idr_reopen_ms: None,
                         last_keyframe_ms: None,
                         last_pts: None,
                         session: None,
@@ -165,9 +190,14 @@ impl FfmpegEncoder {
 
     /// Ensure the session matches the input frame dimensions, creating or
     /// recreating it as needed.
-    fn ensure_session(&mut self, src_w: u32, src_h: u32) -> Result<(), CodecError> {
+    fn ensure_session(
+        &mut self,
+        src_w: u32,
+        src_h: u32,
+        src_format: PixelFormat,
+    ) -> Result<(), CodecError> {
         if let Some(s) = &self.session {
-            if s.src_w == src_w && s.src_h == src_h {
+            if s.src_w == src_w && s.src_h == src_h && s.src_format == src_format {
                 return Ok(());
             }
             log::info!(
@@ -181,7 +211,7 @@ impl FfmpegEncoder {
             );
         }
 
-        let session = open_session(self.codec, self.enc_name, self.quality, src_w, src_h)?;
+        let session = open_session(self.codec, self.enc_name, self.quality, src_w, src_h, src_format)?;
         log::info!(
             "encoder session: {}x{} → {}x{} ({})",
             src_w,
@@ -205,7 +235,59 @@ impl FfmpegEncoder {
     /// Encode one RGBA frame. See [`VideoEncoder::encode`] for the output
     /// contract (zero or more access units, one `EncodedFrame` each).
     pub fn encode(&mut self, frame: &Frame) -> Result<Vec<EncodedFrame>, CodecError> {
-        self.ensure_session(frame.width, frame.height)?;
+        let mut out = Vec::new();
+
+        // Reopen-for-IDR backstop. Some encoders (FFmpeg's AMF wrapper
+        // <= 7.1) cannot force an IDR: frame-level pict_type is ignored
+        // and the IDR-period property is assigned after component init,
+        // where it can fail silently — leaving the session's first
+        // frame as the only IDR it will ever emit. The one mechanism
+        // that provably works everywhere is that a *fresh session
+        // always starts with an IDR carrying parameter sets. So when an
+        // IDR is demanded (a viewer asked, or none has been emitted for
+        // 2x the cadence interval) and this encoder can't force one,
+        // reopen the session: one rate-control reset and ~10-30 ms
+        // (rate limited) buys a guaranteed, immediate keyframe. Frames
+        // in flight inside the old session are discarded — they consume
+        // no sequence numbers, so viewers see no loss signal.
+        if !self.supports_forced_keyframes() && self.session.is_some() {
+            let idr_overdue = match self.last_idr_out_ms {
+                Some(t) => frame.timestamp_ms.saturating_sub(t) >= 2 * KEYFRAME_INTERVAL_MS,
+                // The running session opened with an IDR; None just
+                // means the async pipeline hasn't produced output yet.
+                None => false,
+            };
+            let recently_reopened = match self.last_idr_reopen_ms {
+                Some(t) => frame.timestamp_ms.saturating_sub(t) < MIN_IDR_REOPEN_INTERVAL_MS,
+                None => false,
+            };
+            if (self.force_next_keyframe || idr_overdue) && !recently_reopened {
+                log::info!(
+                    "encoder can't force IDRs — reopening session for one \
+                     (viewer_forced={}, cadence_overdue={})",
+                    self.force_next_keyframe,
+                    idr_overdue
+                );
+                // Salvage whatever the dying session already has ready
+                // — with sparse input (static-screen refresh at ~1 fps)
+                // the previous submission's AU, often the IDR we
+                // reopened for last time, is sitting in the encoder and
+                // would otherwise be destroyed with the session.
+                if let Some(s) = self.session.as_mut() {
+                    let _ = drain_packets(s, &mut out);
+                }
+                self.last_idr_reopen_ms = Some(frame.timestamp_ms);
+                // Optimistically count the reopen as an IDR emission:
+                // the new session's first output *is* one, but it may
+                // surface a tick or two later — without this stamp the
+                // overdue check re-fires before that happens and the
+                // backstop reopens in a loop, killing every session
+                // before it can produce anything.
+                self.last_idr_out_ms = Some(frame.timestamp_ms);
+                self.session = None;
+            }
+        }
+        self.ensure_session(frame.width, frame.height, frame.format)?;
 
         // Strictly increasing PTS in the 1/1000 time base. Capture
         // timestamps are ms-resolution, so a burst can repeat a value.
@@ -256,7 +338,6 @@ impl FfmpegEncoder {
             session.yuv_frame.set_kind(ffmpeg::picture::Type::None);
         }
 
-        let mut out = Vec::new();
         match session.encoder.send_frame(&session.yuv_frame) {
             Ok(()) => {
                 session.pending_ts.push_back(frame.timestamp_ms);
@@ -274,6 +355,13 @@ impl FfmpegEncoder {
         }
 
         drain_packets(session, &mut out)?;
+        if out.iter().any(|f| f.is_keyframe) {
+            // Ground truth for the reopen-for-IDR backstop: a keyframe
+            // actually left this encoder (stamped with the submitting
+            // frame's clock; pipeline delay of a few frames is noise at
+            // the 2 s cadence scale).
+            self.last_idr_out_ms = Some(frame.timestamp_ms);
+        }
         Ok(out)
     }
 
@@ -283,6 +371,17 @@ impl FfmpegEncoder {
     /// gap, so they immediately get a decodable frame with SPS/PPS.
     pub fn force_keyframe(&mut self) {
         self.force_next_keyframe = true;
+    }
+
+    /// Whether a forced keyframe is queued but not yet encoded.
+    pub fn keyframe_pending(&self) -> bool {
+        self.force_next_keyframe
+    }
+
+    /// See [`VideoEncoder::supports_forced_keyframes`]: everything we
+    /// use honors `pict_type=I` except FFmpeg's AMF wrapper (<= 7.1).
+    pub fn supports_forced_keyframes(&self) -> bool {
+        self.enc_name != "h264_amf"
     }
 
     pub fn quality(&self) -> Quality {
@@ -311,6 +410,14 @@ impl VideoEncoder for FfmpegEncoder {
 
     fn force_keyframe(&mut self) {
         self.force_keyframe();
+    }
+
+    fn keyframe_pending(&self) -> bool {
+        self.keyframe_pending()
+    }
+
+    fn supports_forced_keyframes(&self) -> bool {
+        self.supports_forced_keyframes()
     }
 }
 
@@ -569,9 +676,17 @@ fn open_session(
     quality: Quality,
     src_w: u32,
     src_h: u32,
+    src_format: PixelFormat,
 ) -> Result<EncSession, CodecError> {
     let (out_w, out_h) = fit_dimensions(src_w, src_h, quality);
     let pix_fmt = encoder_pix_fmt(name);
+    // swscale takes either 4-byte layout natively — BGRA straight from
+    // DXGI costs the same as RGBA and saves the capture side a
+    // full-frame swizzle pass.
+    let in_pix = match src_format {
+        PixelFormat::Rgba => Pixel::RGBA,
+        PixelFormat::Bgra => Pixel::BGRA,
+    };
 
     // new_with_codec (allocation *with* the codec) is required, not
     // cosmetic: it applies the codec's own default table. Allocating a
@@ -600,7 +715,19 @@ fn open_session(
     // Backstop GOP only — the real cadence is the time-based IDR forcing
     // in encode(). Keeping this much longer than KEYFRAME_INTERVAL_MS
     // means exactly one mechanism decides where keyframes go.
-    ctx.set_gop(quality.fps() * GOP_BACKSTOP_SECS);
+    //
+    // EXCEPT h264_amf: FFmpeg's AMF wrapper (through 7.1) ignores
+    // frame-level pict_type entirely — there is NO way to force an IDR
+    // mid-stream. The manual cadence silently produces P-frames, so the
+    // encoder-side IDR period is the only keyframe mechanism AMF has;
+    // set it to the design cadence instead of the backstop. (FFmpeg 8's
+    // rewritten amfenc honors forced_idr — revisit on upgrade.)
+    let gop_secs = if name == "h264_amf" {
+        (KEYFRAME_INTERVAL_MS / 1000) as u32
+    } else {
+        GOP_BACKSTOP_SECS
+    };
+    ctx.set_gop(quality.fps() * gop_secs);
     ctx.set_max_b_frames(0);
 
     // Signal BT.709 limited-range in the bitstream VUI so any decoder —
@@ -626,7 +753,7 @@ fn open_session(
     } else {
         Flags::BICUBIC
     };
-    let mut sws = SwsContext::get(Pixel::RGBA, src_w, src_h, pix_fmt, out_w, out_h, flags)
+    let mut sws = SwsContext::get(in_pix, src_w, src_h, pix_fmt, out_w, out_h, flags)
         .map_err(|e| CodecError::ColorConversion(e.to_string()))?;
     set_sws_colorspace(
         &mut sws,
@@ -635,7 +762,7 @@ fn open_session(
         0, // YUV output is limited range
     );
 
-    let rgba_frame = VideoFrame::new(Pixel::RGBA, src_w, src_h);
+    let rgba_frame = VideoFrame::new(in_pix, src_w, src_h);
     let mut yuv_frame = VideoFrame::new(pix_fmt, out_w, out_h);
     // Tag the frames we hand to the encoder with the same colorimetry.
     unsafe {
@@ -651,6 +778,7 @@ fn open_session(
         sws,
         src_w,
         src_h,
+        src_format,
         out_w,
         out_h,
         rgba_frame,
@@ -742,10 +870,19 @@ fn codec_options(name: &str, quality: Quality) -> Dictionary<'static> {
             opts.set("forced-idr", "1");
         }
         "h264_nvenc" => {
-            opts.set("preset", "p1");
+            // p4 (default/"medium"), not p1: NVENC runs on a dedicated
+            // ASIC block with enormous headroom at 1080p60 — p1 trades
+            // visible quality for speed nobody needs, and the encode
+            // block is separate from the 3D units, so a slower preset
+            // does not touch game performance.
+            opts.set("preset", "p4");
             opts.set("tune", "ull");
             opts.set("rc", "cbr");
             opts.set("zerolatency", "1");
+            // Same job as x264's aq-mode: shift bits toward detailed
+            // regions (text, UI edges) — the content screen share is
+            // mostly made of.
+            opts.set("spatial-aq", "1");
             opts.set("maxrate", &format!("{maxrate}"));
             opts.set("bufsize", &format!("{vbv_bufsize}"));
             opts.set("forced-idr", "1");
@@ -755,14 +892,54 @@ fn codec_options(name: &str, quality: Quality) -> Dictionary<'static> {
             opts.set("low_power", "1");
             opts.set("maxrate", &format!("{maxrate}"));
             opts.set("bufsize", &format!("{vbv_bufsize}"));
+            // No-op on FFmpeg <= 7.1 (the option doesn't exist there;
+            // unknown dict keys are silently ignored) but honored by
+            // FFmpeg 8's rewritten amfenc — kept so an ffmpeg upgrade
+            // restores on-demand IDRs without a code change.
             opts.set("forced_idr", "1");
         }
         "h264_amf" => {
-            opts.set("usage", "ultralowlatency");
-            opts.set("quality", "speed");
+            // NO usage preset — deliberately. FFmpeg's AMF wrapper
+            // (<= 7.1) assigns IDR_PERIOD *after* the AMF component is
+            // initialized; under usage presets (observed with
+            // ultralowlatency) that late assignment fails silently and
+            // the stream never gets another IDR after frame 0. The
+            // default (transcoding) usage is the well-trodden path, and
+            // everything the preset tuned is set explicitly below
+            // (CBR + HRD, no filler, no frame skipping, bf=0 via
+            // max_b_frames).
+            // "balanced", not "speed": AMD's encode block also has
+            // headroom to spare at these resolutions — same trade as
+            // NVENC p4 above.
+            opts.set("quality", "balanced");
+            // Explicit CBR + HRD: left on auto, amfenc picks
+            // peak-constrained VBR (because max_bit_rate is set) with
+            // HRD enforcement OFF — VBV becomes advisory and IDRs
+            // overshoot the transport's per-frame cap (observed: 359 KB
+            // against a 275 KB limit → dropped keyframes). enforce_hrd
+            // makes bufsize binding, like x264's VBV. filler_data off:
+            // CBR padding on static scenes would defeat the capture
+            // loop's skip-encode entirely. frame_skipping off: keep
+            // one-AU-per-frame semantics predictable for the transport.
+            opts.set("rc", "cbr");
+            opts.set("enforce_hrd", "1");
+            opts.set("filler_data", "0");
+            opts.set("frame_skipping", "0");
             opts.set("maxrate", &format!("{maxrate}"));
             opts.set("bufsize", &format!("{vbv_bufsize}"));
+            // No-op on FFmpeg <= 7.1 (the option doesn't exist there;
+            // unknown dict keys are silently ignored) but honored by
+            // FFmpeg 8's rewritten amfenc — kept so an ffmpeg upgrade
+            // restores on-demand IDRs without a code change.
             opts.set("forced_idr", "1");
+            // CRITICAL for this pipeline: AMF only emits SPS/PPS at
+            // stream start by default, so a viewer who joins mid-stream
+            // receives IDRs they can never decode — observed as an
+            // endless keyframe-request loop. x264 repeats headers
+            // before every IDR by default; header_spacing=1 makes AMF
+            // attach them to every AU (~50 bytes/frame, noise at our
+            // bitrates), so any IDR primes a fresh decoder instantly.
+            opts.set("header_spacing", "1");
         }
         _ => {}
     }

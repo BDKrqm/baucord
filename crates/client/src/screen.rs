@@ -29,7 +29,7 @@ use log::{info, warn};
 use video::{
     CodecError, EncodedFrame, Quality, VideoDecoder, VideoEncoder,
     buffer::{BufferedPacket, VideoJitterBuffer},
-    capture::ScreenCapturer,
+    capture::{CaptureStatus, Capturer},
     codec::{FfmpegDecoder, FfmpegEncoder},
 };
 
@@ -242,10 +242,26 @@ impl Drop for ScreenThreadHandle {
 // ── Capture + encode state ──────────────────────────────────────────────
 
 struct CaptureState {
-    capturer: ScreenCapturer,
+    capturer: Capturer,
     encoder: Box<dyn VideoEncoder + Send>,
     quality: Quality,
     seq: u32,
+    /// Next time an *unchanged* frame gets encoded anyway. Streaming
+    /// capture only delivers frames when the screen changes, so this
+    /// low-rate refresh keeps the stream primed (periodic IDRs for
+    /// joiners, live-looking stats) while the screen is static. With
+    /// the screenshot backend every poll is Fresh and this never fires.
+    next_refresh: Instant,
+    /// While `Some` and not yet expired, the static-screen encode skip
+    /// is suspended: a viewer asked for a keyframe and this encoder
+    /// (AMF) can only emit IDRs after enough *submitted* frames, so
+    /// frames must keep flowing until one ships. Cleared when a
+    /// keyframe AU is sent.
+    keyframe_burst_until: Option<Instant>,
+    /// Keyframe AUs whose NAL layout has been logged this session (the
+    /// first few are logged at INFO as a bitstream self-check — makes
+    /// hardware-encoder quirks visible from the sender's log alone).
+    keyframes_logged: u8,
     /// System audio capture — started alongside video, sends Opus stereo
     /// packets to the network. `None` if platform doesn't support it.
     system_audio: Option<SystemAudioCapture>,
@@ -303,6 +319,23 @@ const PACE_DISTRESS_WINDOW: Duration = Duration::from_secs(5);
 /// Don't step back up for this long after viewer distress — stepping up
 /// the moment the viewer recovers just re-chokes them in a slow cycle.
 const PACE_DISTRESS_HOLD: Duration = Duration::from_secs(30);
+
+/// While the screen is static (streaming backend reports Unchanged),
+/// re-encode the held frame this often. Identical-content P-frames are
+/// near-zero bytes and the encoder's 2 s IDR cadence rides on top, so a
+/// static share costs a tiny fraction of full-rate encoding while
+/// joining viewers still get a picture within the keyframe interval.
+/// A pending forced keyframe (viewer waiting on an IDR) bypasses this
+/// and encodes on the next tick.
+const STATIC_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Upper bound on a keyframe "burst" (see CaptureState::keyframe_burst_until):
+/// when the encoder can't force IDRs (AMF), a viewer's keyframe request
+/// makes us encode every tick — static screen or not — until the
+/// encoder's own IDR period elapses. At the 2 s AMF IDR period a burst
+/// resolves within ~2 s of full-rate frames; this cap just guarantees a
+/// misbehaving encoder can't pin us at full rate forever.
+const KEYFRAME_BURST_MAX: Duration = Duration::from_secs(5);
 
 /// The capture interval at the current pace.
 fn effective_frame_interval(state: &CaptureState) -> Duration {
@@ -657,8 +690,14 @@ fn handle_control(
             monitor_index,
             scope,
         } => {
-            // Create capturer
-            let capturer = match ScreenCapturer::new(monitor_index, quality) {
+            // Restart-while-sharing replaces the pipeline. The vendored
+            // DXGI backend shuts down cleanly on drop (thread joined,
+            // duplication released), so no park/reuse dance is needed.
+            drop(st.capture.take());
+            // Create capturer — picks the best backend for the platform
+            // (streaming on Windows, screenshots elsewhere / as
+            // fallback) and logs the choice.
+            let capturer = match Capturer::new(monitor_index, quality) {
                 Ok(c) => c,
                 Err(e) => {
                     event_tx
@@ -681,7 +720,10 @@ fn handle_control(
                 }
             };
 
-            info!("Screen share started: {quality}, monitor {monitor_index}");
+            info!(
+                "Screen share started: {quality}, monitor {monitor_index}, capture backend: {}",
+                capturer.backend_name()
+            );
 
             // Start system audio capture (best-effort — non-fatal if unsupported)
             let system_audio = match SystemAudioCapture::new(Arc::new(AudioStats::new())) {
@@ -706,6 +748,9 @@ fn handle_control(
                 encoder,
                 quality,
                 seq: 0,
+                next_refresh: Instant::now(),
+                keyframe_burst_until: None,
+                keyframes_logged: 0,
                 system_audio,
                 pace_idx: 0,
                 pace_changed: Instant::now(),
@@ -901,6 +946,11 @@ fn handle_control(
                 state.encoder.force_keyframe();
 
                 let now = Instant::now();
+                if !state.encoder.supports_forced_keyframes() {
+                    // This encoder only emits IDRs on its own frame-counted
+                    // period — keep frames flowing so it actually elapses.
+                    state.keyframe_burst_until = Some(now + KEYFRAME_BURST_MAX);
+                }
                 state.kf_request_times.push(now);
                 state
                     .kf_request_times
@@ -955,10 +1005,12 @@ fn capture_and_encode(
     network_tx: &Sender<NetworkControl>,
     shared: &SharedScreenState,
 ) {
-    // Capture
+    // Capture. For the streaming backend this is a non-blocking channel
+    // drain (the OS captures on its own thread); for the screenshot
+    // backend it performs the actual capture here.
     let t0 = Instant::now();
-    let frame = match state.capturer.capture() {
-        Ok(f) => f,
+    let status = match state.capturer.poll() {
+        Ok(s) => s,
         Err(e) => {
             warn!("Capture failed: {e}");
             return;
@@ -970,13 +1022,44 @@ fn capture_and_encode(
         log::debug!("Slow capture: {capture_ms:.1}ms");
     }
 
+    let now = Instant::now();
+    let repeat = match status {
+        CaptureStatus::Fresh => false,
+        CaptureStatus::Unchanged => {
+            // Nothing changed on screen. Encode anyway only if a viewer
+            // is waiting on a forced IDR or the periodic refresh is due
+            // — otherwise skip entirely: no swscale, no encoder work,
+            // no bytes on the wire, and no seq consumed.
+            let bursting = state
+                .keyframe_burst_until
+                .is_some_and(|until| now < until);
+            if !state.encoder.keyframe_pending() && !bursting && now < state.next_refresh {
+                shared.last_capture_us.store(capture_us, Ordering::Relaxed);
+                return;
+            }
+            true
+        }
+        // Nothing captured yet (streaming backend rebuilding with no
+        // held frame) — nothing to encode this tick.
+        CaptureStatus::Empty => {
+            shared.last_capture_us.store(capture_us, Ordering::Relaxed);
+            return;
+        }
+    };
+
+    // A repeated frame gets its timestamp advanced to "now" so PTS,
+    // keyframe cadence, and rate control keep tracking real time.
+    let Some(frame) = state.capturer.frame(repeat) else {
+        return;
+    };
+
     // Encode. Returns zero or more access units: zero while a hardware
     // encoder's pipeline fills (first few frames on NVENC/QSV/AMF), and
     // occasionally more than one when it flushes pending output. Each AU
     // gets its own sequence number — the receiver's jitter buffer treats
     // seq gaps as loss, so skipped/empty encodes must not consume seqs.
     let t1 = Instant::now();
-    let encoded_frames = match state.encoder.encode(&frame) {
+    let encoded_frames = match state.encoder.encode(frame) {
         Ok(e) => e,
         Err(e) => {
             warn!("Encode failed: {e}");
@@ -984,6 +1067,7 @@ fn capture_and_encode(
         }
     };
     let encode_us = t1.elapsed().as_micros() as u32;
+    state.next_refresh = now + STATIC_REFRESH_INTERVAL;
 
     shared.last_capture_us.store(capture_us, Ordering::Relaxed);
     shared.last_encode_us.store(encode_us, Ordering::Relaxed);
@@ -1017,9 +1101,28 @@ fn capture_and_encode(
                 protocol::MAX_VIDEO_FRAME_BYTES,
             );
             state.encoder.force_keyframe();
+            if !state.encoder.supports_forced_keyframes() {
+                state.keyframe_burst_until = Some(Instant::now() + KEYFRAME_BURST_MAX);
+            }
             continue;
         }
 
+        if encoded.is_keyframe {
+            // A real IDR is going out — any burst has done its job.
+            state.keyframe_burst_until = None;
+            // Bitstream self-check: prove (or disprove) that keyframe
+            // AUs carry what viewers need to prime — parameter sets and
+            // an actual IDR slice.
+            if state.keyframes_logged < 3 {
+                state.keyframes_logged += 1;
+                info!(
+                    "keyframe AU check #{}: seq={seq}, {} bytes, NALs: {}",
+                    state.keyframes_logged,
+                    encoded.data.len(),
+                    video::describe_annexb_nals(&encoded.data)
+                );
+            }
+        }
         let _ = network_tx.try_send(NetworkControl::SendVideoFrame {
             seq,
             is_keyframe: encoded.is_keyframe,
