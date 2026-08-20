@@ -70,9 +70,6 @@ services:
   baucord:
     container_name: baucord
     image: mpwsh/baucord:latest
-    environment:
-      - RUST_LOG=warn
-      - PORT=5002
     volumes:
       - ./config/baucord.yaml:/app/server.yaml
     networks:
