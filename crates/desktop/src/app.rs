@@ -866,7 +866,7 @@ impl AppState {
                             st.frames_coalesced += 1;
                             if st.frames_coalesced.is_multiple_of(60) {
                                 warn!(
-                                    "📊 UI coalescing has skipped {} frames — main thread slower than stream",
+                                    "UI coalescing has skipped {} frames — main thread slower than stream",
                                     st.frames_coalesced
                                 );
                             }
@@ -909,7 +909,7 @@ impl AppState {
     fn handle_screen_event(&mut self, evt: ScreenEvent) {
         match evt {
             ScreenEvent::SharingStarted { quality } => {
-                info!("📺 Screen share started: {quality}");
+                info!("Screen share started: {quality}");
                 self.push_chat_system(&t!("chat-share-started", "quality" => quality.to_string()));
                 self.main.global::<State>().set_sharing(true);
                 // Start the 1-second stream stats timer once. It stops
@@ -945,7 +945,7 @@ impl AppState {
                 }
             }
             ScreenEvent::SharingStopped => {
-                info!("📺 Screen share stopped");
+                info!("Screen share stopped");
                 self.push_chat_system(&t!("chat-share-stopped"));
                 let s = self.main.global::<State>();
                 s.set_sharing(false);
@@ -980,13 +980,13 @@ impl AppState {
                 #[allow(clippy::cast_precision_loss)] // KB for a log line
                 let frame_kb = frame_bytes as f64 / 1024.0;
                 log::debug!(
-                    "📊 [seq={seq} {frame_type} {frame_kb:.0}KB] net→decode: {net_to_screen_ms:.1}ms | \
+                    "[seq={seq} {frame_type} {frame_kb:.0}KB] net→decode: {net_to_screen_ms:.1}ms | \
         decode→app: {screen_to_app_ms:.1}ms | total: {total_ms:.1}ms | \
         buf: {buffer_depth_ms:.0}/{buffer_target_ms:.0}ms jit: {buffer_jitter_ms:.0}ms",
                 );
                 if total_ms > 25.0 {
                     warn!(
-                        "📊 SLOW FRAME seq={seq}: {total_ms:.1}ms total \
+                        "SLOW FRAME seq={seq}: {total_ms:.1}ms total \
             (net→decode: {net_to_screen_ms:.1}ms, decode→app: {screen_to_app_ms:.1}ms)"
                     );
                 }
@@ -1003,7 +1003,7 @@ impl AppState {
                     );
                     let blit_ms = blit_start.elapsed().as_secs_f32() * 1000.0;
                     if blit_ms > 5.0 {
-                        warn!("📊 Slow blit: {blit_ms:.1}ms for seq {seq}");
+                        warn!("Slow blit: {blit_ms:.1}ms for seq {seq}");
                     }
                 }
             }
@@ -1013,12 +1013,12 @@ impl AppState {
                 height,
             } => {
                 let username = self.username_of(client_id);
-                info!("📺 {username} started sharing ({width}x{height})");
+                info!("{username} started sharing ({width}x{height})");
                 self.push_chat_system(&t!("chat-peer-sharing", "name" => username.as_str()));
             }
             ScreenEvent::PeerStoppedSharing { client_id } => {
                 let username = self.username_of(client_id);
-                info!("📺 {username} stopped sharing");
+                info!("{username} stopped sharing");
                 self.push_chat_system(&t!("chat-peer-stopped-sharing", "name" => username.as_str()));
                 if let Some(viewer) = self.viewers.remove(&client_id) {
                     viewer.close();
@@ -1911,7 +1911,7 @@ impl AppState {
             .get(&client_id)
             .copied()
             .unwrap_or((1280, 720));
-        info!("📺 Watch {username} ({client_id}): opening viewer at {share_w}x{share_h}");
+        info!("Watch {username} ({client_id}): opening viewer at {share_w}x{share_h}");
         // Window creation + show() runs OUTSIDE the app borrow: on
         // macOS, ordering a window front can dispatch events
         // synchronously, and a callback re-entering the app state
@@ -1933,10 +1933,10 @@ impl AppState {
                         app.push_chat_system(
                             &t!("chat-watching", "name" => username.as_str()),
                         );
-                        info!("📺 Viewer open + subscribed to {client_id}");
+                        info!("Viewer open + subscribed to {client_id}");
                     }
                     Err(e) => {
-                        warn!("📺 Viewer open failed: {e}");
+                        warn!("Viewer open failed: {e}");
                         app.show_error(&e.to_string());
                     }
                 }

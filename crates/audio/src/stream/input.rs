@@ -238,7 +238,7 @@ mod wasapi_loopback {
                 .map_err(|e| format!("Failed to get output config for loopback: {e}"))?;
 
             info!(
-                "🔊🎤 System audio capture: {} @ {}Hz, {}ch, {:?}",
+                "System audio capture: {} @ {}Hz, {}ch, {:?}",
                 crate::device_name(&device).unwrap_or_else(|| "Unknown".into()),
                 device_config.sample_rate(),
                 device_config.channels(),
@@ -371,13 +371,13 @@ mod wasapi_loopback {
 
             stream.play()?;
             self.stream = Some(stream);
-            info!("🔊🎤 System audio capture started");
+            info!("System audio capture started");
             Ok(())
         }
 
         fn stop(&mut self) {
             self.stream.take();
-            info!("🔊🎤 System audio capture stopped");
+            info!("System audio capture stopped");
         }
 
         fn sample_rate(&self) -> u32 {
@@ -664,7 +664,7 @@ impl SystemAudioCapture {
         self.is_active.store(true, Ordering::Relaxed);
 
         info!(
-            "🔊🎤 System audio capture ready: {} @ {}Hz",
+            "System audio capture ready: {} @ {}Hz",
             device_name, device_sample_rate
         );
 
@@ -703,12 +703,12 @@ impl SystemAudioCapture {
         );
         match preferred.start() {
             Ok(()) => {
-                info!("🔊🎤 System audio backend: process loopback (own audio excluded)");
+                info!("System audio backend: process loopback (own audio excluded)");
                 let backend: Box<dyn SystemAudioBackend> = Box::new(preferred);
                 return Ok((backend, ring_consumer));
             }
             Err(e) => warn!(
-                "🔊 Process loopback unavailable ({e}) — falling back to endpoint \
+                "Process loopback unavailable ({e}) — falling back to endpoint \
                  loopback; our own playback (incl. peer voices) will be audible \
                  in the stream"
             ),
@@ -775,7 +775,7 @@ impl SystemAudioCapture {
         }
 
         self.is_active.store(false, Ordering::Relaxed);
-        info!("🔊🎤 System audio capture stopped");
+        info!("System audio capture stopped");
     }
 
     /// Try to receive an encoded system audio packet (non-blocking).
@@ -956,7 +956,7 @@ impl SystemAudioCapture {
         let interleaved_frame_size = SYSTEM_AUDIO_FRAME_SIZE * SYSTEM_AUDIO_CHANNELS;
 
         info!(
-            "🔊🎤 System audio worker started (stereo, device {}Hz, resample={})",
+            "System audio worker started (stereo, device {}Hz, resample={})",
             device_sample_rate, needs_resample
         );
 
@@ -1101,14 +1101,14 @@ impl SystemAudioCapture {
                 if peak < SILENCE_THRESHOLD {
                     silent_frames = silent_frames.saturating_add(1);
                     if silent_frames == SILENCE_HANGOVER_FRAMES {
-                        info!("🔊🎤 System audio gate closed (silence)");
+                        info!("System audio gate closed (silence)");
                     }
                     if silent_frames >= SILENCE_HANGOVER_FRAMES {
                         continue; // hangover elapsed — skip encode + send
                     }
                 } else {
                     if silent_frames >= SILENCE_HANGOVER_FRAMES {
-                        info!("🔊🎤 System audio gate opened (audio resumed)");
+                        info!("System audio gate opened (audio resumed)");
                     }
                     silent_frames = 0;
                 }
@@ -1147,7 +1147,7 @@ impl SystemAudioCapture {
             }
         }
 
-        info!("🔊🎤 System audio worker stopped");
+        info!("System audio worker stopped");
     }
 }
 

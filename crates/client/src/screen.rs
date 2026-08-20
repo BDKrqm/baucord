@@ -526,7 +526,7 @@ fn run_screen_loop(
 
             let cap_ms = cap_start.elapsed().as_secs_f32() * 1000.0;
             log::debug!(
-                "📊 ENCODE seq={} {cap_ms:.1}ms (budget {:.1}ms)",
+                "ENCODE seq={} {cap_ms:.0}ms (budget {:.1}ms)",
                 state.seq,
                 effective_frame_interval(state).as_secs_f32() * 1000.0
             );
@@ -534,7 +534,7 @@ fn run_screen_loop(
     }
 
     shared.is_sharing.store(false, Ordering::Relaxed);
-    info!("📺 Screen thread stopped");
+    info!("Screen thread stopped");
 }
 
 /// Pull packets from each peer's jitter buffer and decode them.
@@ -575,7 +575,7 @@ fn drain_and_decode(
                 stream.width = packet.width;
                 stream.height = packet.height;
                 log::debug!(
-                    "📺 Keyframe #{seq} from peer {client_id}: {frame_bytes} bytes \
+                    "Keyframe #{seq} from peer {client_id}: {frame_bytes} bytes \
                      (buffer depth: {:.0}ms)",
                     stream.jitter_buffer.depth_ms()
                 );
@@ -634,7 +634,7 @@ fn drain_and_decode(
         // when it's been watching undecodable deltas while unprimed.
         // Rate-limited internally, so relaying every signal is safe.
         if stream.jitter_buffer.take_keyframe_request() {
-            info!("📺 Requesting keyframe from peer {client_id}");
+            info!("Requesting keyframe from peer {client_id}");
             let _ = network_tx.try_send(NetworkControl::RequestKeyframe {
                 target_id: client_id,
             });
@@ -681,22 +681,22 @@ fn handle_control(
                 }
             };
 
-            info!("📺 Screen share started: {quality}, monitor {monitor_index}");
+            info!("Screen share started: {quality}, monitor {monitor_index}");
 
             // Start system audio capture (best-effort — non-fatal if unsupported)
             let system_audio = match SystemAudioCapture::new(Arc::new(AudioStats::new())) {
                 Ok(mut cap) => match cap.start() {
                     Ok(()) => {
-                        info!("🔊🎤 System audio capture started for screen share");
+                        info!("System audio capture started for screen share");
                         Some(cap)
                     }
                     Err(e) => {
-                        warn!("🔊 System audio capture failed to start: {e}");
+                        warn!("System audio capture failed to start: {e}");
                         None
                     }
                 },
                 Err(e) => {
-                    warn!("🔊 System audio capture not available: {e}");
+                    warn!("System audio capture not available: {e}");
                     None
                 }
             };
@@ -747,7 +747,7 @@ fn handle_control(
                 *shared.current_quality.lock().unwrap() = None;
                 event_tx.send(ScreenEvent::SharingStopped).ok();
                 wake();
-                info!("📺 Screen share stopped");
+                info!("Screen share stopped");
             }
         }
 
@@ -772,7 +772,7 @@ fn handle_control(
             if !st.peer_streams.contains_key(&client_id) {
                 match create_decoder() {
                     Ok(decoder) => {
-                        info!("📺 Created decoder for peer {client_id} ({width}x{height})");
+                        info!("Created decoder for peer {client_id} ({width}x{height})");
                         // Assume 30fps initially; will be refined when
                         // Quality is known. The buffer adapts well even
                         // if the FPS guess is off.
@@ -791,7 +791,7 @@ fn handle_control(
                         // Do NOT panic here — this used to be an .expect
                         // that killed the entire screen thread (and with
                         // it, our own share) on a single failed init.
-                        warn!("📺 Decoder init failed for peer {client_id}: {e}");
+                        warn!("Decoder init failed for peer {client_id}: {e}");
                         st.decoder_failed.insert(client_id);
                         event_tx
                             .send(ScreenEvent::Error(format!(
@@ -874,22 +874,22 @@ fn handle_control(
                 // Stop the old capture (drops the dead WASAPI loopback stream)
                 if let Some(mut old) = state.system_audio.take() {
                     old.stop();
-                    info!("🔊🎤 System audio capture stopped for device rebuild");
+                    info!("System audio capture stopped for device rebuild");
                 }
 
                 // Rebuild — best-effort, non-fatal
                 match SystemAudioCapture::new(Arc::new(AudioStats::new())) {
                     Ok(mut cap) => match cap.start() {
                         Ok(()) => {
-                            info!("🔊🎤 System audio capture restarted after device change");
+                            info!("System audio capture restarted after device change");
                             state.system_audio = Some(cap);
                         }
                         Err(e) => {
-                            warn!("🔊 System audio capture restart failed: {e}");
+                            warn!("System audio capture restart failed: {e}");
                         }
                     },
                     Err(e) => {
-                        warn!("🔊 System audio capture unavailable after device change: {e}");
+                        warn!("System audio capture unavailable after device change: {e}");
                     }
                 }
             }
@@ -897,7 +897,7 @@ fn handle_control(
 
         ScreenControl::ForceKeyframe => {
             if let Some(state) = &mut st.capture {
-                info!("📺 Viewer requested keyframe — forcing IDR");
+                info!("Viewer requested keyframe — forcing IDR");
                 state.encoder.force_keyframe();
 
                 let now = Instant::now();
@@ -914,7 +914,7 @@ fn handle_control(
                     state.last_distress = Some(now);
                     state.kf_request_times.clear();
                     info!(
-                        "📺 Viewer repeatedly requesting keyframes — reducing capture to {:.0}% fps",
+                        "Viewer repeatedly requesting keyframes — reducing capture to {:.0}% fps",
                         PACE_SCALES[state.pace_idx] * 100.0
                     );
                     shared.fps_scale_pct.store(
@@ -997,7 +997,7 @@ fn capture_and_encode(
         state.seq = state.seq.wrapping_add(1);
 
         if encoded.is_keyframe {
-            log::debug!("📺 Sent keyframe #{seq}: {} bytes", encoded.data.len());
+            log::debug!("Sent keyframe #{seq}: {} bytes", encoded.data.len());
         }
 
         shared
@@ -1012,7 +1012,7 @@ fn capture_and_encode(
         // to the oversized frame, so the retried IDR comes out smaller.)
         if encoded.data.len() > protocol::MAX_VIDEO_FRAME_BYTES {
             warn!(
-                "📺 Encoded frame seq={seq} too large to send ({} bytes, max {}) — dropping and forcing a fresh keyframe",
+                "Encoded frame seq={seq} too large to send ({} bytes, max {}) — dropping and forcing a fresh keyframe",
                 encoded.data.len(),
                 protocol::MAX_VIDEO_FRAME_BYTES,
             );
@@ -1053,7 +1053,7 @@ fn decode_incoming_system_audio(
     if stream.stream_audio.is_none() {
         match stream_decoder::spawn(None, 1.0, Some(voice_energy.clone())) {
             Ok(decoder) => {
-                info!("🔊🎬 Started stream audio decoder for peer {client_id}");
+                info!("Started stream audio decoder for peer {client_id}");
                 stream.stream_audio = Some(decoder);
             }
             Err(e) => {
@@ -1075,7 +1075,7 @@ fn decode_incoming_system_audio(
 fn create_encoder(quality: Quality) -> Result<Box<dyn VideoEncoder + Send>, CodecError> {
     match FfmpegEncoder::new(quality) {
         Ok(enc) => {
-            info!("📺 Using FFmpeg encoder: {}", enc.encoder_name());
+            info!("Using FFmpeg encoder: {}", enc.encoder_name());
             Ok(Box::new(enc))
         }
         Err(e) => {

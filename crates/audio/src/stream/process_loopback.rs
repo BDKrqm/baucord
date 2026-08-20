@@ -295,7 +295,7 @@ fn run_pump(
     let mut packet_buf: Vec<u8> = Vec::new();
     let mut consecutive_errors: u32 = 0;
 
-    info!("🔊🎤 System audio process-loopback pump started (48 kHz stereo f32)");
+    info!("System audio process-loopback pump started (48 kHz stereo f32)");
 
     while !should_stop.load(Ordering::Relaxed) {
         match event.wait_for_event(EVENT_WAIT_MS) {
@@ -369,7 +369,7 @@ fn run_pump(
         }
     }
 
-    info!("🔊🎤 System audio process-loopback pump stopped");
+    info!("System audio process-loopback pump stopped");
 }
 
 /// Push one packet of interleaved stereo f32 into the ring, returning

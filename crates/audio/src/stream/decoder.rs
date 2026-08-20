@@ -71,7 +71,7 @@ impl StreamDecoderWorker {
     }
 
     fn run(&mut self) {
-        info!("🔊🎬 Stream decoder thread started");
+        info!("Stream decoder thread started");
 
         while let Ok(packet) = self.rx.recv() {
             if self.should_stop.load(Ordering::Relaxed) {
@@ -80,7 +80,7 @@ impl StreamDecoderWorker {
             self.process_packet(packet);
         }
 
-        info!("🔊🎬 Stream decoder thread stopped");
+        info!("Stream decoder thread stopped");
     }
 
     fn process_packet(&mut self, packet: StreamAudioPacket) {
@@ -207,7 +207,7 @@ impl Drop for StreamDecoder {
         if let Some(thread) = self.decoder_thread.take() {
             let _ = thread.join();
         }
-        info!("🔊🎬 Stream decoder dropped");
+        info!("Stream decoder dropped");
     }
 }
 

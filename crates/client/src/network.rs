@@ -937,7 +937,7 @@ impl NetworkClient {
                 }
             }
             None => warn!(
-                "📺 Encoded frame seq={seq} not packable ({} bytes, max {}), dropping",
+                "Encoded frame seq={seq} not packable ({} bytes, max {}), dropping",
                 data.len(),
                 protocol::MAX_VIDEO_FRAME_BYTES,
             ),
@@ -1399,7 +1399,7 @@ fn run_network_loop(
                             data,
                         }) {
                             log::warn!(
-                                "📺 Screen channel full, dropped frame seq={seq} keyframe={is_keyframe} - {e}"
+                                "Screen channel full, dropped frame seq={seq} keyframe={is_keyframe} - {e}"
                             );
                         }
                     }
@@ -1446,7 +1446,7 @@ fn run_network_loop(
                     // Keyframe request from a viewer → screen thread
                     // (hot path, bypass app)
                     NetworkMessage::KeyframeRequested { viewer_id } => {
-                        log::info!("📺 Keyframe requested by viewer {viewer_id}");
+                        log::info!("Keyframe requested by viewer {viewer_id}");
                         let _ = screen_tx.try_send(ScreenControl::ForceKeyframe);
                     }
 

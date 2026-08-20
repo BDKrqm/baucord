@@ -158,8 +158,8 @@ impl ServerEntry {
         Self {
             name: "baucord".to_string(),
             address: "216.238.121.18:5000".to_string(),
-            token_url: Some("http://token.baucord.com/token".to_string()),
-            token_password: None,
+            token_url: Some("https://auth.baucord.com/token".to_string()),
+            token_password: Some("conos".to_string()),
             channel_passwords: HashMap::new(),
         }
     }
@@ -676,7 +676,7 @@ mod tests {
             "servers": [{
                 "name": "baucord",
                 "address": "216.238.121.18:5000",
-                "token_url": "http://token.baucord.com/token",
+                "token_url": "https://auth.baucord.com/token",
                 "token_password": ""
             }]
         }"#,

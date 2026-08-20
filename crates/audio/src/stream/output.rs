@@ -197,7 +197,7 @@ impl StreamAudioOutput {
 
         stream.play()?;
         self.stream = Some(stream);
-        info!("🔊🎬 Stream audio output started");
+        info!("Stream audio output started");
         Ok(())
     }
 
@@ -387,7 +387,7 @@ impl StreamAudioOutput {
             let mut next_tick = Instant::now();
 
             info!(
-                "🔊🎬 Stream audio worker started (device {}Hz, resample={}, voice_cancel={})",
+                "Stream audio worker started (device {}Hz, resample={}, voice_cancel={})",
                 device_sample_rate,
                 needs_resample,
                 voice_energy.is_some(),

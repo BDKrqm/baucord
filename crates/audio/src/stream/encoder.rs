@@ -87,7 +87,7 @@ impl StreamEncoderWorker {
     }
 
     fn run(&mut self) {
-        info!("🔊🎤 Stream encoder thread started");
+        info!("Stream encoder thread started");
 
         while let Ok(mut frame) = self.rx.recv() {
             // Muted: drain but don't encode.
@@ -107,7 +107,7 @@ impl StreamEncoderWorker {
             self.encode_frame(&frame);
         }
 
-        info!("🔊🎤 Stream encoder thread stopped");
+        info!("Stream encoder thread stopped");
     }
 
     /// Apply volume scaling in-place before encoding.
