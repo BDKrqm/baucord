@@ -1,0 +1,74 @@
+name: Build FFmpeg prebuilt (Windows)
+
+# Builds the pinned FFmpeg with vcpkg and uploads the resulting
+# x64-windows-static-md tree to R2 as a zip. "Build and Release" then just
+# downloads that zip (seconds) instead of spending ~45-50 min in vcpkg on
+# every run.
+#
+# Run this manually (Actions -> Build FFmpeg prebuilt (Windows) -> Run
+# workflow) whenever VCPKG_COMMIT, the feature set, or the triplet changes.
+# Give the zip a NEW name (bump the -vN suffix), then point the "Download
+# prebuilt FFmpeg (Windows)" step in build-and-release.yml at it. Never
+# overwrite an object that a shipped workflow revision still references --
+# old commits must stay buildable.
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_name:
+        description: "Object name to upload to the baucord R2 bucket"
+        required: true
+        default: ffmpeg-7.1.2-x264-gpl-nvcodec-amf-x64-windows-static-md-v1.zip
+
+env:
+  # FFmpeg comes from vcpkg PINNED to the last ffmpeg 7.1.2 port. vcpkg
+  # HEAD ships FFmpeg 9.x, which ffmpeg-next 8.1 cannot build against
+  # (FFmpeg 8 deleted the deprecated AVCodec field API the crate's
+  # fallback path uses, and its version detection is unreliable under
+  # vcpkg). Do NOT bump this without re-testing the full Windows build
+  # AND a real stream -- encoder options are validated at runtime, not
+  # compile time.
+  VCPKG_COMMIT: 34823ada10080ddca99b60e85f80f55e18a44eea # ffmpeg 7.1.2
+
+jobs:
+  build-ffmpeg:
+    runs-on: windows-latest
+    steps:
+      # Shallow-fetch exactly the pinned commit instead of cloning HEAD
+      # (HEAD's ffmpeg port is 9.x -- see VCPKG_COMMIT above).
+      - name: Clone and bootstrap vcpkg (pinned)
+        shell: pwsh
+        run: |
+          git init C:\vcpkg
+          git -C C:\vcpkg remote add origin https://github.com/microsoft/vcpkg.git
+          git -C C:\vcpkg fetch --depth 1 origin $env:VCPKG_COMMIT
+          git -C C:\vcpkg checkout FETCH_HEAD
+          C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+
+      # qsv is deliberately absent: at the pinned port it pulls the legacy
+      # mfx dispatch (the vpl switch came later) and is untested with our
+      # static-md link; the runtime encoder probe handles its absence.
+      # Re-add only with a full retest.
+      - name: Build FFmpeg via vcpkg
+        shell: pwsh
+        run: C:\vcpkg\vcpkg.exe install ffmpeg[x264,gpl,nvcodec,amf]:x64-windows-static-md --recurse
+
+      - name: Package installed tree
+        shell: pwsh
+        run: |
+          # Drop the debug tree: ffmpeg-sys-next only ever links
+          # $FFMPEG_DIR/lib (the release libs) and CI builds the deploy
+          # profile, so debug/ is dead weight -- roughly halves the zip.
+          Remove-Item -Recurse -Force C:\vcpkg\installed\x64-windows-static-md\debug
+          # 7z keeps x64-windows-static-md as the archive's root folder,
+          # which is the layout the download step expects when it extracts
+          # into C:\ffmpeg-prebuilt.
+          7z a ffmpeg-prebuilt.zip C:\vcpkg\installed\x64-windows-static-md
+
+      - name: Upload to R2
+        shell: pwsh
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          aws s3 cp ffmpeg-prebuilt.zip "s3://baucord/${{ inputs.zip_name }}" --endpoint-url https://6bcc35de83e46a771896026baf11b4ac.r2.cloudflarestorage.com
