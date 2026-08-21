@@ -150,18 +150,22 @@ cat > /etc/sysctl.d/99-baucord-udp.conf <<EOF
 # Baucord — UDP socket buffer tuning for video relay
 net.core.wmem_max = 67108864
 net.core.rmem_max = 8388608
+net.core.rmem_default = 4194304
+net.core.wmem_default = 4194304
 EOF
 
 systemctl disable --now docker 2>/dev/null || true
 systemctl disable --now containerd 2>/dev/null || true
 
-# ── Disable cloud-init network hotplug ───────────────────────────────
+# Disable cloud-init network hotplug 
 mkdir -p /etc/cloud/cloud.cfg.d
 cat > /etc/cloud/cloud.cfg.d/99-disable-hotplug.cfg <<EOF
 updates:
   network:
     when: []
 EOF
+
+sudo sysctl --system
 ```
 
 ## Known Limitations

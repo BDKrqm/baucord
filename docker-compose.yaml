@@ -6,6 +6,10 @@ services:
     depends_on:
       etcd:
         condition: service_healthy
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     command: >
       sh -c "rm -f /usr/local/apisix/logs/*.sock && /docker-entrypoint.sh docker-start"
     links:
