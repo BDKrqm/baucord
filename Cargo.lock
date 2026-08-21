@@ -340,7 +340,7 @@ checksum = "fb5dfbc6d8d2675589ccbe4d0fd61df2419075625f8c1a62325e718e2b0049f9"
 
 [[package]]
 name = "app-core"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "image",
  "log",
@@ -641,7 +641,7 @@ dependencies = [
 
 [[package]]
 name = "audio"
-version = "0.4.5"
+version = "0.5.1"
 dependencies = [
  "audioadapter-buffers",
  "cpal",
@@ -1763,7 +1763,7 @@ dependencies = [
 
 [[package]]
 name = "desktop"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "app-core",
  "arboard",
