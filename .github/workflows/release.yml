@@ -27,17 +27,18 @@ jobs:
     strategy:
       matrix:
         include:
-          # ubuntu-24.04, pinned explicitly (not -latest, which silently
-          # bumps floors on every runner-image upgrade). 24.04 is the
-          # OLDEST runner that can build this tree: libspa/pipewire-rs
-          # generates its bindings from the system PipeWire headers, and
-          # 22.04's PipeWire 0.3.48 predates spa_meta_first /
-          # spa_meta_region_is_valid — the build fails there. Cost: the
-          # release binary inherits glibc 2.39 as its floor (won't run
-          # on Ubuntu 22.04 / Debian 12 era systems). If old-distro
-          # support ever matters, the fix is a container build with
-          # backported PipeWire headers, not an older runner.
+          # Linux builds run INSIDE an ubuntu:22.04 container (see the
+          # job-level `container:`) to decouple two conflicting floors:
+          # release binaries inherit the build environment's glibc as a
+          # hard runtime floor (22.04 = glibc 2.35, covering Debian 12 /
+          # Mint 21 era distros; building on 24.04 produced binaries
+          # demanding GLIBC_2.39 that failed to even load elsewhere) —
+          # but libspa/pipewire-rs needs PipeWire headers NEWER than
+          # 22.04 ships (0.3.48 predates spa_meta_first), so PipeWire
+          # 1.0 is built from source inside the container, headers-deep
+          # only. The host runner version is irrelevant to the binary.
           - os: ubuntu-24.04
+            container: ubuntu:22.04
             target: x86_64-unknown-linux-gnu
             suffix: linux-x64
             # x86-64-v2: SSE4.2, SSSE3, POPCNT — supported since Nehalem (2008).
@@ -55,6 +56,7 @@ jobs:
             suffix: macos-intel
             rustflags: "-C target-cpu=x86-64-v2"
     runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
@@ -74,9 +76,16 @@ jobs:
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
+        # No sudo: the ubuntu:22.04 container runs as root. The bare
+        # image also lacks the toolchain the VM images preinstall, hence
+        # build-essential/curl/git/etc. libpipewire-0.3-dev is absent on
+        # purpose — 22.04's is the too-old one; headers come from the
+        # source build below.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          apt-get update
+          apt-get install -y \
+            build-essential curl git ca-certificates zip binutils \
+            meson ninja-build \
             pkg-config cmake nasm libclang-dev \
             libopus-dev libasound2-dev \
             libx11-dev libxext-dev libxinerama-dev libxcursor-dev \
@@ -84,7 +93,34 @@ jobs:
             libpango1.0-dev libcairo2-dev \
             libgbm-dev \
             libxcb1-dev libxrandr-dev libdbus-1-dev \
-            libpipewire-0.3-dev libwayland-dev libegl-dev
+            libwayland-dev libegl-dev
+
+      - name: Cache PipeWire headers (Linux)
+        if: runner.os == 'Linux'
+        id: pipewire-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/pw
+          key: pipewire-1.0.7-ubuntu2204-container-v1
+
+      - name: Build PipeWire 1.0.7 headers + client lib (Linux)
+        if: runner.os == 'Linux' && steps.pipewire-cache.outputs.cache-hit != 'true'
+        # Only for BUILDING: libspa-sys binds against these headers (its
+        # static-inline shims are compiled into the binary), and the
+        # linker uses this libpipewire-0.3.so. At RUNTIME the binary
+        # loads the user's distro libpipewire-0.3.so.0 — same soname
+        # across 0.3.x and 1.x. Feature-heavy parts auto-disable since
+        # their deps aren't installed.
+        run: |
+          set -euo pipefail
+          cd /tmp
+          curl -LO https://gitlab.freedesktop.org/pipewire/pipewire/-/archive/1.0.7/pipewire-1.0.7.tar.gz
+          tar xf pipewire-1.0.7.tar.gz
+          cd pipewire-1.0.7
+          meson setup build --prefix="$HOME/pw" -Dbuildtype=release \
+            -Dsession-managers=[] -Dexamples=disabled -Dtests=disabled -Dman=disabled
+          meson compile -C build
+          meson install -C build
 
       - name: Cache static FFmpeg (Linux)
         if: runner.os == 'Linux'
@@ -92,7 +128,11 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/ffmpeg-static
-          key: ffmpeg-static-7.1.1-x264-${{ runner.os }}-${{ runner.arch }}-v1
+          # -container suffix: the previous cache was compiled against
+          # the 24.04 VM's glibc 2.39 headers — its objects EMBED
+          # 2.38+ versioned symbol refs and would re-poison the
+          # container build if restored.
+          key: ffmpeg-static-7.1.1-x264-${{ runner.os }}-${{ runner.arch }}-ubuntu2204-container-v2
 
       - name: Build static FFmpeg 7.1.1 + x264 (Linux)
         if: runner.os == 'Linux' && steps.ffmpeg-static-linux-cache.outputs.cache-hit != 'true'
@@ -123,10 +163,10 @@ jobs:
           make -j"$(nproc)"
           make install
 
-      - name: Use static FFmpeg (Linux)
+      - name: Use static FFmpeg + built PipeWire (Linux)
         if: runner.os == 'Linux'
         run: |
-          echo "PKG_CONFIG_PATH=$HOME/ffmpeg-static/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$HOME/ffmpeg-static/lib/pkgconfig:$HOME/pw/lib/x86_64-linux-gnu/pkgconfig:$HOME/pw/lib/pkgconfig" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_ALL_STATIC=1" >> "$GITHUB_ENV"
 
       - name: Install system dependencies (macOS)
@@ -234,7 +274,7 @@ jobs:
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
         run: cargo build --profile deploy --target ${{ matrix.target }} --features tray
 
-      - name: Verify FFmpeg statically linked (Linux)
+      - name: Verify FFmpeg statically linked + glibc floor (Linux)
         if: runner.os == 'Linux'
         run: |
           BIN="target/${{ matrix.target }}/deploy/baucord"
@@ -242,6 +282,15 @@ jobs:
           ldd "$BIN"
           if ldd "$BIN" | grep -E "libav|libsw|libpostproc|libx264"; then
             echo "::error::baucord still links FFmpeg/x264 shared objects — the static build was not picked up"
+            exit 1
+          fi
+          # Release binaries must load on glibc 2.35 (Ubuntu 22.04 /
+          # Debian 12 era). This caught us once: a 24.04-built binary
+          # demanded GLIBC_2.39 and refused to even start elsewhere.
+          MAX=$(objdump -T "$BIN" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+          echo "highest glibc symbol version required: $MAX"
+          if [ "$(printf '%s\n' "$MAX" GLIBC_2.35 | sort -V | tail -1)" != "GLIBC_2.35" ]; then
+            echo "::error::binary requires $MAX (> 2.35) — something escaped the ubuntu:22.04 container"
             exit 1
           fi
 
