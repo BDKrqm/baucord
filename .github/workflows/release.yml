@@ -59,21 +59,6 @@ jobs:
     container: ${{ matrix.container }}
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - name: Cache Rust
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-          # Release runs are on tag refs; caches saved there can never be
-          # restored by other refs, so saving is pure wasted time/quota.
-          # Only the default-branch (push) runs should save.
-          save-if: ${{ github.event_name != 'release' }}
-
-      # ── System dependencies ─────────────────────────────────────────
-
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         # No sudo: the ubuntu:22.04 container runs as root. The bare
@@ -94,6 +79,21 @@ jobs:
             libgbm-dev \
             libxcb1-dev libxrandr-dev libdbus-1-dev \
             libwayland-dev libegl-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+          # Release runs are on tag refs; caches saved there can never be
+          # restored by other refs, so saving is pure wasted time/quota.
+          # Only the default-branch (push) runs should save.
+          save-if: ${{ github.event_name != 'release' }}
+
+      # ── System dependencies ─────────────────────────────────────────
 
       - name: Cache PipeWire headers (Linux)
         if: runner.os == 'Linux'
