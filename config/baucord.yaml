@@ -5,7 +5,7 @@ server:
   public_address: "216.238.121.18:5000"
   greeting_message: Welcome to the server!
 network:
-  max_clients: 64
+  max_clients: 256
   bytes_per_tick: 4194304
 limits:
   max_sharers: 5
@@ -19,7 +19,9 @@ logging:
   stats_interval_secs: 3600
 authentication:
   secure: true
-  private_key_file: netcode.key
+  # Mounted from ./data/baucord on the host (docker-compose.yml) so the key
+  # survives container recreation. Generated on first secure start.
+  private_key_file: /app/data/netcode.key
   issuer:
     bind: "0.0.0.0:5001"
     password: conos

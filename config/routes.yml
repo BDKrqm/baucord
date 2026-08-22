@@ -5,40 +5,9 @@ routes:
       type: roundrobin
       nodes:
         "baucord:5001": 1
-
-stream_routes:
-  - id: 1
-    server_port: 5000
-    plugins:
-      prometheus: {}
-    upstream:
-      nodes:
-        "baucord:5000": 1
-      type: roundrobin
-      scheme: udp
-  - id: 2
-    server_port: 5000
-    plugins:
-      prometheus: {}
-    upstream:
-      nodes:
-        "baucord:5000": 1
-      type: roundrobin
-      scheme: tcp
-      checks:
-        active:
-          type: tcp
-          interval: 5
-          timeout: 3
-          concurrency: 10
-          healthy:
-            successes: 2
-            interval: 1
-          unhealthy:
-            failures: 2
-            interval: 1
-            tcp_failures: 2
-            timeouts: 3
+# Media UDP (5000) no longer goes through APISIX — it is published directly
+# from the baucord service in docker-compose.yml. The old stream_routes (ids
+# 1 and 2) are removed from etcd by scripts/setup.sh; certer only upserts.
 global_rules:
   - id: "1"
     plugins:

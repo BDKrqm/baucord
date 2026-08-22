@@ -135,38 +135,129 @@ Client and server must be from the same release: the protocol id is
 bumped on every breaking wire change, and older peers are refused at
 the handshake instead of misbehaving mid-call.
 
-### server setup
+## Deploying a server
+
+The production layout is Docker Compose on a Linux host:
 
 ```
-# ── UDP socket buffer tuning ─────────────────────────────────────────
-#
-# Linux defaults are ~208 KB for send and ~1 MB for receive.
-# Baucord relays video keyframes in bursts (~177 KB per keyframe per
-# viewer), so we need larger buffers to avoid silent packet drops
-# that cause netcode timeouts.
-#
-# 8 MB send/recv gives headroom for multiple concurrent streams.
-cat > /etc/sysctl.d/99-baucord-udp.conf <<EOF
-# Baucord — UDP socket buffer tuning for video relay
-net.core.wmem_max = 67108864
-net.core.rmem_max = 8388608
-net.core.rmem_default = 4194304
-net.core.wmem_default = 4194304
-EOF
-
-systemctl disable --now docker 2>/dev/null || true
-systemctl disable --now containerd 2>/dev/null || true
-
-# Disable cloud-init network hotplug 
-mkdir -p /etc/cloud/cloud.cfg.d
-cat > /etc/cloud/cloud.cfg.d/99-disable-hotplug.cfg <<EOF
-updates:
-  network:
-    when: []
-EOF
-
-sudo sysctl --system
+client ──udp/5000──────────────────────────────▶ baucord   (media relay, published directly)
+client ──https/443──▶ apisix ──http──▶ baucord:5001       (token issuer, auth.baucord.com)
+                        └─ etcd (apisix config)   certer (Let's Encrypt + route provisioning)
 ```
+
+Media UDP is published straight from the `baucord` container. It does
+**not** go through the APISIX stream proxy: that added two userspace
+copies per packet and hid real client addresses from the relay. APISIX
+only fronts HTTP.
+
+The `baucord` image runs as uid `10000`; the netcode signing key is kept
+in `./data/baucord` on the host so `docker compose up` recreates don't
+invalidate tokens clients already hold.
+
+### Layout
+
+```
+docker-compose.yml
+config/
+  apisix.yml        # APISIX config (HTTP only, proxy_mode: http)
+  routes.yml        # routes pushed by certer via the Admin API
+  baucord.yaml      # mounted as /app/server.yaml
+  debug.yml
+  certer.Dockerfile
+scripts/
+  setup.sh          # bootstrap / re-apply host + stack
+  monitor-net.sh    # UDP / NIC drop logger
+data/baucord/       # created by setup.sh; holds netcode.key (keep out of git)
+certs/              # Let's Encrypt state (keep out of git)
+```
+
+### Bootstrapping a host
+
+1. Point DNS for the issuer hostname (`auth.baucord.com` in
+   `docker-compose.yml` / `config/routes.yml`) at the host, and open
+   `udp/5000`, `tcp/80`, `tcp/443` in the cloud firewall.
+2. Set `server.public_address` in `config/baucord.yaml` to the host's
+   public IP and port.
+3. Clone this directory onto the host and run:
+
+   ```bash
+   sudo scripts/setup.sh
+   ```
+
+   It is idempotent — re-run it after pulling config changes. It:
+
+   - checks for Docker and the compose plugin and installs them from the
+     distro repos only if missing
+   - creates `./data/baucord` owned by uid 10000 (and migrates an
+     existing `netcode.key` out of a running container if there is one)
+   - tunes the host for UDP fan-out: socket buffer caps and kernel
+     ingress backlog (`/etc/sysctl.d/99-baucord-udp.conf`), conntrack
+     sizing for Docker's port publishing, a boot-time service for NIC
+     ring buffers / RPS, and disables cloud-init network hotplug
+   - runs `docker compose up -d`
+   - deletes the legacy APISIX stream routes (certer only upserts)
+
+   The settings block at the top of the script (`MEDIA_PORT`,
+   `MEDIA_VIA_DOCKER_NAT`, `BAUCORD_UID`, interface auto-detection) is
+   the only thing you should need to touch.
+
+4. Check it came up:
+
+   ```bash
+   docker compose ps
+   docker compose logs -f baucord
+   ss -uln | grep :5000
+   ```
+
+### Monitoring while it runs
+
+A relay is a UDP fan-out — a ~177 KB keyframe goes to every viewer at
+once — and the kernel drops those bursts silently; you see netcode
+timeouts, not errors. Run the monitor during load (a 200-person test,
+or just always):
+
+```bash
+sudo nohup scripts/monitor-net.sh 10 >/dev/null 2>&1 &   # every 10s
+tail -f /var/log/baucord-net.log
+```
+
+UDP counters are per network namespace, so the script samples the host
+*and* the `baucord` container (`CONTAINERS="baucord apisix"` to add
+more, `CONTAINERS=""` for host only) and writes one CSV row per
+namespace per interval. Every `*_err` / `*_drop` column is the delta for
+that interval, and `note` names the layer that dropped:
+
+| note            | meaning                                                      |
+| --------------- | ------------------------------------------------------------ |
+| `RCVBUF`        | receive buffer overflow — app not draining, or `rmem` small  |
+| `SNDBUF`        | send buffer overflow — keyframe burst > `wmem`, or link full |
+| `SOFTNET`       | kernel backlog overflow — `netdev_max_backlog` / CPU bound   |
+| `NIC`           | NIC ring or cloud pps/bandwidth allowance — see `ethtool -S` |
+| `VETH`          | drops on the Docker bridge / veth                            |
+| `COUNTER_RESET` | the container restarted                                      |
+
+`max_txq_bytes` creeping toward `wmem_max` during keyframes means you're
+close to `SNDBUF` drops — pace keyframes rather than raising the cap.
+Sustained `softirq_pct` above ~30% means packet processing is CPU bound.
+`ct_count` approaching `ct_max` means conntrack is about to start
+dropping new clients.
+
+If you leave it running long-term, add a logrotate rule:
+
+```
+# /etc/logrotate.d/baucord-net
+/var/log/baucord-net.log { daily rotate 7 compress missingok copytruncate }
+```
+
+### Moving to host networking (optional)
+
+For the last bit of headroom, run `baucord` with `network_mode: host`
+instead of `ports:`. That removes Docker's DNAT and conntrack from the
+media path. It also changes how APISIX reaches the issuer (`baucord:5001`
+becomes the host gateway), so update `config/routes.yml` accordingly,
+then set `MEDIA_VIA_DOCKER_NAT="false"` in `scripts/setup.sh` and re-run
+it — that enables a `notrack` rule for the media port, which is only
+safe without DNAT.
 
 ## Known Limitations
 
