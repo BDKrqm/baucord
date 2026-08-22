@@ -57,6 +57,13 @@ jobs:
             rustflags: "-C target-cpu=x86-64-v2"
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
+    defaults:
+      run:
+        # Containers default `run:` to plain sh (dash) — VM runners use
+        # bash. Restore bash everywhere so bashisms (pipefail etc.)
+        # behave identically in and out of the container. Steps that
+        # declare `shell: pwsh` explicitly are unaffected.
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - name: Install system dependencies (Linux)
