@@ -341,6 +341,11 @@ jobs:
       - name: Package (Windows)
         if: runner.os == 'Windows' && github.event_name == 'release'
         # Same as Unix: the binary is already named baucord.exe.
+        # Explicit pwsh: copy/mkdir/Compress-Archive are PowerShell-isms
+        # that previously rode Windows' implicit pwsh default — the
+        # job-level bash default (needed for the Linux container) would
+        # otherwise route them into Git-Bash ("copy: command not found").
+        shell: pwsh
         run: |
           mkdir staging
           copy target\${{ matrix.target }}\deploy\baucord.exe staging\baucord.exe
