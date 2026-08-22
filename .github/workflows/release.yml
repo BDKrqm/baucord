@@ -27,12 +27,17 @@ jobs:
     strategy:
       matrix:
         include:
-          # ubuntu-22.04, not -latest: binaries inherit the BUILD
-          # machine's glibc floor (22.04 = glibc 2.35), so building on
-          # the oldest supported LTS keeps releases runnable on older
-          # distros. -latest also silently bumps the floor on every
-          # runner-image upgrade.
-          - os: ubuntu-22.04
+          # ubuntu-24.04, pinned explicitly (not -latest, which silently
+          # bumps floors on every runner-image upgrade). 24.04 is the
+          # OLDEST runner that can build this tree: libspa/pipewire-rs
+          # generates its bindings from the system PipeWire headers, and
+          # 22.04's PipeWire 0.3.48 predates spa_meta_first /
+          # spa_meta_region_is_valid — the build fails there. Cost: the
+          # release binary inherits glibc 2.39 as its floor (won't run
+          # on Ubuntu 22.04 / Debian 12 era systems). If old-distro
+          # support ever matters, the fix is a container build with
+          # backported PipeWire headers, not an older runner.
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             suffix: linux-x64
             # x86-64-v2: SSE4.2, SSSE3, POPCNT — supported since Nehalem (2008).
