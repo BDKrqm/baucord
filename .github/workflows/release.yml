@@ -85,6 +85,7 @@ jobs:
             libpango1.0-dev libcairo2-dev \
             libgbm-dev \
             libxcb1-dev libxrandr-dev libdbus-1-dev \
+            libudev-dev \
             libwayland-dev libegl-dev
 
       - name: Install Rust
