@@ -10,12 +10,29 @@ on:
   push:
     branches:
       - "chunk" # ← must be the repo's default branch for releases to see the caches
+env:
+  # FFmpeg comes from vcpkg PINNED to the last ffmpeg 7.1.2 port. vcpkg
+  # HEAD ships FFmpeg 9.x, which ffmpeg-next 8.1 cannot build against
+  # (FFmpeg 8 deleted the deprecated AVCodec field API the crate's
+  # fallback path uses, and its version detection is unreliable under
+  # vcpkg). Do NOT bump this without re-testing the full Windows build
+  # AND a real stream — encoder options are validated at runtime, not
+  # compile time. macOS builds a pinned STATIC FFmpeg 7.1.1 from source
+  # (see the macOS steps) for the same reason — and so released binaries
+  # don't require users to have brewed FFmpeg dylibs at all.
+  VCPKG_COMMIT: 34823ada10080ddca99b60e85f80f55e18a44eea # ffmpeg 7.1.2
+
 jobs:
   build:
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
+          # ubuntu-22.04, not -latest: binaries inherit the BUILD
+          # machine's glibc floor (22.04 = glibc 2.35), so building on
+          # the oldest supported LTS keeps releases runnable on older
+          # distros. -latest also silently bumps the floor on every
+          # runner-image upgrade.
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             suffix: linux-x64
             # x86-64-v2: SSE4.2, SSSE3, POPCNT — supported since Nehalem (2008).
@@ -28,12 +45,10 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             suffix: macos-arm64
-            pkg_config_path: /opt/homebrew/opt/ffmpeg@7/lib/pkgconfig
           - os: macos-15-intel
             target: x86_64-apple-darwin
             suffix: macos-intel
             rustflags: "-C target-cpu=x86-64-v2"
-            pkg_config_path: /usr/local/opt/ffmpeg@7/lib/pkgconfig
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -62,40 +77,144 @@ jobs:
             libx11-dev libxext-dev libxinerama-dev libxcursor-dev \
             libxrender-dev libxfixes-dev libxft-dev libfontconfig1-dev \
             libpango1.0-dev libcairo2-dev \
-            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
-            libavfilter-dev libavdevice-dev libswresample-dev \
-            libx264-dev libgbm-dev \
+            libgbm-dev \
             libxcb1-dev libxrandr-dev libdbus-1-dev \
             libpipewire-0.3-dev libwayland-dev libegl-dev
 
+      - name: Cache static FFmpeg (Linux)
+        if: runner.os == 'Linux'
+        id: ffmpeg-static-linux-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/ffmpeg-static
+          key: ffmpeg-static-7.1.1-x264-${{ runner.os }}-${{ runner.arch }}-v1
+
+      - name: Build static FFmpeg 7.1.1 + x264 (Linux)
+        if: runner.os == 'Linux' && steps.ffmpeg-static-linux-cache.outputs.cache-hit != 'true'
+        # Same pin + rationale as macOS: released binaries must not
+        # depend on distro FFmpeg (sonames differ per distro/release —
+        # libavcodec.so.60 vs .61 vs Fedora's patent-stripped builds —
+        # so a dynamically linked binary launches only on distros
+        # matching the runner's FFmpeg, and ubuntu's moves every LTS).
+        run: |
+          set -euo pipefail
+          PREFIX="$HOME/ffmpeg-static"
+          mkdir -p "$PREFIX" /tmp/ffbuild
+          cd /tmp/ffbuild
+          git clone --depth 1 https://code.videolan.org/videolan/x264.git
+          cd x264
+          ./configure --prefix="$PREFIX" --enable-static --enable-pic --disable-cli --disable-opencl
+          make -j"$(nproc)"
+          make install
+          cd /tmp/ffbuild
+          curl -LO https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.xz
+          tar xf ffmpeg-7.1.1.tar.xz
+          cd ffmpeg-7.1.1
+          PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig" ./configure \
+            --prefix="$PREFIX" \
+            --disable-shared --enable-static --enable-pic \
+            --disable-programs --disable-doc \
+            --enable-gpl --enable-libx264
+          make -j"$(nproc)"
+          make install
+
+      - name: Use static FFmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          echo "PKG_CONFIG_PATH=$HOME/ffmpeg-static/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_ALL_STATIC=1" >> "$GITHUB_ENV"
+
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
-        # ffmpeg@7, not ffmpeg: plain brew ffmpeg is now v8/9 — the same
-        # ffmpeg-next breakage the pinned Windows prebuilt exists for (see
-        # build-ffmpeg-windows.yml). The @7 keg is keg-only, hence the
-        # pkg_config_path entries in the matrix.
+        # No brew ffmpeg: released binaries must not depend on dylibs the
+        # user has to install (a Mac without `brew install ffmpeg@7` gets
+        # a dyld launch crash, and plain `ffmpeg` is v8/9 — the same
+        # ffmpeg-next breakage the vcpkg pin exists for). FFmpeg is
+        # built statically below, pinned, like the Windows vcpkg build.
         run: |
-          brew install opus ffmpeg@7 pkg-config
+          brew install opus pkg-config nasm
 
-      # FFmpeg 7.1.2 built once by .github/workflows/build-ffmpeg-windows.yml
-      # from vcpkg pinned to 34823ada (the last ffmpeg 7.1.2 port) with
-      # ffmpeg[x264,gpl,nvcodec,amf]:x64-windows-static-md, then stored in
-      # R2. vcpkg HEAD ships FFmpeg 9.x, which ffmpeg-next 8.1 cannot build
-      # against, so do NOT replace this with an unpinned vcpkg build. To
-      # change the FFmpeg version or feature set: edit that workflow, run
-      # it with a NEW zip name, re-test the full Windows build AND a real
-      # stream (encoder options are validated at runtime, not compile
-      # time), then update the object name below.
-      - name: Download prebuilt FFmpeg (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      - name: Cache static FFmpeg (macOS)
+        if: runner.os == 'macOS'
+        id: ffmpeg-static-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/ffmpeg-static
+          key: ffmpeg-static-7.1.1-x264-${{ runner.os }}-${{ runner.arch }}-v1
+
+      - name: Build static FFmpeg 7.1.1 + x264 (macOS)
+        if: runner.os == 'macOS' && steps.ffmpeg-static-cache.outputs.cache-hit != 'true'
+        # 7.1.1 matches the Windows pin's FFmpeg version (7.1.x): the
+        # newest line ffmpeg-next 8.1 reliably builds against. x264 is
+        # the software encoder the macOS sharer path uses. videotoolbox
+        # is compiled in (free) for a future hardware-decode path.
         run: |
-          aws s3 cp s3://baucord/ffmpeg-7.1.2-x264-gpl-nvcodec-amf-x64-windows-static-md-v1.zip ffmpeg-prebuilt.zip --endpoint-url https://6bcc35de83e46a771896026baf11b4ac.r2.cloudflarestorage.com
-          7z x ffmpeg-prebuilt.zip -oC:\ffmpeg-prebuilt
-          echo "FFMPEG_DIR=C:\ffmpeg-prebuilt\x64-windows-static-md" >> $env:GITHUB_ENV
+          set -euo pipefail
+          PREFIX="$HOME/ffmpeg-static"
+          mkdir -p "$PREFIX" /tmp/ffbuild
+          cd /tmp/ffbuild
+          git clone --depth 1 https://code.videolan.org/videolan/x264.git
+          cd x264
+          ./configure --prefix="$PREFIX" --enable-static --disable-cli --disable-opencl
+          make -j"$(sysctl -n hw.ncpu)"
+          make install
+          cd /tmp/ffbuild
+          curl -LO https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.xz
+          tar xf ffmpeg-7.1.1.tar.xz
+          cd ffmpeg-7.1.1
+          PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig" ./configure \
+            --prefix="$PREFIX" \
+            --disable-shared --enable-static \
+            --disable-programs --disable-doc \
+            --enable-gpl --enable-libx264 --enable-videotoolbox
+          make -j"$(sysctl -n hw.ncpu)"
+          make install
+
+      - name: Use static FFmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          echo "PKG_CONFIG_PATH=$HOME/ffmpeg-static/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_ALL_STATIC=1" >> "$GITHUB_ENV"
+
+      # No prebuilt static-md binary exists anywhere with this exact codec
+      # feature set (x264, gpl, nvcodec, amf) plus the headers/.lib
+      # files needed to link into a Rust binary, so we build it with vcpkg
+      # like a local dev machine would. qsv is deliberately absent: at the
+      # pinned port it pulls the legacy mfx dispatch (the vpl switch came
+      # later) and is untested with our static-md link; the runtime
+      # encoder probe handles its absence. Re-add only with a full retest. The `installed` tree is cached by
+      # feature set below, so this only compiles from scratch when that
+      # set changes (or the cache is evicted) — otherwise it's a fast
+      # cache restore + vcpkg no-op.
+      - name: Clone and bootstrap vcpkg (Windows, pinned)
+        if: runner.os == 'Windows'
+        # Shallow-fetch exactly the pinned commit instead of cloning HEAD
+        # (HEAD's ffmpeg port is 9.x — see VCPKG_COMMIT above).
+        run: |
+          git init C:\vcpkg
+          git -C C:\vcpkg remote add origin https://github.com/microsoft/vcpkg.git
+          git -C C:\vcpkg fetch --depth 1 origin $env:VCPKG_COMMIT
+          git -C C:\vcpkg checkout FETCH_HEAD
+          C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+        shell: pwsh
+
+      - name: Cache vcpkg installed packages (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: C:\vcpkg\installed
+          # The pinned commit is part of the key, so bumping VCPKG_COMMIT
+          # auto-invalidates (and any tree cached by earlier UNPINNED runs
+          # can never be restored). Bump the trailing version number only
+          # if the feature list or triplet changes.
+          key: vcpkg-ffmpeg-${{ env.VCPKG_COMMIT }}-x64-windows-static-md-x264-gpl-nvcodec-amf-v2
+
+      - name: Install FFmpeg via vcpkg (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          C:\vcpkg\vcpkg.exe install ffmpeg[x264,gpl,nvcodec,amf]:x64-windows-static-md --recurse
+          echo "FFMPEG_DIR=C:\vcpkg\installed\x64-windows-static-md" >> $env:GITHUB_ENV
+        shell: pwsh
 
       # ── Build ───────────────────────────────────────────────────────
 
@@ -125,8 +244,29 @@ jobs:
           RUSTC_WRAPPER: ${{ runner.os == 'Windows' && 'C:\rustc-shim.exe' || 'sccache' }}
           RUSTFLAGS: ${{ matrix.rustflags }}
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
-          PKG_CONFIG_PATH: ${{ matrix.pkg_config_path || '' }}
         run: cargo build --profile deploy --target ${{ matrix.target }} --features tray
+
+      - name: Verify FFmpeg statically linked (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          BIN="target/${{ matrix.target }}/deploy/baucord"
+          echo "── dynamic dependencies ──"
+          ldd "$BIN"
+          if ldd "$BIN" | grep -E "libav|libsw|libpostproc|libx264"; then
+            echo "::error::baucord still links FFmpeg/x264 shared objects — the static build was not picked up"
+            exit 1
+          fi
+
+      - name: Verify FFmpeg statically linked (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          BIN="target/${{ matrix.target }}/deploy/baucord"
+          echo "── dynamic dependencies ──"
+          otool -L "$BIN"
+          if otool -L "$BIN" | grep -E "libav|libsw|libpostproc"; then
+            echo "::error::baucord still links FFmpeg dylibs — the static build was not picked up"
+            exit 1
+          fi
 
       - name: Show sccache stats
         shell: bash
