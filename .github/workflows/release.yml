@@ -191,8 +191,38 @@ jobs:
       # feature set below, so this only compiles from scratch when that
       # set changes (or the cache is evicted) — otherwise it's a fast
       # cache restore + vcpkg no-op.
-      - name: Clone and bootstrap vcpkg (Windows, pinned)
+      # ── Windows FFmpeg: R2 prebuilt fast path, vcpkg fallback ───────
+      # The prebuilt tree (headers + static .libs, consumed via
+      # FFMPEG_DIR) lives in R2 under an object name derived from the
+      # vcpkg pin + feature set, so bumping either automatically misses
+      # and falls back to a fresh vcpkg build — which then re-seeds R2
+      # for every subsequent run. Download: seconds. Cold vcpkg build:
+      # ~30 min, paid once per pin.
+
+      - name: Fetch prebuilt FFmpeg from R2 (Windows)
         if: runner.os == 'Windows'
+        id: ffmpeg-r2
+        shell: pwsh
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_ENDPOINT_URL: https://6bcc35de83e46a771896026baf11b4ac.r2.cloudflarestorage.com
+          AWS_DEFAULT_REGION: auto
+        run: |
+          $obj = "ci/ffmpeg-$($env:VCPKG_COMMIT.Substring(0,10))-x264-gpl-nvcodec-amf-x64-windows-static-md.zip"
+          echo "object=$obj" >> $env:GITHUB_OUTPUT
+          aws s3 cp "s3://baucord/$obj" ffmpeg-prebuilt.zip
+          if ($LASTEXITCODE -ne 0) {
+            echo "hit=false" >> $env:GITHUB_OUTPUT
+            echo "No prebuilt FFmpeg in R2 for this pin - falling back to vcpkg build"
+            exit 0
+          }
+          Expand-Archive ffmpeg-prebuilt.zip -DestinationPath C:\ffmpeg-prebuilt
+          echo "FFMPEG_DIR=C:\ffmpeg-prebuilt" >> $env:GITHUB_ENV
+          echo "hit=true" >> $env:GITHUB_OUTPUT
+
+      - name: Clone and bootstrap vcpkg (Windows, pinned)
+        if: runner.os == 'Windows' && steps.ffmpeg-r2.outputs.hit != 'true'
         # Shallow-fetch exactly the pinned commit instead of cloning HEAD
         # (HEAD's ffmpeg port is 9.x — see VCPKG_COMMIT above).
         run: |
@@ -204,7 +234,7 @@ jobs:
         shell: pwsh
 
       - name: Cache vcpkg installed packages (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && steps.ffmpeg-r2.outputs.hit != 'true'
         uses: actions/cache@v4
         with:
           path: C:\vcpkg\installed
@@ -215,11 +245,26 @@ jobs:
           key: vcpkg-ffmpeg-${{ env.VCPKG_COMMIT }}-x64-windows-static-md-x264-gpl-nvcodec-amf-v2
 
       - name: Install FFmpeg via vcpkg (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && steps.ffmpeg-r2.outputs.hit != 'true'
         run: |
           C:\vcpkg\vcpkg.exe install ffmpeg[x264,gpl,nvcodec,amf]:x64-windows-static-md --recurse
           echo "FFMPEG_DIR=C:\vcpkg\installed\x64-windows-static-md" >> $env:GITHUB_ENV
         shell: pwsh
+
+      - name: Seed prebuilt FFmpeg into R2 (Windows)
+        if: runner.os == 'Windows' && steps.ffmpeg-r2.outputs.hit != 'true'
+        # Best-effort: a failed upload only means the next run also
+        # builds; it never fails the release.
+        continue-on-error: true
+        shell: pwsh
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_ENDPOINT_URL: https://6bcc35de83e46a771896026baf11b4ac.r2.cloudflarestorage.com
+          AWS_DEFAULT_REGION: auto
+        run: |
+          Compress-Archive -Path C:\vcpkg\installed\x64-windows-static-md\* -DestinationPath ffmpeg-seed.zip
+          aws s3 cp ffmpeg-seed.zip "s3://baucord/$(('${{ steps.ffmpeg-r2.outputs.object }}'))"
 
       # ── Build ───────────────────────────────────────────────────────
 
