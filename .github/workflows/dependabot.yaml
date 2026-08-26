@@ -1,0 +1,62 @@
+# Dependabot: compatible-only dependency updates.
+#
+# Two modes exist for "don't send me breaking changes", and only one of
+# them is correct for Rust:
+#
+#   versioning-strategy: lockfile-only   <- used here
+#     Only Cargo.lock moves; Cargo.toml requirement strings are never
+#     edited. That is exactly Cargo's own compatibility rule, so 0.x
+#     crates are handled right (0.3 -> 0.4 is breaking, 0.3.5 -> 0.3.6
+#     is not). Equivalent to a scheduled `cargo update`.
+#
+#   ignore: update-types: [version-update:semver-major]   <- NOT used
+#     Dependabot reads versions as literal major.minor.patch, so for a
+#     0.x crate a 0.3 -> 0.4 bump is a "minor" update to it and would be
+#     PR'd as non-breaking. Most of this workspace's deps are 0.x
+#     (cpal, rtrb, wasapi, nnnoiseless, dasp_sample, ...), so that mode
+#     would hand us breaking bumps labelled as safe.
+#
+# Major bumps (rubato 4 -> 5, rtrb 0.3 -> 0.4, ...) are therefore never
+# proposed by the bot and stay a deliberate, human change. When doing
+# one, bump paired crates together (rubato <-> audioadapter-buffers).
+#
+# Requires Cargo.lock to be committed: with lockfile-only there is
+# nothing else for Dependabot to edit.
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/" # workspace root; members under crates/* are picked up from it
+    schedule:
+      interval: "weekly"
+    versioning-strategy: "lockfile-only"
+    # Batch every compatible bump into one PR per week instead of one PR
+    # per crate.
+    groups:
+      cargo-compatible:
+        patterns: ["*"]
+    # Dependabot applies a 3-day cooldown after a release by default.
+    # Lengthen it: a fresh patch release is the one most likely to be
+    # yanked or followed by a fix within the week.
+    cooldown:
+      default-days: 7
+    ignore:
+      # renet is supplied by the [patch.crates-io] git pin in the root
+      # Cargo.toml. Dependabot must not try to move that rev; the pin is
+      # managed by hand.
+      - dependency-name: "renet"
+    commit-message:
+      prefix: "deps"
+    labels: ["dependencies"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/" # scans .github/workflows/*.yml|yaml; *.disabled files are ignored
+    schedule:
+      interval: "monthly"
+    # Actions are pinned to majors (@v4, @v5); a major bump here is a
+    # one-line review, so let them through, grouped.
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
+    labels: ["dependencies", "ci"]

@@ -1,6 +1,6 @@
 [package]
 name = "desktop"
-version = "0.4.6"
+version = "0.4.7"
 edition = "2024"
 
 [lints]
@@ -39,15 +39,15 @@ renet.workspace = true
 crossbeam-channel.workspace = true
 log.workspace = true
 env_logger = "0.11"
-chrono = "0.4.41"
-ureq = "3.2.0"
-open = "5.3.3"
-global-hotkey = "0.7"
+chrono = "0.4.45"
+ureq = "3.4"
+open = "5.4"
+global-hotkey = "0.8"
 # png/gif are the wire formats; the rest let attach/paste/drop decode
 # the common disk formats (re-encoded to PNG before sending). 0.25.9
 # floor guarantees the root ImageReader/Limits API used for bounded
 # decoding.
-image = { version = "0.25.9", default-features = false, features = [
+image = { version = "0.25", default-features = false, features = [
   "png",
   "jpeg",
   "gif",
@@ -56,15 +56,10 @@ image = { version = "0.25.9", default-features = false, features = [
   "tiff",
   "ico",  # decodes assets/icons/icon.ico for the tray (feature `tray`)
 ] }
-# Own-process CPU/memory for the sidebar stats line. Only the `system`
-# feature — no disks/network/components/users — to keep the build lean.
-# SANDBOX-PIN(0.38): the 0.39 line needs rustc ≥1.92 (cfg_select) and this
-# sandbox validates on 1.91. The API used (refresh_processes_specifics +
-# ProcessesToUpdate + ProcessRefreshKind) is identical across 0.38/0.39.
-# Restore to `0.39` in the real workspace — MIGRATION.md tracks this.
-sysinfo = { version = "0.38", default-features = false, features = ["system"] }
-zip = "2"
-self-replace = "1.5.0"
+
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+zip = "8.6"
+self-replace = "1.5"
 # Plain-text clipboard read/write. Slint exposes no clipboard API;
 # TextInput's internal Ctrl+V only covers text typed into it — the
 # rich-paste chain and "Copy message" need programmatic access.
@@ -80,11 +75,8 @@ arboard = { version = "3", default-features = false, features = [
 # across the whole binary, and the other zbus users (ksni tray,
 # accesskit, xcap) run on async-io with no Tokio runtime — with
 # `tokio` on, the tray panicked at startup ("no reactor running").
-rfd = { version = "0.15", default-features = false, features = [
-  "xdg-portal",
-  "async-std",
-] }
-pollster = "0.4"
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+pollster = "1.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Native NSPasteboard access for what the toolkit clipboard layer can't

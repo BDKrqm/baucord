@@ -1,6 +1,6 @@
 [package]
 name = "audio"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2021"
 description = "audio components for baucord"
 
@@ -19,7 +19,7 @@ dasp_sample = "0.11"
 hound = "3.5"
 
 # Lock-free ring buffer (RT-safe)
-rtrb = "0.3"
+rtrb = "0.4"
 
 # Bounded channels
 crossbeam-channel.workspace = true
@@ -28,11 +28,12 @@ crossbeam-channel.workspace = true
 #opus = { git = "https://github.com/mpwsh/opus-rs" }
 
 # Resampling
-rubato = "4.0"
-# NOTE: must track the audioadapter major that rubato depends on (4.x for
-# rubato 4.0) — a newer audioadapter here would resolve as a second copy
-# with incompatible adapter types at the rubato boundary.
-audioadapter-buffers = "4.0"
+rubato = "5.0"
+# NOTE: must track the audioadapter major that rubato depends on (5.x for
+# rubato 5.0, which requires audioadapter-buffers ^5.1) — a mismatched
+# audioadapter here would resolve as a second copy with incompatible
+# adapter types at the rubato boundary.
+audioadapter-buffers = "5.2"
 
 # Noise suppression (Mozilla RNNoise, pure Rust)
 nnnoiseless = "0.5"
@@ -40,10 +41,11 @@ nnnoiseless = "0.5"
 # Fork retired: upstream 1.x ships quantized weights in its default
 # predictor, which was the fork's whole reason to exist.
 earshot = "1.2"
-# Deliberately pinned AHEAD of crates.io: this rev (== current master)
-# uses the opusic-sys backend; the crates.io 0.3.1 release predates that
-# switch. Do not "downgrade" to the registry version.
-opus = { git = "https://github.com/SpaceManiac/opus-rs", rev = "559876660603dc8079a053e03e6438766f669e69" }
+# crates.io 0.4.0 (2026-08-23) is the opusic-sys-backed release and is
+# source-identical to the previously pinned git rev 5598766 (verified by
+# diffing src/). Registry release replaces the git pin; keep on 0.4+ —
+# 0.3.x predates the opusic-sys switch.
+opus = "0.4"
 serde = { workspace = true, optional = true }
 
 
