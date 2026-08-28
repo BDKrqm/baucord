@@ -13,20 +13,22 @@
 //! - No jitter buffer complexity needed — system audio is continuous,
 //!   not bursty like multi-peer voice chat
 //!
-//! ## Voice cancellation
+//! ## No receiver-side voice ducking
 //!
-//! The stream audio typically contains a delayed copy of voice chat
-//! (captured by the streamer's loopback). The [`VoiceCanceller`] uses
-//! the viewer's own voice output energy to duck the stream during
-//! active speech, suppressing the echo while preserving game/music audio.
+//! Voice-chat echo in the stream is handled at the *source*: the
+//! sharer's capture excludes the app's own playback (process loopback
+//! on Windows — see `stream::process_loopback`). Playback here applies
+//! only the user's volume; it never rides the stream level up and down
+//! with speech. `processor::voice_cancel` still exists as an unwired
+//! candidate for mic-path echo suppression, but it has no business in
+//! this pipeline.
 //!
 //! ## Pipeline
 //!
 //! ```text
-//! Network → Opus decode (stereo) → voice cancel → ring buffer → resample → cpal playback
+//! Network → Opus decode (stereo) → ring buffer → resample → cpal playback
 //! ```
 
-use crate::processor::{voice_cancel::VoiceCanceller, AudioProcessor, FrameContext};
 use crate::OPUS_SAMPLE_RATE;
 
 use audioadapter_buffers::direct::SequentialSliceOfVecs;
@@ -86,11 +88,6 @@ pub struct StreamAudioOutput {
     volume: Arc<AtomicU32>,
     /// Mute stream audio without stopping the pipeline.
     is_muted: Arc<AtomicBool>,
-
-    /// Voice output energy for voice cancellation (f32 bits, 0.0–1.0).
-    /// Read from the voice chat's `AudioStats::output_level`.
-    /// `None` if no voice reference is available (canceller disabled).
-    voice_energy: Option<Arc<AtomicU32>>,
 }
 
 impl StreamAudioOutput {
@@ -98,12 +95,9 @@ impl StreamAudioOutput {
     ///
     /// - `device_name`: output device (or `None` for default)
     /// - `volume`: initial playback volume (0.0–2.0)
-    /// - `voice_energy`: shared atomic from voice output for cancellation
-    /// - (`None` to disable voice cancellation)
     pub fn new(
         device_name: Option<&str>,
         volume: f32,
-        voice_energy: Option<Arc<AtomicU32>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let host = cpal::default_host();
 
@@ -156,7 +150,6 @@ impl StreamAudioOutput {
             should_stop: Arc::new(AtomicBool::new(false)),
             volume: Arc::new(AtomicU32::new(volume.clamp(0.0, 2.0).to_bits())),
             is_muted: Arc::new(AtomicBool::new(false)),
-            voice_energy,
         })
     }
 
@@ -183,7 +176,6 @@ impl StreamAudioOutput {
                 sample_rate,
                 self.volume.clone(),
                 self.is_muted.clone(),
-                self.voice_energy.clone(),
             );
             self.worker_thread = Some(handle);
         }
@@ -331,14 +323,10 @@ impl StreamAudioOutput {
         device_sample_rate: u32,
         volume: Arc<AtomicU32>,
         is_muted: Arc<AtomicBool>,
-        voice_energy: Option<Arc<AtomicU32>>,
     ) -> thread::JoinHandle<()> {
         crate::platform::spawn_named("stream-audio-out", move || {
             // Audio-class scheduling (MMCSS "Pro Audio" on Windows).
             let _mmcss = crate::platform::promote_current_thread();
-
-            // ── Voice canceller ─────────────────────────────────────────
-            let mut canceller = voice_energy.as_ref().map(|_| VoiceCanceller::new());
 
             // ── Resampler (stereo, 48kHz → device rate) ─────────────────
             let needs_resample = device_sample_rate != OPUS_SAMPLE_RATE;
@@ -387,28 +375,15 @@ impl StreamAudioOutput {
             let mut next_tick = Instant::now();
 
             info!(
-                "Stream audio worker started (device {}Hz, resample={}, voice_cancel={})",
-                device_sample_rate,
-                needs_resample,
-                voice_energy.is_some(),
+                "Stream audio worker started (device {}Hz, resample={})",
+                device_sample_rate, needs_resample,
             );
 
             while !should_stop.load(Ordering::Relaxed) {
                 // ── Drain decoded frames into accumulator ────────────────
-                while let Ok(mut frame) = frame_rx.try_recv() {
+                while let Ok(frame) = frame_rx.try_recv() {
                     if is_muted.load(Ordering::Relaxed) {
                         continue; // drain but discard
-                    }
-
-                    if let (Some(ref energy_handle), Some(ref mut cancel)) =
-                        (&voice_energy, &mut canceller)
-                    {
-                        let mut ctx = FrameContext {
-                            voice_energy: f32::from_bits(energy_handle.load(Ordering::Relaxed)),
-                            channels: 2,
-                            ..FrameContext::default()
-                        };
-                        cancel.process(&mut frame.samples, &mut ctx);
                     }
 
                     // Apply volume

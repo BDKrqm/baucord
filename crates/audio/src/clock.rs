@@ -59,10 +59,14 @@ const MAX_OBSERVATIONS: usize = 3_000;
 /// the corrector leaves healthy devices completely untouched.
 const SKEW_DEADZONE: f64 = 20e-6;
 
-/// Hard clamp on the reported skew (±2000 ppm). Anything larger is a
-/// broken driver, not a crystal, and correcting harder than this
-/// risks audibility.
-const MAX_SKEW: f64 = 2_000e-6;
+/// Hard clamp on the *applied correction* (±2000 ppm). Anything larger
+/// is a broken driver or a misbehaving wireless dongle, not a crystal,
+/// and slipping harder than this risks audibility. The estimator's
+/// *report* is deliberately not clamped: a device pegged beyond the
+/// ceiling leaks the residual to every listener, and the log must show
+/// how far gone it really is — a reading clamped to exactly ±2000
+/// hides the difference between "barely over" and "hopeless".
+pub(crate) const MAX_SKEW: f64 = 2_000e-6;
 
 /// Estimates the true rate of a capture clock against the monotonic
 /// clock from cumulative sample counts.
@@ -153,7 +157,7 @@ impl CaptureClockEstimator {
             return None;
         }
 
-        let skew = (cov / var / self.nominal_rate - 1.0).clamp(-MAX_SKEW, MAX_SKEW);
+        let skew = cov / var / self.nominal_rate - 1.0;
         Some(if skew.abs() < SKEW_DEADZONE { 0.0 } else { skew })
     }
 }
@@ -316,10 +320,21 @@ mod tests {
         }
 
         #[test]
-        fn clamps_a_broken_driver_to_the_correction_ceiling() {
+        fn reports_a_broken_driver_unclamped() {
             let est = feed(49_000.0, 120, &[0.0]); // ~2 % fast
             let skew = est.skew().expect("span reached");
-            assert!((skew - MAX_SKEW).abs() < 1e-9, "skew {skew}");
+            // ~+20,833 ppm: the report shows the real damage; only the
+            // applied correction (SampleSlip) is ceiling-clamped.
+            assert!(skew > 0.02, "skew {skew}");
+            let mut slip = SampleSlip::new();
+            for _ in 0..64 {
+                slip.set_target_skew(Some(skew));
+            }
+            assert!(
+                (slip.correction_ppm() - MAX_SKEW * 1e6).abs() < 1.0,
+                "correction {:.0} ppm",
+                slip.correction_ppm()
+            );
         }
     }
 

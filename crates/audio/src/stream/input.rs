@@ -20,8 +20,11 @@
 //! the preferred backend asks WASAPI for the system mix *minus our own
 //! process tree* (see `stream::process_loopback`). Where that API is
 //! unavailable (pre-2004 Windows 10) the endpoint-loopback fallback
-//! still captures everything, and the receiver-side
-//! `processor::voice_cancel` ducking remains the only mitigation.
+//! still captures everything — and since receiver-side ducking was
+//! removed (users own their stream volume now), streams captured via
+//! that fallback WILL echo peer voices to every viewer. If such
+//! setups reappear in the field, exclusion must be added to that
+//! backend, not re-ducked at the receiver.
 //! Future macOS/Linux backends should follow the same rule: exclude at
 //! capture time (`SCStreamConfiguration.excludesCurrentProcessAudio`,
 //! PipeWire routing), never filter after the fact.
@@ -688,8 +691,9 @@ impl SystemAudioCapture {
     ///    never enter the stream. Windows 10 2004+.
     /// 2. cpal endpoint loopback — the classic full mix of the default
     ///    output device. Our own playback (incl. peer voices) is audible
-    ///    in the stream; the receiver-side `voice_cancel` ducking is the
-    ///    only mitigation.
+    ///    in the stream, and nothing downstream removes it anymore
+    ///    (receiver-side ducking was removed) — viewers of a fallback
+    ///    capture will hear the echo.
     #[cfg(target_os = "windows")]
     fn create_started_backend(
         stats: &Arc<AudioStats>,

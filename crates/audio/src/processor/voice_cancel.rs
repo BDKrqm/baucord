@@ -10,11 +10,13 @@
 //! attenuated proportionally. Same approach as Discord, Xbox, and PS5
 //! party chat — game audio dips slightly during speech.
 //!
-//! ## Pipeline position (stream output)
+//! ## Currently unwired
 //!
-//! ```text
-//! stream buffer → **voice_cancel** → gain → clamp → resample → playback
-//! ```
+//! The stream playback path no longer uses this: echo is excluded at
+//! the *capture* side (Windows process loopback), and stream volume
+//! belongs to the user. The processor is kept as a candidate for
+//! mic-path echo suppression — attenuating a speaker user's mic while
+//! remote voices are playing — which is the same sidechain shape.
 //!
 //! ## Context interaction
 //!

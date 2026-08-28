@@ -7,8 +7,6 @@
 //!
 //! ```text
 //! network → StreamAudioPacket → [decoder thread] → StreamAudioFrame → StreamAudioOutput → cpal
-//!                                                                      ↑
-//!                                                               voice_energy (ducking)
 //! ```
 
 use crossbeam_channel::{bounded, Receiver, Sender};
@@ -217,14 +215,11 @@ impl Drop for StreamDecoder {
 ///
 /// - `device_name`: output device (or `None` for system default)
 /// - `volume`: initial playback volume (0.0–2.0)
-/// - `voice_energy`: shared atomic from voice output for echo ducking
-/// - (`None` to disable voice cancellation)
 pub fn spawn(
     device_name: Option<&str>,
     volume: f32,
-    voice_energy: Option<Arc<AtomicU32>>,
 ) -> Result<StreamDecoder, Box<dyn std::error::Error>> {
-    let mut output = StreamAudioOutput::new(device_name, volume, voice_energy)?;
+    let mut output = StreamAudioOutput::new(device_name, volume)?;
 
     let volume_handle = output.volume_handle();
     let muted_handle = output.muted_handle();

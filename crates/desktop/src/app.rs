@@ -187,11 +187,7 @@ fn spawn_workers(
         is_testing_mic_shared.clone(),
         wake_fn.clone(),
     );
-    let screen = ScreenThreadHandle::spawn(
-        network_tx.clone(),
-        wake_fn.clone(),
-        voice.shared.output_level.clone(),
-    );
+    let screen = ScreenThreadHandle::spawn(network_tx.clone(), wake_fn.clone());
     // Present-prep thread: takes over screen.event_rx (the UI drain
     // must not read it), pays the per-frame pixel copy off the UI
     // thread, forwards non-frame events back via this channel.

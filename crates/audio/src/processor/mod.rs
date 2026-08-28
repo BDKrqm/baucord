@@ -136,7 +136,7 @@ pub struct FrameContext {
     pub pipeline_level: f32,
     /// Voice output RMS energy (0.0–1.0).
     /// Set by: stream output worker (from voice output stats atomic).
-    /// Read by: `VoiceCanceller` for echo ducking.
+    /// Read by: `VoiceCanceller` (currently unwired — see its docs).
     pub voice_energy: f32,
 }
 

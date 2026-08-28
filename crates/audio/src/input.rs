@@ -36,7 +36,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig, SupportedStreamConfig};
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
 use dasp_sample::{FromSample, Sample as DaspSample, ToSample};
-use log::{error, info};
+use log::{error, info, warn};
 use rtrb::{Consumer, Producer, RingBuffer};
 use rubato::{Async, Resampler};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -347,17 +347,37 @@ impl AudioInput {
                     let skew = clock.skew();
                     slip.set_target_skew(skew);
                     if let Some(s) = skew {
-                        #[allow(clippy::cast_possible_truncation)] // skew clamped to ±2000 ppm
+                        #[allow(clippy::cast_possible_truncation)] // ppm values are tiny
                         stats
                             .capture_clock_skew_ppm
                             .store((s * 1e6) as i64, Ordering::Relaxed);
                         if now.duration_since(last_skew_log) >= Duration::from_secs(60) {
                             last_skew_log = now;
-                            info!(
-                                "Capture clock skew {:+.0} ppm (applying {:+.0} ppm correction)",
-                                s * 1e6,
-                                slip.correction_ppm(),
-                            );
+                            let ppm = s * 1e6;
+                            let ceiling_ppm = crate::clock::MAX_SKEW * 1e6;
+                            if ppm.abs() > ceiling_ppm {
+                                // The corrector is saturated: the excess
+                                // reaches every listener as a slow drain
+                                // (or fill) of their jitter buffer for
+                                // this sender — the "breaks up for the
+                                // whole room after talking a while,
+                                // reconnect fixes it" signature. Almost
+                                // always a wireless dongle: battery, RF,
+                                // or the headset's own resampler.
+                                warn!(
+                                    "Capture clock skew {ppm:+.0} ppm exceeds the ±{ceiling_ppm:.0} ppm \
+                                     correction ceiling (applying {:+.0} ppm); ~{:+.0} ppm residual \
+                                     reaches listeners — check wireless headset battery/RF or use a \
+                                     wired device",
+                                    slip.correction_ppm(),
+                                    ppm.signum() * (ppm.abs() - ceiling_ppm),
+                                );
+                            } else {
+                                info!(
+                                    "Capture clock skew {ppm:+.0} ppm (applying {:+.0} ppm correction)",
+                                    slip.correction_ppm(),
+                                );
+                            }
                         }
                     }
                 }
