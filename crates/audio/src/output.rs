@@ -39,7 +39,15 @@ const CALLBACK_SCRATCH: usize = 8192;
 pub struct AudioOutput {
     device: Device,
     device_config: SupportedStreamConfig,
+    /// The user's device selection (`None` = follow the OS default), for
+    /// the native backend's own device lookup.
+    #[cfg(windows)]
+    device_name: Option<String>,
+    /// cpal stream, when the cpal backend is in use.
     stream: Option<Stream>,
+    /// Native backend stream, when it opened successfully (Windows).
+    #[cfg(windows)]
+    native: Option<crate::native::wasapi::NativeRender>,
     packet_rx: Option<Receiver<(AudioPacket, Instant)>>,
     loopback_rx: Option<Receiver<PcmFrame>>,
     sound_rx: Option<Receiver<SoundType>>,
@@ -116,7 +124,11 @@ impl AudioOutput {
         Ok(Self {
             device,
             device_config,
+            #[cfg(windows)]
+            device_name: device_name.map(String::from),
             stream: None,
+            #[cfg(windows)]
+            native: None,
             ring_producer: Some(ring_producer),
             ring_consumer: Some(ring_consumer),
             ring_capacity: ring_size,
@@ -135,6 +147,16 @@ impl AudioOutput {
         })
     }
 
+    /// Friendly name of the device actually opened (native backend's
+    /// report when in use, otherwise cpal's), for follow-the-default.
+    pub fn opened_device_name(&self) -> Option<String> {
+        #[cfg(windows)]
+        if let Some(n) = self.native.as_ref() {
+            return Some(n.device_name.clone());
+        }
+        crate::device_name(&self.device)
+    }
+
     pub fn output_gain_handle(&self) -> Arc<AtomicU32> {
         self.output_gain.clone()
     }
@@ -144,18 +166,81 @@ impl AudioOutput {
     }
 
     pub fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.stats
+            .output_stream_failed
+            .store(false, Ordering::Relaxed);
+
+        #[cfg(windows)]
+        {
+            match self.start_native() {
+                Ok(()) => return Ok(()),
+                Err(e) => log::warn!("Native WASAPI render unavailable ({e}); using cpal"),
+            }
+        }
+        self.start_cpal()
+    }
+
+    /// Windows: play through our own MMCSS thread (see `native::wasapi`).
+    /// The engine converts from 48 kHz for us, so the worker normally runs
+    /// without a resampler. On failure the ring and latch are handed back
+    /// untouched for the cpal path.
+    #[cfg(windows)]
+    fn start_native(&mut self) -> Result<(), String> {
+        let consumer = self.ring_consumer.take().ok_or("ring consumer already taken")?;
+        let wake_tx = self.wake_tx.take().ok_or("wake sender already taken")?;
+        match crate::native::wasapi::NativeRender::start(
+            self.device_name.as_deref(),
+            consumer,
+            wake_tx,
+            self.stats.clone(),
+        ) {
+            Ok(native) => {
+                let rate = native.sample_rate;
+                self.native = Some(native);
+                self.prime_ring(rate);
+                self.spawn_worker_for(rate);
+                Ok(())
+            }
+            Err(err) => {
+                self.ring_consumer = Some(err.consumer);
+                self.wake_tx = Some(err.wake_tx);
+                Err(err.reason)
+            }
+        }
+    }
+
+    fn start_cpal(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let sample_rate = self.device_config.sample_rate();
         let channels = self.device_config.channels();
         let format = self.device_config.sample_format();
 
-        // Prime the ring with one target fill of silence so the first
-        // callback isn't a guaranteed underrun ("Underruns 1" forever).
+        self.prime_ring(sample_rate);
+        // Start producer worker BEFORE the stream so it's ready when callbacks arrive
+        self.spawn_worker_for(sample_rate);
+
+        let stream = match format {
+            SampleFormat::I16 => self.build_stream::<i16>(sample_rate, channels)?,
+            SampleFormat::U16 => self.build_stream::<u16>(sample_rate, channels)?,
+            SampleFormat::F32 => self.build_stream::<f32>(sample_rate, channels)?,
+            _ => return Err(format!("Unsupported format: {format:?}").into()),
+        };
+
+        stream.play()?;
+        self.stream = Some(stream);
+        Ok(())
+    }
+
+    /// Prime the ring with one target fill of silence so the first
+    /// device period isn't a guaranteed underrun ("Underruns 1" forever).
+    fn prime_ring(&mut self, sample_rate: u32) {
         if let Some(producer) = self.ring_producer.as_mut() {
             let silence = vec![0.0f32; (sample_rate as usize * 20) / 1000];
             let _ = producer.push_partial_slice(&silence);
         }
+    }
 
-        // Start producer worker BEFORE the stream so it's ready when callbacks arrive
+    /// Spawn the mix/decode worker filling the ring at `device_sample_rate`.
+    fn spawn_worker_for(&mut self, device_sample_rate: u32) {
         if let (Some(ring_producer), Some(packet_rx), Some(loopback_rx), Some(sound_rx), Some(wake_rx)) = (
             self.ring_producer.take(),
             self.packet_rx.take(),
@@ -174,23 +259,12 @@ impl AudioOutput {
                 stats: self.stats.clone(),
                 should_stop: self.should_stop.clone(),
                 ring_capacity: self.ring_capacity,
-                device_sample_rate: sample_rate,
+                device_sample_rate,
                 output_gain: self.output_gain.clone(),
                 deafened: self.deafened.clone(),
             });
             self.worker_thread = Some(handle);
         }
-
-        let stream = match format {
-            SampleFormat::I16 => self.build_stream::<i16>(sample_rate, channels)?,
-            SampleFormat::U16 => self.build_stream::<u16>(sample_rate, channels)?,
-            SampleFormat::F32 => self.build_stream::<f32>(sample_rate, channels)?,
-            _ => return Err(format!("Unsupported format: {format:?}").into()),
-        };
-
-        stream.play()?;
-        self.stream = Some(stream);
-        Ok(())
     }
 
     fn build_stream<T>(
@@ -222,10 +296,18 @@ impl AudioOutput {
         let ch = channels as usize;
         // Allocated once, outside the callback.
         let mut mono = vec![0.0f32; CALLBACK_SCRATCH];
+        // cpal's render thread runs our callback; promote it on first entry.
+        let mut promoted = false;
+        let mut last_err_log: Option<Instant> = None;
 
         let stream = self.device.build_output_stream(
             config,
             move |data: &mut [T], _: &_| {
+                if !promoted {
+                    promoted = true;
+                    #[allow(clippy::cast_possible_truncation)]
+                    crate::platform::promote_callback_thread(HOP as u32, sample_rate);
+                }
                 let mut rms_acc = 0.0f32;
                 let mut frames_done = 0usize;
                 let frames_total = data.len() / ch;
@@ -278,8 +360,18 @@ impl AudioOutput {
                 let _ = wake_tx.try_send(());
             },
             move |err| {
-                error!("Output stream error: {err}");
+                if matches!(err.kind(), cpal::ErrorKind::DeviceNotAvailable) {
+                    stats_err.output_stream_failed.store(true, Ordering::Relaxed);
+                }
                 stats_err.output_underruns.fetch_add(1, Ordering::Relaxed);
+                let now = Instant::now();
+                if last_err_log.is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1)) {
+                    last_err_log = Some(now);
+                    error!(
+                        "Output stream error: {err} (total {})",
+                        stats_err.output_underruns.load(Ordering::Relaxed)
+                    );
+                }
             },
             None,
         )?;
@@ -535,6 +627,9 @@ fn worker_loop(parts: WorkerParts) {
             if js.late > 0 {
                 stats.packets_late.fetch_add(js.late, Ordering::Relaxed);
             }
+            if js.red > 0 {
+                stats.red_recoveries.fetch_add(js.red, Ordering::Relaxed);
+            }
             jitter_buffer.adapt();
 
             next_tick += Duration::from_millis(10);
@@ -563,6 +658,8 @@ impl Drop for AudioOutput {
         // they can't deadlock pulling from the ring buffer while the
         // worker thread is being joined.
         self.stream.take();
+        #[cfg(windows)]
+        self.native.take();
         if let Some(thread) = self.worker_thread.take() {
             let _ = thread.join();
         }

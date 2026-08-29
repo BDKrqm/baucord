@@ -21,15 +21,46 @@
 //! decoder; a 20 ms mono Opus decode costs tens of microseconds, so even 30
 //! simultaneous speakers fit comfortably inside one 10 ms hop.
 //!
-//! ## Device compatibility
+//! ## Device backends
 //!
-//! The engine asks each device for 48 kHz first (Opus' native rate) and
-//! only falls back to the OS default rate — with a resampler — when the
-//! device cannot do 48 kHz (see [`device`]). Bluetooth HFP mics at 8/16 kHz,
-//! 44.1 kHz interfaces and anything else still just work.
+//! On Windows the microphone and speaker are driven by threads this crate
+//! owns (`native::wasapi`): registered with MMCSS "Pro Audio" before the
+//! device is opened, event-driven shared mode, and the audio engine
+//! converting to/from 48 kHz so no resampler runs. cpal remains the
+//! fallback there and the primary backend on macOS (whose CoreAudio
+//! callback already runs on a real-time thread) and Linux. Either way the
+//! engine asks for 48 kHz first (see [`device`]) and only resamples when a
+//! device cannot provide it.
+//!
+//! ## Loss protection and rate adaptation
+//!
+//! Every packet carries Opus in-band FEC for the previous frame. On top of
+//! that the sender runs a small rate controller ([`adapt`]) fed by the
+//! transport's uplink loss ([`VoiceChat::set_uplink_loss_pct`]) and RTT
+//! ([`VoiceChat::set_link_rtt_ms`]): random loss turns on redundant audio
+//! (RED, [`transport::red`] — full copies of the preceding packet) and
+//! steps the codec down one rung to pay for it; congestion (loss with RTT
+//! inflation) steps down without ever adding bytes; recovery is slow and
+//! one rung at a time. The receiver holds playout one repair-distance
+//! longer only while loss is actually being observed, so FEC and RED can
+//! land before their slot plays, and drops back to the minimum latency on
+//! a clean link.
+//!
+//! **Wire format (protocol bump):** `PacketHeader::payload_type` is one
+//! byte the application must serialise and parse ([`PayloadType`]);
+//! receivers construct packets with [`AudioPacket::new_typed`].
+//!
+//! ## Device supervision
+//!
+//! Call [`VoiceChat::service`] from a periodic tick. It restarts a side
+//! whose device vanished and follows the OS default device when none was
+//! explicitly chosen — driven by `IMMNotificationClient` on Windows and a
+//! two-second poll elsewhere.
 
+mod adapt;
 mod config;
 mod device;
+mod native;
 mod encoder;
 mod input;
 mod input_config;
@@ -46,7 +77,7 @@ pub use config::{PeerAudioSettings, VoiceChatConfig};
 pub use platform::{promote_current_thread, RtGuard};
 pub use sounds::SoundType;
 pub use stats::AudioStats;
-pub use transport::packet::AudioPacket;
+pub use transport::packet::{AudioPacket, PayloadType};
 
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
 use log::{debug, error, info};
@@ -91,8 +122,13 @@ pub(crate) type PcmFrame = [f32; FRAME_SIZE];
 /// point the jitter estimator relies on.
 type Incoming = (AudioPacket, Instant);
 
-/// Default Opus bitrate (bits/s)
-const OPUS_BITRATE: i32 = 48_000;
+/// Minimum spacing between automatic stream restart attempts, so a device
+/// that is genuinely gone is retried calmly rather than hammered.
+const RESTART_BACKOFF: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How often `service` re-checks the OS default device where there are no
+/// change notifications (macOS/Linux).
+const DEFAULT_DEVICE_POLL: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Maximum expected peers. Used for channel sizing.
 const DEFAULT_MAX_PEERS: usize = 32;
@@ -149,6 +185,17 @@ pub struct VoiceChat {
     output_gain: Arc<AtomicU32>,
     deafened: Arc<AtomicBool>,
 
+    // ── Device supervision (see `service`) ───────────────────────────
+    /// OS default-device notifications (Windows). `None` = poll.
+    #[cfg(windows)]
+    device_watcher: Option<native::wasapi::DeviceWatcher>,
+    /// Names of the devices actually opened, for follow-the-default.
+    opened_input: Option<String>,
+    opened_output: Option<String>,
+    /// Last default-device poll (non-Windows) and last restart attempt.
+    last_device_poll: Instant,
+    last_restart_attempt: Instant,
+
     config: VoiceChatConfig,
     /// Holds the OS timer at 1 ms resolution for the session (Windows).
     _timer_guard: platform::TimerResolutionGuard,
@@ -202,6 +249,18 @@ impl VoiceChat {
             encoder_thread: Some(encoder_thread),
             user_settings: Arc::new(Mutex::new(HashMap::new())),
             removed_peers,
+            #[cfg(windows)]
+            device_watcher: match native::wasapi::DeviceWatcher::start(stats.clone()) {
+                Ok(w) => Some(w),
+                Err(e) => {
+                    debug!("device notifications unavailable ({e}); polling instead");
+                    None
+                }
+            },
+            opened_input: None,
+            opened_output: None,
+            last_device_poll: Instant::now(),
+            last_restart_attempt: Instant::now() - RESTART_BACKOFF,
             stats,
             is_speaking: Arc::new(AtomicBool::new(false)),
             output_gain,
@@ -256,7 +315,11 @@ impl VoiceChat {
 
         input.start()?;
         self.is_speaking = input.speaking_handle();
+        self.opened_input = input.opened_device_name();
         self.input = Some(input);
+        self.stats
+            .default_input_changed
+            .store(false, Ordering::Relaxed);
         Ok(())
     }
 
@@ -279,6 +342,10 @@ impl VoiceChat {
         self.output_gain = output.output_gain_handle();
         self.deafened = output.deafened_handle();
         output.start()?;
+        self.opened_output = output.opened_device_name();
+        self.stats
+            .default_output_changed
+            .store(false, Ordering::Relaxed);
         self.output = Some(output);
         Ok(())
     }
@@ -356,6 +423,15 @@ impl VoiceChat {
     /// here whenever it refreshes (every couple of seconds is plenty);
     /// values the transport can't measure reliably (idle link, huge
     /// implausible readings) should be withheld rather than passed.
+    /// Round-trip time to the server/peer as the transport measures it,
+    /// in milliseconds. Feeds the rate controller's congestion detector
+    /// (loss *with* RTT inflation = queues filling = send fewer bytes,
+    /// never more redundancy). Call it whenever the transport updates its
+    /// estimate; 0 means unknown.
+    pub fn set_link_rtt_ms(&self, rtt_ms: u32) {
+        self.stats.link_rtt_ms.store(rtt_ms, Ordering::Relaxed);
+    }
+
     pub fn set_uplink_loss_pct(&self, loss_pct: u32) {
         self.stats
             .uplink_loss_pct
@@ -464,6 +540,101 @@ impl VoiceChat {
 
     pub fn stats_summary(&self) -> String {
         self.stats.get_summary()
+    }
+
+    /// Device supervision. Call this from any periodic tick (100 ms – 1 s
+    /// is fine; it is cheap when nothing changed). It:
+    ///
+    /// - restarts a side whose stream failed (device unplugged, invalidated,
+    ///   repeated engine errors) on the same selection, with a 2 s backoff;
+    /// - follows the OS default device when no device was explicitly
+    ///   chosen — via notifications on Windows, a slow poll elsewhere;
+    /// - keeps retrying an explicitly chosen device that has gone away,
+    ///   so it comes back when plugged in.
+    ///
+    /// Returns `true` if a restart was performed.
+    pub fn service(&mut self) -> bool {
+        let now = Instant::now();
+        let stats = self.stats.clone();
+
+        // Slow poll for default-device changes where there are no events.
+        let watching = {
+            #[cfg(windows)]
+            {
+                self.device_watcher.is_some()
+            }
+            #[cfg(not(windows))]
+            {
+                false
+            }
+        };
+        if !watching && now.duration_since(self.last_device_poll) >= DEFAULT_DEVICE_POLL {
+            self.last_device_poll = now;
+            let host = cpal::default_host();
+            if self.input.is_some() && self.config.input_device.is_none() {
+                let current = host.default_input_device().and_then(|d| device_name(&d));
+                if current.is_some() && current != self.opened_input {
+                    stats.default_input_changed.store(true, Ordering::Relaxed);
+                }
+            }
+            if self.output.is_some() && self.config.output_device.is_none() {
+                let current = host.default_output_device().and_then(|d| device_name(&d));
+                if current.is_some() && current != self.opened_output {
+                    stats.default_output_changed.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+
+        let input_needs = self.input.is_some()
+            && (stats.input_stream_failed.load(Ordering::Relaxed)
+                || (self.config.input_device.is_none()
+                    && stats.default_input_changed.load(Ordering::Relaxed)));
+        let output_needs = self.output.is_some()
+            && (stats.output_stream_failed.load(Ordering::Relaxed)
+                || (self.config.output_device.is_none()
+                    && stats.default_output_changed.load(Ordering::Relaxed)));
+        if !input_needs && !output_needs {
+            return false;
+        }
+        if now.duration_since(self.last_restart_attempt) < RESTART_BACKOFF {
+            return false;
+        }
+        self.last_restart_attempt = now;
+
+        let mut restarted = false;
+        if input_needs {
+            let why = if stats.input_stream_failed.load(Ordering::Relaxed) {
+                "stream failed"
+            } else {
+                "default device changed"
+            };
+            info!("Restarting input ({why})");
+            let selection = self.config.input_device.clone();
+            match self.set_input_device(selection.as_deref()) {
+                Ok(()) => {
+                    stats.stream_restarts.fetch_add(1, Ordering::Relaxed);
+                    restarted = true;
+                }
+                Err(e) => error!("Input restart failed ({e}); will retry"),
+            }
+        }
+        if output_needs {
+            let why = if stats.output_stream_failed.load(Ordering::Relaxed) {
+                "stream failed"
+            } else {
+                "default device changed"
+            };
+            info!("Restarting output ({why})");
+            let selection = self.config.output_device.clone();
+            match self.set_output_device(selection.as_deref()) {
+                Ok(()) => {
+                    stats.stream_restarts.fetch_add(1, Ordering::Relaxed);
+                    restarted = true;
+                }
+                Err(e) => error!("Output restart failed ({e}); will retry"),
+            }
+        }
+        restarted
     }
 
     pub fn stats(&self) -> &Arc<AudioStats> {

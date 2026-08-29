@@ -55,7 +55,15 @@ use std::time::Duration;
 pub struct AudioInput {
     device: Device,
     device_config: SupportedStreamConfig,
+    /// The user's device selection (`None` = follow the OS default), for
+    /// the native backend's own device lookup.
+    #[cfg(windows)]
+    device_name: Option<String>,
+    /// cpal stream, when the cpal backend is in use.
     stream: Option<Stream>,
+    /// Native backend stream, when it opened successfully (Windows).
+    #[cfg(windows)]
+    native: Option<crate::native::wasapi::NativeCapture>,
     encoder_tx: Sender<PcmFrame>,
     loopback_tx: Sender<PcmFrame>,
 
@@ -123,7 +131,11 @@ impl AudioInput {
         Ok(Self {
             device,
             device_config,
+            #[cfg(windows)]
+            device_name: device_name.map(String::from),
             stream: None,
+            #[cfg(windows)]
+            native: None,
             encoder_tx,
             loopback_tx,
             ring_producer: Some(ring_producer),
@@ -140,6 +152,50 @@ impl AudioInput {
     }
 
     pub fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.stats
+            .input_stream_failed
+            .store(false, Ordering::Relaxed);
+
+        #[cfg(windows)]
+        {
+            match self.start_native() {
+                Ok(()) => return Ok(()),
+                Err(e) => log::warn!("Native WASAPI capture unavailable ({e}); using cpal"),
+            }
+        }
+        self.start_cpal()
+    }
+
+    /// Windows: open the device on our own MMCSS thread (see
+    /// `native::wasapi`). On failure the ring and latch are handed back
+    /// untouched so the cpal path can use them.
+    #[cfg(windows)]
+    fn start_native(&mut self) -> Result<(), String> {
+        let producer = self.ring_producer.take().ok_or("ring producer already taken")?;
+        let wake_tx = self.wake_tx.take().ok_or("wake sender already taken")?;
+        match crate::native::wasapi::NativeCapture::start(
+            self.device_name.as_deref(),
+            producer,
+            wake_tx,
+            self.stats.clone(),
+            self.config.clone(),
+            self.input_level.clone(),
+        ) {
+            Ok(native) => {
+                let rate = native.sample_rate;
+                self.native = Some(native);
+                self.start_worker_thread(rate)
+                    .map_err(|e| format!("worker thread: {e}"))
+            }
+            Err(err) => {
+                self.ring_producer = Some(err.producer);
+                self.wake_tx = Some(err.wake_tx);
+                Err(err.reason)
+            }
+        }
+    }
+
+    fn start_cpal(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let sample_rate = self.device_config.sample_rate();
         let channels = self.device_config.channels();
         let format = self.device_config.sample_format();
@@ -171,12 +227,9 @@ impl AudioInput {
         let stream_config = StreamConfig {
             channels,
             sample_rate,
-            // ~10 ms when the device advertises a supported range;
-            // untouched (Default) when it doesn't. See platform.rs.
-            buffer_size: crate::platform::request_low_latency_buffer(
-                self.device_config.buffer_size(),
-                sample_rate,
-            ),
+            // Capture wants *tolerance*, not a small buffer: see
+            // device::capture_buffer_size.
+            buffer_size: crate::device::capture_buffer_size(&self.device, &self.device_config),
         };
 
         let mut ring_producer = self
@@ -189,10 +242,21 @@ impl AudioInput {
         let stats_err = self.stats.clone();
         let input_level = self.input_level.clone();
         let ch = channels as usize;
+        // cpal's capture thread runs our callback; promote it on first
+        // entry (see platform::promote_callback_thread).
+        let mut promoted = false;
+        // The engine reports every capture gap through the error callback;
+        // under a starving game that is tens per second. Count all of them
+        // (stats), log at most one per second.
+        let mut last_err_log: Option<std::time::Instant> = None;
 
         let stream = self.device.build_input_stream(
             stream_config,
             move |data: &[T], _: &_| {
+                if !promoted {
+                    promoted = true;
+                    crate::platform::promote_callback_thread(FRAME_SIZE as u32, sample_rate);
+                }
                 if config.muted.load(Ordering::Relaxed) {
                     input_level.store(0.0_f32.to_bits(), Ordering::Relaxed);
                     return;
@@ -245,8 +309,18 @@ impl AudioInput {
                 let _ = wake_tx.try_send(());
             },
             move |err| {
-                error!("Input stream error: {err}");
+                if matches!(err.kind(), cpal::ErrorKind::DeviceNotAvailable) {
+                    stats_err.input_stream_failed.store(true, Ordering::Relaxed);
+                }
                 stats_err.input_overruns.fetch_add(1, Ordering::Relaxed);
+                let now = std::time::Instant::now();
+                if last_err_log.is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1)) {
+                    last_err_log = Some(now);
+                    error!(
+                        "Input stream error: {err} (total {})",
+                        stats_err.input_overruns.load(Ordering::Relaxed)
+                    );
+                }
             },
             None,
         )?;
@@ -306,6 +380,16 @@ impl AudioInput {
             );
         }));
         Ok(())
+    }
+
+    /// Friendly name of the device actually opened (native backend's
+    /// report when in use, otherwise cpal's), for follow-the-default.
+    pub fn opened_device_name(&self) -> Option<String> {
+        #[cfg(windows)]
+        if let Some(n) = self.native.as_ref() {
+            return Some(n.device_name.clone());
+        }
+        crate::device_name(&self.device)
     }
 
     pub fn input_level_handle(&self) -> Arc<AtomicU32> {
@@ -495,6 +579,8 @@ impl Drop for AudioInput {
     fn drop(&mut self) {
         self.should_stop.store(true, Ordering::Relaxed);
         self.stream.take();
+        #[cfg(windows)]
+        self.native.take();
         if let Some(thread) = self.worker_thread.take() {
             let _ = thread.join();
         }
