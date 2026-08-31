@@ -17,32 +17,31 @@
 // by the server from the authenticated transport, so it cannot be
 // spoofed by other clients. See `protocol::relayed`.
 
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError};
-use log::warn;
-use renet::{ClientId, RenetClient};
-use renet_netcode::{
-    ClientAuthentication, ConnectToken, NetcodeClientTransport, NetcodeTransportError,
-    generate_random_bytes,
+use std::{
+    collections::HashMap,
+    io::Read,
+    net::{SocketAddr, UdpSocket},
+    thread,
+    time::{Duration, Instant, SystemTime},
 };
-use std::collections::HashMap;
-use std::io::Read;
-use std::net::{SocketAddr, UdpSocket};
-use std::thread;
-use std::time::{Duration, Instant, SystemTime};
 
 use audio::{AudioPacket, PayloadType};
-
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError};
+use log::warn;
 use protocol::{
-    CLIENT_BYTES_PER_TICK, CONTROL_CHANNEL, ChannelDenyReason, ChannelInfo, ClientMessage,
-    DenyReason, MEDIA_CHANNEL, PROTOCOL_ID, SIGNAL_CHANNEL, SYSTEM_AUDIO_CHANNEL, ServerMessage,
-    ShareScope, VIDEO_CHANNEL, VOICE_CHANNEL, VideoReassembler, pack_system_audio,
-    VOICE_FLAG_RED, pack_video_frame, pack_voice_with_flags, parse_system_audio, parse_voice,
-    split_sender,
+    pack_system_audio, pack_video_frame, pack_voice_with_flags, parse_system_audio, parse_voice,
+    split_sender, ChannelDenyReason, ChannelInfo, ClientMessage, DenyReason, ServerMessage,
+    ShareScope, VideoReassembler, CLIENT_BYTES_PER_TICK, CONTROL_CHANNEL, MEDIA_CHANNEL,
+    PROTOCOL_ID, SIGNAL_CHANNEL, SYSTEM_AUDIO_CHANNEL, VIDEO_CHANNEL, VOICE_CHANNEL,
+    VOICE_FLAG_RED,
+};
+use renet::{ClientId, RenetClient};
+use renet_netcode::{
+    generate_random_bytes, ClientAuthentication, ConnectToken, NetcodeClientTransport,
+    NetcodeTransportError,
 };
 
-use crate::WakeFn;
-use crate::screen::ScreenControl;
-use crate::voice::VoiceControl;
+use crate::{screen::ScreenControl, voice::VoiceControl, WakeFn};
 
 /// How often to sample link statistics for the UI, the voice encoder's
 /// uplink-loss feedback, and the screen thread's bitrate ladder — all
@@ -81,18 +80,25 @@ const LINK_LOG_LOSS_PCT: f64 = 5.0;
 const LINK_LOG_LOSS_PCT_STREAMING: f64 = 1.0;
 const LINK_LOG_STREAMING_KBPS: f64 = 500.0;
 
-/// Uplink loss readings at or above this are not fed to the voice
-/// encoder. renet measures loss over a 6 s window of *sent* packets; on
-/// a quiet link (nobody talking, only keepalives) that window holds a
-/// handful of packets and the ratio is noise. A link that really loses
-/// half its packets is beyond what FEC can fix anyway.
+/// Ceiling applied to uplink loss readings before they are fed to the
+/// voice encoder. renet measures loss over a 6 s window of *sent*
+/// packets; on a quiet link (nobody talking, only keepalives) that
+/// window holds a handful of packets and the ratio is noise — a reading
+/// of 80 % may mean four lost keepalives. Extreme readings are therefore
+/// *clamped* to this value, not dropped: the encoder's rate controller
+/// only needs to know "the link is bad", and the exact figure above 50
+/// adds nothing. Dropping them (the previous behavior) left the encoder
+/// blind during the worst storms and let its last-seen value latch —
+/// the 2026-08-29 03:51 logs show the encoder acting on 24 % while the
+/// transport measured 78 %. The idle-artifact concern is now handled by
+/// staleness on the audio side: a value nobody refreshes for ~10 s is
+/// treated as unknown and decays (see `AudioStats::uplink_loss_updated_ms`).
 ///
-/// The screen thread's bitrate ladder deliberately does NOT use this
-/// gate: while a share is running the link is anything but quiet, and
-/// the 2026-08-28 incident logged 60–67% real loss for minutes at a
-/// time. It guards against the idle artifact by checking `kbps_up`
-/// against the rung it's on instead.
-const UPLINK_LOSS_IMPLAUSIBLE_PCT: f64 = 50.0;
+/// The screen thread's bitrate ladder uses the raw reading: while a
+/// share is running the link is anything but quiet, and it guards
+/// against the idle artifact by checking `kbps_up` against the rung
+/// it's on instead.
+const UPLINK_LOSS_CLAMP_PCT: f64 = 50.0;
 
 /// Timeout for the connect-token HTTP fetch.
 const TOKEN_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -107,7 +113,9 @@ pub enum NetworkMessage {
     /// Outbound image upload progress, 0–100. 100 means the reliable
     /// channel has drained (every byte acked) — the UI hides its
     /// indicator on it.
-    UploadProgress { pct: u8 },
+    UploadProgress {
+        pct: u8,
+    },
     Connected,
     Disconnected(String),
     /// The token issuer answered HTTP 403 during connect — the server
@@ -402,7 +410,11 @@ impl NetworkClient {
         // granted so a clamped buffer (firewall LSPs, policy) is
         // visible in baucord.log when diagnosing ENOBUFS reports.
         if let (Ok(snd), Ok(rcv)) = (sock_ref.send_buffer_size(), sock_ref.recv_buffer_size()) {
-            log::info!("UDP socket buffers: send {} KB, recv {} KB", snd / 1024, rcv / 1024);
+            log::info!(
+                "UDP socket buffers: send {} KB, recv {} KB",
+                snd / 1024,
+                rcv / 1024
+            );
         }
 
         let current_time = SystemTime::now()
@@ -663,10 +675,8 @@ impl NetworkClient {
                     "Server denied joining channel {channel_id}: {}",
                     reason.describe()
                 );
-                self.message_queue.push(NetworkMessage::ChannelJoinDenied {
-                    channel_id,
-                    reason,
-                });
+                self.message_queue
+                    .push(NetworkMessage::ChannelJoinDenied { channel_id, reason });
             }
             ServerMessage::ChannelListUpdated {
                 channels,
@@ -705,7 +715,8 @@ impl NetworkClient {
                 count,
                 data,
             } => {
-                if let Some(image) = self.accept_image_chunk(client_id, upload_id, index, count, data)
+                if let Some(image) =
+                    self.accept_image_chunk(client_id, upload_id, index, count, data)
                 {
                     let username = self
                         .usernames
@@ -996,11 +1007,11 @@ impl NetworkClient {
             };
             match protocol::encode_client_message(&msg) {
                 Some(encoded) => {
-                        // Field-level borrows: `upload` is still live here, so the
-                        // `queue_message` helper (which takes `&mut self`) can't be used.
-                        self.client.send_message(msg.channel(), encoded);
-                        self.outbound_pending = true;
-                    }
+                    // Field-level borrows: `upload` is still live here, so the
+                    // `queue_message` helper (which takes `&mut self`) can't be used.
+                    self.client.send_message(msg.channel(), encoded);
+                    self.outbound_pending = true;
+                }
                 None => {
                     warn!("Image chunk failed to encode; aborting upload");
                     self.upload = None;
@@ -1070,8 +1081,8 @@ impl NetworkClient {
         // could fill 10 MB in ~10 s at full rate. Drop the frame here
         // instead; the viewer sees a seq gap and recovers via keyframe
         // request, and the ladder is already stepping down.
-        let wire_bytes = data.len() + data.len().div_ceil(protocol::VIDEO_CHUNK_PAYLOAD)
-            * protocol::VIDEO_HEADER_SIZE;
+        let wire_bytes = data.len()
+            + data.len().div_ceil(protocol::VIDEO_CHUNK_PAYLOAD) * protocol::VIDEO_HEADER_SIZE;
         if !self.client.can_send_message(VIDEO_CHANNEL, wire_bytes) {
             if !self.video_channel_full {
                 warn!(
@@ -1482,14 +1493,15 @@ fn handle_control(
     true
 }
 
-/// Convert renet's percent loss into a whole-number hint for the voice
-/// encoder, or `None` if the reading is not worth acting on.
+/// Convert renet's percent loss into a whole-number reading for the
+/// voice encoder: clamped to [`UPLINK_LOSS_CLAMP_PCT`], or `None` only
+/// when the value is not a number at all.
 fn plausible_uplink_loss_pct(loss_pct: f64) -> Option<u32> {
-    if !loss_pct.is_finite() || loss_pct < 0.0 || loss_pct >= UPLINK_LOSS_IMPLAUSIBLE_PCT {
+    if !loss_pct.is_finite() || loss_pct < 0.0 {
         return None;
     }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // bounded to 0..50 above
-    Some(loss_pct.round() as u32)
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // bounded to 0..=50 above
+    Some(loss_pct.round().min(UPLINK_LOSS_CLAMP_PCT) as u32)
 }
 
 fn run_network_loop(
@@ -1658,10 +1670,10 @@ fn run_network_loop(
                         // congestion (loss + RTT inflation: send fewer
                         // bytes) from random loss (add redundancy).
                         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                        let _ = voice_tx.try_send(VoiceControl::SetLinkRtt(
-                            rtt_ms.max(0.0).round() as u32,
-                        ));
-                        #[allow(clippy::cast_possible_truncation)] // f32 is plenty for percent/ms/kbit
+                        let _ = voice_tx
+                            .try_send(VoiceControl::SetLinkRtt(rtt_ms.max(0.0).round() as u32));
+                        #[allow(clippy::cast_possible_truncation)]
+                        // f32 is plenty for percent/ms/kbit
                         let _ = screen_tx.try_send(ScreenControl::UplinkStats {
                             loss_pct: loss_pct as f32,
                             rtt_ms: rtt_ms as f32,
@@ -1732,12 +1744,19 @@ mod tests {
     }
 
     #[test]
-    fn plausible_uplink_loss_should_reject_idle_link_artifacts() {
-        assert_eq!(plausible_uplink_loss_pct(50.0), None);
+    fn plausible_uplink_loss_should_clamp_extreme_readings() {
+        // Not dropped: the encoder must learn the link is bad during a
+        // storm (2026-08-29 03:51: encoder saw 24 % while renet said
+        // 78 %). The staleness check on the audio side handles the
+        // idle-link artifact this used to guard against.
+        assert_eq!(plausible_uplink_loss_pct(50.0), Some(50));
+        assert_eq!(plausible_uplink_loss_pct(78.3), Some(50));
+        assert_eq!(plausible_uplink_loss_pct(100.0), Some(50));
     }
 
     #[test]
     fn plausible_uplink_loss_should_reject_nan() {
         assert_eq!(plausible_uplink_loss_pct(f64::NAN), None);
+        assert_eq!(plausible_uplink_loss_pct(-1.0), None);
     }
 }
