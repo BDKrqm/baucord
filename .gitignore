@@ -1,6 +1,5 @@
 /target
 /backups
-todo.md
 onnxruntime.dll
 diagnostics*.txt
 .DS_Store
