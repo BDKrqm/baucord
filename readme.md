@@ -3,32 +3,38 @@
 A lightweight voice, text, and screen sharing application built with Rust.
 
 Uses [Slint](https://slint.dev) for the UI, QUIC (`quinn-proto`, driven
-without a runtime) for network transport, and FFmpeg for video
-encoding/decoding. Audio runs on
-dedicated threads with crossbeam channels. Screen sharing follows the same
-architecture: capture → encode → network → decode → viewer window. The
-server is a simple relay — no mixing, no transcoding.
+from the app's own threads with no async runtime) for network transport,
+and FFmpeg for video encoding/decoding. Audio runs on dedicated threads
+with crossbeam channels. Screen sharing follows the same architecture:
+capture → encode → network → decode → viewer window. The server is a
+simple relay — no mixing, no transcoding.
+
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for how the pieces fit together
+and [`TODO.md`](TODO.md) for where the project is heading.
 
 ## Workspace
 
-| crate      | what it is                                                         |
-| ---------- | ------------------------------------------------------------------ |
-| `protocol` | wire format: messages, transport channels, voice/video packing     |
-| `server`   | the dedicated relay (lib + bin, so integration tests can drive it) |
-| `client`   | networking, settings, and the voice/screen worker threads          |
-| `app-core` | platform-agnostic app logic: roster/chat view models, image pipes  |
-| `desktop`  | the desktop shell (binary: `baucord`)                              |
-| `ui`       | the Slint UI and its Rust glue                                     |
-| `i18n`     | Fluent translations — English, Español (AR), Português (BR)        |
-| `audio`    | capture/playback, Opus, VAD, denoise, jitter buffer                |
-| `video`    | FFmpeg H.264 encode/decode, screen capture                         |
+| crate       | what it is                                                          |
+| ----------- | ------------------------------------------------------------------- |
+| `protocol`  | wire format: messages, lanes, framing, voice/video packing          |
+| `transport` | QUIC without a runtime: driver, identity + pinning, UDP, simulator  |
+| `server`    | the dedicated relay (lib + bin, so integration tests can drive it)  |
+| `client`    | networking, settings, and the voice/screen worker threads           |
+| `app-core`  | platform-agnostic app logic: roster/chat view models, image pipes   |
+| `desktop`   | the desktop shell (binary: `baucord`)                               |
+| `ui`        | the Slint UI and its Rust glue                                      |
+| `i18n`      | Fluent translations — English, Español (AR), Português (BR)         |
+| `audio`     | capture/playback, Opus, VAD, denoise, jitter buffer, rate ladder    |
+| `video`     | FFmpeg H.264 encode/decode, screen capture                          |
 
 ## Features
 
-- **Voice chat** — Opus over UDP with voice activity detection, per-user
-  volume/mute (right-click any user; settings persist per peer), and an
-  adaptive jitter buffer with arrival-time jitter estimation, burst-safe
-  drain, and per-peer limiting
+- **Voice chat** — Opus over QUIC datagrams with voice activity
+  detection, per-user volume/mute (right-click any user; settings
+  persist per peer), and an adaptive jitter buffer with arrival-time
+  jitter estimation, burst-safe drain, and per-peer limiting. The
+  encoder's bitrate/redundancy ladder is driven by what the relay
+  actually received of your voice, reported back every two seconds
 - **Voice channels** — server-defined rooms (TeamSpeak style). Everyone
   lands in the default channel (the Lobby); channels can have a join
   password and a user limit. The channel list is **hot-reloadable**:
@@ -37,18 +43,25 @@ server is a simple relay — no mixing, no transcoding.
   moved to the default
 - **Screen sharing** — H.264 via FFmpeg with the source's audio, 720p or
   1080p at 30 or 60 fps. Streams are visible to **your channel only or
-  the whole server** (sharer's choice, per share). Viewers get a
-  resizable, aspect-ratio-preserving window with live stats; viewer loss
-  and RTT feed back to the sharer for rate adaptation, and viewers can
-  request keyframes for fast recovery
+  the whole server** (sharer's choice, per share). Video travels in
+  keyframe-led groups: a viewer that falls behind loses whole groups,
+  never its voice, and resumes at the next keyframe; the sharer's
+  bitrate ladder steps on the groups its own uplink abandoned. Viewers
+  get a resizable, aspect-ratio-preserving window with live stats and
+  can request keyframes for fast recovery
 - **Text chat** — one room for the whole server regardless of voice
   channel, with message history, inline links, images, gifs, and an
-  emoji picker
+  emoji picker. Images are relayed on a paced stream so a 10 MB paste
+  never dents anyone's voice
 - **Multiple servers** — save several servers in settings, pick a
   default, switch from the connect screen. Every connection is
-  encrypted and the server's identity is pinned (from an invite
-  string, or on first use); secure servers additionally require a
-  shared room password
+  encrypted and the server's identity is pinned — from an invite
+  string (`host:port#SHA256:…`) or on first use; a server whose key
+  changed is refused before anything is sent. Secure servers
+  additionally require a shared room password
+- **Stays connected** — a dropped session (Wi-Fi roam, ISP hiccup,
+  server restart) reconnects on its own with backoff; short blackouts
+  under 30 s don't even end the session
 - **Global hotkeys** — toggle mute, deafen, and screen share from any
   window; rebind with live key capture
 - **Three languages** — English, Español (Argentina), Português (Brasil)
@@ -60,8 +73,9 @@ server is a simple relay — no mixing, no transcoding.
 
 ### Prerequisites
 
-- Rust 1.95+ (workspace uses edition 2024)
+- Rust 1.95+ (`rust-toolchain.toml` pins it; workspace uses edition 2024)
 - FFmpeg shared libraries (for screen share encode/decode)
+- Formatting uses nightly-only options: `cargo +nightly fmt --all`
 
 #### Windows: building FFmpeg with vcpkg
 
@@ -91,6 +105,18 @@ Add that line to your PowerShell profile if you don't want to set it
 every session. Once it's set, `cargo build` / `cargo run -p desktop`
 will pick up the libraries automatically.
 
+### Tests
+
+```bash
+cargo test --all
+```
+
+The transport and server suites run entirely in-process on a simulated
+network with a fake clock (delay, jitter, loss, bandwidth, address
+changes), so "a viewer on a 0.5 Mbit/s link watching an 8 Mbit/s share"
+or "a 20 s blackout" are ordinary unit tests that finish in milliseconds.
+No sockets, no timing flakiness.
+
 ### Server
 
 ```bash
@@ -99,15 +125,27 @@ cargo run -p server --release
 
 Listens on `0.0.0.0:5000` by default. Configuration lives in
 `server.yaml` (written with defaults on first start; `--config`,
-`--host`, `--port` override). Channels look like this:
+`--host`, `--port` override). The parts you will touch:
 
 ```yaml
+server:
+  name: Baucord Server
+  public_address: "203.0.113.5:5000"   # only used to print the invite
+authentication:
+  secure: true                          # false = open mode, LAN/dev only
+  password: hunter2                     # the room secret, sent in Hello
+identity:
+  dir: data/baucord                     # identity.key lives here — back it up
+logging:
+  link_stats_interval_secs: 2           # per-client `link:` lines (0 = off)
+  telemetry: true                       # log clients' `telemetry:` samples
+  file: server.log                      # "" = stderr only (containers)
 channels:
   - name: Lobby
-    default: true # exactly one channel must be the default
+    default: true                       # exactly one channel must be the default
   - name: Gaming
-    password: "hunter2" # optional
-    user_limit: 8 # optional
+    password: "hunter2"                 # optional
+    user_limit: 8                       # optional
 ```
 
 Omit the `channels` key entirely for a single open Lobby. The
@@ -117,17 +155,21 @@ file needs a restart.
 
 Every connection is QUIC over UDP, encrypted, and authenticated by the
 server's Ed25519 identity key (generated on first start in
-`identity.dir`, default `data/baucord`; clients pin its fingerprint).
-Open mode (`authentication.secure: false`) then accepts anyone and is
-meant for LAN/dev — the server logs loudly about it. Secure mode
-requires clients to send `authentication.password` in their hello
-(checked in constant time, failures rate-limited per address).
+`identity.dir`; clients pin its fingerprint). Open mode
+(`authentication.secure: false`) then accepts anyone and is meant for
+LAN/dev — the server logs loudly about it. Secure mode requires clients
+to send `authentication.password` in their hello (checked in constant
+time, failures rate-limited per address).
 
 The startup log prints the identity and an invite string,
 `host:port#SHA256:…`; hand that to people so their client verifies the
 server before saying hello. To rotate the key, stop the server and run
-`baucord-server rotate-key` — the new key is signed by the old one, so
-pinned clients migrate automatically.
+`server rotate-key` — the new key is signed by the old one, so pinned
+clients migrate automatically.
+
+`SIGTERM`/`SIGINT` close every session with a "server restarting"
+reason; clients reconnect on their own about two seconds later, so a
+deploy is a blink, not a 30-second dropout.
 
 ### Client
 
@@ -139,11 +181,20 @@ Pick a nickname, pick a server, connect. Settings persist to
 `settings.json` — next to the executable when that directory is
 writable (portable installs), otherwise in the platform config dir
 (`%APPDATA%\baucord`, `~/.config/baucord`, `~/Library/Application
-Support/baucord`).
+Support/baucord`). The client's own identity key (`identity.key`) lives
+next to it; it signs the handshake so the server can derive a stable
+user id, and never leaves the machine.
 
-Client and server must be from the same release: the protocol id is
-bumped on every breaking wire change, and older peers are refused at
-the handshake instead of misbehaving mid-call.
+A server entry holds the address, the room password, and the pinned
+fingerprint. Paste an invite string into the identity field to verify
+a server up front; leave it empty and it is pinned on the first
+successful connection.
+
+Client and server must speak the same protocol: the QUIC ALPN string
+(`baucord/1`) is bumped on every breaking wire change, and older peers
+are refused at the handshake with an "update baucord" message instead
+of misbehaving mid-call. Non-breaking capabilities are negotiated as
+feature bits in `Hello`/`Welcome`.
 
 ## Deploying a server
 
@@ -159,20 +210,23 @@ certificate to provision. Media UDP is published straight from the
 `baucord` container (not through a userspace proxy: that added copies
 per packet and hid real client addresses from the relay).
 
-The `baucord` image runs as uid `10000`; the identity key is kept in
-`./data/baucord` on the host so `docker compose up` recreates keep the
-identity every client has pinned. Back that directory up.
+The image is distroless and runs as uid `10000`; the identity key is
+kept in `./data/baucord` on the host so `docker compose up` recreates
+keep the identity every client has pinned. Back that directory up. The
+container config sets `logging.file: ""` — Docker captures stderr, and
+that is the log.
 
 ### Layout
 
 ```
+Dockerfile          # cargo-chef build, distroless runtime
 docker-compose.yml
 config/
   baucord.yaml      # mounted as /app/server.yaml
 scripts/
   setup.sh          # bootstrap / re-apply host + stack
   monitor-net.sh    # UDP / NIC drop logger
-data/baucord/       # created by setup.sh; holds identity.key (keep out of git, back it up)
+data/baucord/       # created by setup.sh; identity.key + uploaded client logs (keep out of git, back it up)
 ```
 
 ### Bootstrapping a host
@@ -213,12 +267,30 @@ data/baucord/       # created by setup.sh; holds identity.key (keep out of git, 
    ss -uln | grep :5000
    ```
 
+### Reading the server log
+
+Two periodic lines carry most of what you'll ever need:
+
+- `link: <user>: rtt, cwnd, path loss, tx/rx, mtu, dgram drops, groups
+  behind N/M (cause), voice rx/expected/lost/late` — the relay's view of
+  one client every `link_stats_interval_secs`. *Path loss* is the
+  transport's own accounting and informational; *voice lost* is what
+  listeners actually missed; *groups behind* is how often that client's
+  downlink couldn't keep up with a share (the cause breakdown says
+  which rule gave up).
+- `telemetry: <user>: …` — the client's own numbers every 10 s: path,
+  audio ladder, encoder rung/fps when sharing, decode stats when
+  viewing.
+
+A rising loss curve with flat RTT is the client's network; a rising RTT
+with low loss is a queue somewhere — ours or a router's.
+
 ### Monitoring while it runs
 
 A relay is a UDP fan-out — a ~177 KB keyframe goes to every viewer at
-once — and the kernel drops those bursts silently; you see idle
-timeouts and abandoned video groups, not errors. Run the monitor during load (a 200-person test,
-or just always):
+once — and the kernel drops those bursts silently; you see abandoned
+video groups and idle timeouts, not errors. Run the monitor during load
+(a 200-person test, or just always):
 
 ```bash
 sudo nohup scripts/monitor-net.sh 10 >/dev/null 2>&1 &   # every 10s
@@ -278,6 +350,10 @@ media port, which is only safe without DNAT.
   personal credentials; treat them accordingly
 - Speaking indicators are global: you see the green dot for people in
   other channels even though you can't hear them
+- A server whose identity changed must be accepted by editing (or
+  clearing) the pin in Settings; there is no accept/reject dialog yet
 - Resampling between different audio sample rates is basic
 - Screen share viewer creates a new FFmpeg decoder per keyframe
   (stateless recovery, not optimal for bandwidth)
+- A user's stable id (from their client key) is logged by the server
+  but not yet used for anything — no per-user settings, roles, or bans
