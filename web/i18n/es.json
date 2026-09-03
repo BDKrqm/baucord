@@ -60,7 +60,7 @@
   "step-3-d": "Pegan la invitación en baucord una vez, eligen un apodo y se conectan. De ahí en adelante el servidor queda guardado.",
   "host-note": "¿Preferís contenedores? El repositorio incluye un Dockerfile, un archivo de compose y un script de setup para un host Linux. Los detalles están en la <a href=\"https://github.com/mpwsh/baucord#deploying-a-server\">guía de despliegue</a>.",
   "dl-title": "Descargar",
-  "dl-lede": "Versión __VERSION__. Cada zip trae la app y el servidor dedicado para esa plataforma, así que quien hostea no necesita nada más.",
+  "dl-lede": "Cada zip trae la app y el servidor dedicado para esa plataforma, así que quien hostea no necesita nada más.",
   "dl-th-platform": "Plataforma",
   "dl-th-file": "Archivo",
   "dl-th-size": "Tamaño",
