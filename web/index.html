@@ -4,45 +4,41 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/x-icon" href="/img/favicon.ico" />
-    <title>baucord — self-hosted voice chat</title>
+    <title>baucord — own your comms</title>
     <meta
       name="description"
-      content="A small, free, self-hosted voice chat app for you and your friends — channels, text, images and screen sharing, in about 40 MB of RAM. Client and server ship together in one zip."
+      content="Free, open source voice chat with text and screen sharing. One friend runs the server, everyone else types the address. Windows, macOS and Linux; the client uses about 40 MB of RAM."
     />
-    <meta name="theme-color" content="#1A1D21" />
+    <meta name="theme-color" content="#1a1d21" />
 
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,700;1,400&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&display=swap"
       rel="stylesheet"
     />
 
     <style>
       /* ─────────────────────────────────────────────
-       palette — "workbench" (matches ui/src/theme.rs)
-         graphite   #1A1D21   ground
-         gunmetal   #222529   raised panels, cards
-         fog        #D1D2D3   primary text
-         steel      #ABADB0   secondary text
-         cobalt     #1264A3   accent (fills)
-       ───────────────────────────────────────────── */
+         palette — "workbench", the desktop app's own (ui/src/theme.rs)
+           graphite  #1a1d21   page
+           gunmetal  #222529   raised panels, alternate bands
+           fog       #d1d2d3   primary text
+           steel     #abadb0   secondary text
+           cobalt    #1264a3   accent (fills)
+         ───────────────────────────────────────────── */
       :root {
-        --graphite: #1a1d21;
-        --gunmetal: #222529;
-        --fog: #d1d2d3;
-        --steel: #abadb0;
+        --paper: #1a1d21;
+        --mist: #222529;
+        --ink: #d1d2d3;
+        --slate: #abadb0;
+        --line: rgba(209, 210, 211, 0.12);
         --cobalt: #1264a3;
-
-        /* derived */
-        --cobalt-bright: #1d9bd1; /* accent used as text      */
-        --cobalt-deep: #0e5082; /* hover / pressed fills    */
-        --muted: #808386; /* fog, dimmed              */
-        --line: rgba(209, 210, 211, 0.1); /* hairline                 */
-        --paper: #ffffff; /* text on cobalt           */
-
-        --mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", monospace;
-        --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+        --cobalt-2: #0e5082;
+        --cobalt-text: #1d9bd1; /* the accent as text on graphite */
+        --white: #ffffff;
+        --sans: "Public Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+        --wrap: 1080px;
       }
 
       * {
@@ -50,485 +46,516 @@
         padding: 0;
         box-sizing: border-box;
       }
-
       html {
         scroll-behavior: smooth;
       }
-
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
+      }
       body {
-        background: var(--graphite);
-        color: var(--fog);
+        background: var(--paper);
+        color: var(--ink);
         font-family: var(--sans);
-        font-size: 1rem;
-        line-height: 1.6;
+        font-size: 1.0625rem;
+        line-height: 1.55;
         -webkit-font-smoothing: antialiased;
       }
-
       ::selection {
         background: var(--cobalt);
-        color: var(--paper);
+        color: var(--white);
       }
-
       :focus-visible {
-        outline: 2px solid var(--cobalt-bright);
-        outline-offset: 2px;
-        border-radius: 2px;
+        outline: 2px solid var(--cobalt-text);
+        outline-offset: 3px;
+        border-radius: 3px;
       }
-
       a {
-        color: inherit;
+        color: var(--cobalt-text);
+        text-decoration: none;
       }
-
+      a:hover {
+        text-decoration: underline;
+      }
+      img {
+        display: block;
+        max-width: 100%;
+        height: auto;
+      }
       .wrap {
-        max-width: 920px;
+        max-width: var(--wrap);
         margin: 0 auto;
         padding: 0 1.5rem;
       }
+      h1,
+      h2,
+      h3 {
+        font-weight: 600;
+        line-height: 1.15;
+        letter-spacing: -0.015em;
+      }
+      h2 {
+        font-size: 1.85rem;
+        margin-bottom: 0.5rem;
+      }
+      h3 {
+        font-size: 1.125rem;
+        margin-bottom: 0.35rem;
+      }
+      .lede {
+        color: var(--slate);
+        max-width: 38rem;
+        margin-bottom: 2.5rem;
+      }
+      code {
+        font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        font-size: 0.92em;
+        background: var(--mist);
+        padding: 0.1em 0.35em;
+        border-radius: 4px;
+      }
+      .band section,
+      section {
+        padding: 4.5rem 0;
+      }
+      .band {
+        background: var(--mist);
+      }
+      /* keep anchored sections from tucking under the bar */
+      section[id] {
+        scroll-margin-top: 4rem;
+      }
 
       /* ── nav ─────────────────────────────────── */
-
       nav {
         position: sticky;
         top: 0;
         z-index: 10;
-        background: var(--graphite);
+        background: rgba(26, 29, 33, 0.92);
+        backdrop-filter: blur(8px);
         border-bottom: 1px solid var(--line);
-      }
-      /* With JS available, the bar stays out of the way until the hero
-       wordmark scrolls off — no point showing "baucord" twice.
-       Without JS it remains an ordinary sticky bar. */
-      .js nav {
-        position: fixed;
-        left: 0;
-        right: 0;
-        transform: translateY(-100%);
-        visibility: hidden;
-        transition:
-          transform 0.25s ease,
-          visibility 0.25s;
-      }
-      .js nav.shown {
-        transform: translateY(0);
-        visibility: visible;
-      }
-      @media (prefers-reduced-motion: reduce) {
-        .js nav {
-          transition: none;
-        }
-      }
-      /* keep anchored sections from tucking under the bar */
-      section {
-        scroll-margin-top: 4.5rem;
       }
       .nav-inner {
         display: flex;
         align-items: center;
-        justify-content: space-between;
-        height: 3.5rem;
+        gap: 1.5rem;
+        height: 3.75rem;
       }
       .wordmark {
-        font-family: var(--mono);
         font-weight: 700;
-        font-size: 1.05rem;
-        letter-spacing: 0.04em;
-        text-decoration: none;
+        font-size: 1.25rem;
+        letter-spacing: -0.02em;
+        color: var(--ink);
+        margin-right: auto;
       }
-      .wordmark b {
-        color: var(--cobalt-bright);
-        font-weight: 700;
+      .wordmark:hover {
+        text-decoration: none;
       }
       .nav-links {
         display: flex;
         align-items: center;
-        gap: 1.75rem;
+        gap: 1.5rem;
       }
-      .nav-links a {
-        font-family: var(--mono);
-        font-size: 0.78rem;
-        color: var(--steel);
+      .nav-links a.plain {
+        color: var(--ink);
+        font-weight: 500;
+        font-size: 0.95rem;
+      }
+      .nav-links a.plain:hover {
+        color: var(--cobalt-text);
         text-decoration: none;
       }
-      .nav-links a:hover {
-        color: var(--fog);
-      }
-      .nav-links a.dl {
-        color: var(--paper);
-        background: var(--cobalt);
-        padding: 0.4rem 0.85rem;
-        border-radius: 5px;
-        font-weight: 500;
-      }
-      .nav-links a.dl:hover {
-        background: var(--cobalt-deep);
-      }
-      /* language picker — a real <select>, so keyboard nav and native
-       menus come for free. Pointless without JS: hidden until .js. */
       .lang-select {
-        display: none;
-        font-family: var(--mono);
-        font-size: 0.78rem;
-        color: var(--steel);
-        background: var(--graphite);
+        font: inherit;
+        font-size: 0.9rem;
+        color: var(--ink);
+        background: var(--mist);
         border: 1px solid var(--line);
-        border-radius: 5px;
-        padding: 0.25rem 1.6rem 0.25rem 0.5rem;
-        cursor: pointer;
-        appearance: none;
-        -webkit-appearance: none;
-        /* chevron rendered as a background SVG so it inherits color and
-         doesn't need an extra element */
-        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6' fill='none' stroke='%23ABADB0' stroke-width='1.5'><path d='M1 1l4 4 4-4'/></svg>");
-        background-repeat: no-repeat;
-        background-position: right 0.5rem center;
-        background-size: 0.6rem auto;
+        border-radius: 6px;
+        padding: 0.3rem 0.5rem;
       }
-      .js .lang-select {
-        display: inline-block;
-      }
-      .lang-select:hover {
-        color: var(--fog);
-        border-color: var(--cobalt);
-      }
-      .lang-select option {
-        background: var(--gunmetal);
-        color: var(--fog);
+      @media (max-width: 720px) {
+        .nav-links a.plain {
+          display: none;
+        }
       }
 
-      /* language picker in the download footer note — same select,
-       inline with the "Apache-licensed" facts line. Hidden without JS. */
-      .lang-note {
-        display: none;
-        align-items: baseline;
+      /* ── buttons ─────────────────────────────── */
+      .btn {
+        display: inline-flex;
+        align-items: center;
         justify-content: center;
-        gap: 0.55rem;
-        margin: 2.25rem 0 0;
-        font-family: var(--mono);
-        font-size: 0.72rem;
-        color: var(--muted);
-        letter-spacing: 0.02em;
+        gap: 0.5rem;
+        font: inherit;
+        font-weight: 600;
+        border-radius: 8px;
+        padding: 0.6rem 1.1rem;
+        border: 1px solid transparent;
+        cursor: pointer;
+        white-space: nowrap;
+        text-decoration: none;
       }
-      .js .lang-note {
-        display: flex;
+      .btn:hover {
+        text-decoration: none;
       }
-      .lang-note .lang-select {
-        display: inline-block;
-        font-size: 0.72rem;
+      .btn.solid {
+        background: var(--cobalt);
+        color: var(--white);
+      }
+      .btn.solid:hover {
+        background: var(--cobalt-2);
+      }
+      .btn.quiet {
+        background: transparent;
+        color: var(--ink);
+        border-color: var(--line);
+      }
+      .btn.quiet:hover {
+        border-color: var(--slate);
       }
 
       /* ── hero ────────────────────────────────── */
-
       .hero {
         display: grid;
         grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
         gap: 3.5rem;
         align-items: center;
-        padding: 6rem 0 5rem;
+        padding: 4.5rem 1.5rem 4rem;
       }
       .hero h1 {
-        font-family: var(--mono);
-        font-weight: 700;
-        font-size: clamp(2.6rem, 6vw, 3.6rem);
-        letter-spacing: -0.02em;
-        line-height: 1.05;
-        margin-bottom: 1.1rem;
+        font-size: clamp(2.1rem, 4.2vw, 3rem);
+        margin-bottom: 1rem;
       }
-      .hero h1 b {
-        color: var(--cobalt-bright);
-        font-weight: 700;
-      }
-      .hero p {
-        color: var(--steel);
-        max-width: 34ch;
-        margin-bottom: 1.9rem;
-      }
-      .btn-row {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.75rem;
-        margin-bottom: 1.6rem;
-      }
-      .btn {
-        font-family: var(--mono);
-        font-size: 0.85rem;
-        font-weight: 500;
-        text-decoration: none;
-        padding: 0.65rem 1.15rem;
-        border-radius: 6px;
-      }
-      .btn.solid {
-        background: var(--cobalt);
-        color: var(--paper);
-      }
-      .btn.solid:hover {
-        background: var(--cobalt-deep);
-      }
-      .btn.ghost {
-        border: 1px solid var(--line);
-        color: var(--fog);
-      }
-      .btn.ghost:hover {
-        border-color: var(--cobalt);
-      }
-      .facts {
-        font-family: var(--mono);
-        font-size: 0.72rem;
-        color: var(--muted);
-        letter-spacing: 0.02em;
-      }
-
-      /* hero screenshot — the product, front and center */
-      .hero-shot {
-        margin: 0;
-        min-width: 0;
+      .hero .lede {
+        margin-bottom: 2rem;
+        font-size: 1.125rem;
       }
       .hero-shot img {
-        display: block;
-        width: 100%;
-        height: auto;
+        border-radius: 10px;
         border: 1px solid var(--line);
-        border-radius: 8px;
-        box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+        box-shadow: 0 24px 60px -24px rgba(0, 0, 0, 0.7);
       }
-      .hero-shot a {
-        display: block;
-        cursor: zoom-in;
-      }
-      .hero-shot a:hover img {
-        border-color: var(--cobalt);
-      }
-      .hero-shot figcaption {
-        font-family: var(--mono);
-        font-size: 0.7rem;
-        color: var(--muted);
-        margin-top: 0.7rem;
-        text-align: center;
+      @media (max-width: 860px) {
+        .hero {
+          grid-template-columns: 1fr;
+          gap: 2.5rem;
+          padding-top: 3rem;
+        }
       }
 
-      /* self-host steps */
+      /* ── the download control ────────────────── */
+      .dl-control {
+        display: inline-flex;
+        align-items: stretch;
+        border-radius: 10px;
+        overflow: visible;
+        position: relative;
+      }
+      .dl-main {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.6rem;
+        background: var(--cobalt);
+        color: var(--white);
+        font-weight: 600;
+        font-size: 1.2rem;
+        padding: 0.85rem 1.4rem;
+        border-radius: 10px 0 0 10px;
+        text-decoration: none;
+      }
+      .dl-main:hover {
+        background: var(--cobalt-2);
+        text-decoration: none;
+      }
+      .dl-main.alone {
+        border-radius: 10px;
+      }
+      .dl-main svg {
+        width: 1.25rem;
+        height: 1.25rem;
+        flex: none;
+      }
+      /* the other-platforms menu is a <details>: works without JS,
+         opens on click, closes on Escape via the script below */
+      .dl-menu {
+        position: relative;
+        display: flex;
+      }
+      .dl-menu summary {
+        list-style: none;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 3rem;
+        background: var(--cobalt);
+        color: var(--white);
+        border-left: 1px solid rgba(255, 255, 255, 0.3);
+        border-radius: 0 10px 10px 0;
+        cursor: pointer;
+      }
+      .dl-menu summary::-webkit-details-marker {
+        display: none;
+      }
+      .dl-menu summary:hover,
+      .dl-menu[open] summary {
+        background: var(--cobalt-2);
+      }
+      .dl-menu summary svg {
+        width: 1rem;
+        height: 1rem;
+      }
+      .dl-menu ul {
+        list-style: none;
+        position: absolute;
+        top: calc(100% + 0.4rem);
+        right: 0;
+        min-width: 15rem;
+        background: var(--mist);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        box-shadow: 0 16px 40px -12px rgba(0, 0, 0, 0.7);
+        padding: 0.4rem;
+        z-index: 5;
+      }
+      .dl-menu li a {
+        display: flex;
+        justify-content: space-between;
+        gap: 1rem;
+        padding: 0.55rem 0.75rem;
+        border-radius: 6px;
+        color: var(--ink);
+        font-weight: 500;
+        white-space: nowrap;
+      }
+      .dl-menu li a:hover {
+        background: rgba(209, 210, 211, 0.08);
+        text-decoration: none;
+      }
+      .dl-menu li a small {
+        color: var(--slate);
+        font-weight: 400;
+      }
+      .dl-menu li.more {
+        border-top: 1px solid var(--line);
+        margin-top: 0.3rem;
+        padding-top: 0.3rem;
+      }
+      .dl-meta {
+        margin-top: 0.8rem;
+        color: var(--slate);
+        font-size: 0.95rem;
+      }
+      .dl-mobile {
+        color: var(--slate);
+        margin-top: 0.5rem;
+        max-width: 30rem;
+      }
+
+      /* ── features ────────────────────────────── */
+      .features {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 2.25rem 3.5rem;
+        margin-top: 2.5rem;
+      }
+      .features p {
+        color: var(--slate);
+      }
+      @media (max-width: 720px) {
+        .features {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      /* ── screenshots ─────────────────────────── */
+      .shots {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 1.75rem 1.5rem;
+        margin-top: 2.5rem;
+      }
+      .shots figure {
+        min-width: 0;
+      }
+      .shots img {
+        border-radius: 8px;
+        border: 1px solid var(--line);
+        aspect-ratio: 25 / 16;
+        object-fit: cover;
+        object-position: top left;
+        background: #1a1d21;
+      }
+      .shots img.tall {
+        object-fit: contain;
+      }
+      .shots figcaption {
+        margin-top: 0.6rem;
+        color: var(--slate);
+        font-size: 0.95rem;
+      }
+      @media (max-width: 720px) {
+        .shots {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      /* ── hosting ─────────────────────────────── */
       .steps {
         counter-reset: step;
         display: grid;
-        gap: 1.4rem;
-        margin-bottom: 2.5rem;
-        max-width: 56ch;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 2.5rem;
+        margin-top: 2.5rem;
       }
-      .step {
-        display: grid;
-        grid-template-columns: 2rem 1fr;
-        gap: 1rem;
-        align-items: baseline;
+      .steps > div {
+        position: relative;
+        padding-top: 2.75rem;
       }
-      .step::before {
+      .steps > div::before {
         counter-increment: step;
         content: counter(step);
-        font-family: var(--mono);
-        font-weight: 700;
-        color: var(--cobalt-bright);
-        border: 1px solid var(--line);
-        border-radius: 6px;
+        position: absolute;
+        top: 0;
+        left: 0;
         width: 2rem;
         height: 2rem;
+        border-radius: 50%;
+        background: var(--cobalt);
+        color: var(--white);
+        font-weight: 600;
         display: flex;
         align-items: center;
         justify-content: center;
-        font-size: 0.85rem;
       }
-      .step h3 {
-        font-family: var(--mono);
-        font-size: 0.9rem;
-        font-weight: 500;
-        color: var(--fog);
-        margin-bottom: 0.15rem;
+      .steps p {
+        color: var(--slate);
       }
-      .step p {
-        color: var(--steel);
-        font-size: 0.92rem;
+      .host-note {
+        margin-top: 2.5rem;
+        color: var(--slate);
+        max-width: 42rem;
       }
-
-      /* the one indulgence: a terminal, because that is genuinely
-       how you deploy this thing */
-      .term {
-        background: var(--gunmetal);
-        border: 1px solid var(--line);
-        border-radius: 8px;
-        font-family: var(--mono);
-        font-size: 0.82rem;
-        line-height: 1.75;
-        overflow: hidden;
-      }
-      .term-bar {
-        display: flex;
-        justify-content: space-between;
-        padding: 0.5rem 1rem;
-        border-bottom: 1px solid var(--line);
-        color: var(--muted);
-        font-size: 0.7rem;
-      }
-      /* A real <pre>: formatters treat its contents as significant
-       whitespace and leave them alone, so format-on-save can't
-       rearrange the session (which is what happened to the old
-       div-per-line + white-space:pre version). */
-      .term-body {
-        margin: 0;
-        padding: 1.1rem 1.25rem 1.3rem;
-        overflow-x: auto;
-        font-family: inherit;
-        font-size: inherit;
-        line-height: inherit;
-      }
-      .term-body .p {
-        color: var(--cobalt-bright);
-      }
-      .term-body .c {
-        color: var(--muted);
-        font-style: italic;
-      }
-      .cursor {
-        display: inline-block;
-        width: 0.55em;
-        height: 1em;
-        vertical-align: text-bottom;
-        background: var(--cobalt-bright);
-      }
-      @media (prefers-reduced-motion: no-preference) {
-        .cursor {
-          animation: blink 1.2s steps(1) infinite;
-        }
-        @keyframes blink {
-          50% {
-            opacity: 0;
-          }
+      @media (max-width: 720px) {
+        .steps {
+          grid-template-columns: 1fr;
         }
       }
 
-      /* ── sections ────────────────────────────── */
-
-      section {
-        border-top: 1px solid var(--line);
-        padding: 4.5rem 0 5rem;
+      /* ── download table ──────────────────────── */
+      .dl-table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 2rem;
+        font-size: 1rem;
       }
-      section h2 {
-        font-family: var(--mono);
-        font-weight: 700;
-        font-size: 1.35rem;
-        letter-spacing: -0.01em;
-        margin-bottom: 0.4rem;
-      }
-      section h2::after {
-        content: "";
-        display: block;
-        width: 2rem;
-        height: 2px;
-        background: var(--cobalt);
-        margin-top: 0.75rem;
-      }
-      .section-note {
-        color: var(--muted);
-        font-size: 0.92rem;
-        margin: 1rem 0 2.5rem;
-        max-width: 52ch;
-      }
-
-      /* spec sheet */
-      .spec {
-        border-top: 1px solid var(--line);
-      }
-      .spec-row {
-        display: grid;
-        grid-template-columns: 200px 1fr;
-        gap: 1.5rem;
-        padding: 1.05rem 0;
-        border-bottom: 1px solid var(--line);
-      }
-      .spec-row dt {
-        font-family: var(--mono);
-        font-size: 0.85rem;
+      .dl-table th {
+        text-align: left;
         font-weight: 500;
-        color: var(--fog);
-        padding-top: 0.1rem;
+        color: var(--slate);
+        border-bottom: 1px solid var(--line);
+        padding: 0.5rem 0.75rem 0.5rem 0;
       }
-      .spec-row dd {
-        color: var(--steel);
+      .dl-table td {
+        padding: 0.8rem 0.75rem 0.8rem 0;
+        border-bottom: 1px solid var(--line);
+        vertical-align: middle;
+      }
+      .dl-table td:last-child,
+      .dl-table th:last-child {
+        text-align: right;
+        padding-right: 0;
+      }
+      .dl-table td.file {
+        color: var(--slate);
+        font-size: 0.95rem;
+        overflow-wrap: anywhere;
+      }
+      .dl-table td.size {
+        color: var(--slate);
+        white-space: nowrap;
+      }
+      .dl-table .btn {
+        padding: 0.4rem 0.9rem;
         font-size: 0.95rem;
       }
-
-      /* screenshots */
-      .shots {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 1.5rem 1.25rem;
+      @media (max-width: 720px) {
+        .dl-table thead,
+        .dl-table td.file {
+          display: none;
+        }
       }
-      .shots img {
-        display: block;
-        width: 100%;
-        height: auto;
-        border: 1px solid var(--line);
-        border-radius: 6px;
-      }
-      .shots figcaption {
-        font-family: var(--mono);
-        font-size: 0.72rem;
-        color: var(--muted);
-        margin-top: 0.6rem;
-      }
-      .shots a {
-        display: block;
-        cursor: zoom-in;
-      }
-      .shots a:hover img {
-        border-color: var(--cobalt);
+      .dl-after {
+        margin-top: 1.75rem;
+        color: var(--slate);
+        max-width: 42rem;
       }
 
-      /* lightbox — a native <dialog>; Esc-to-close and the backdrop
-       come from the platform, not from us. Some browsers don't center
-       an open <dialog> reliably from the UA stylesheet alone, so pin
-       it ourselves. */
-      .lightbox {
-        position: fixed;
-        inset: 0;
-        margin: auto;
-        border: 1px solid var(--line);
-        border-radius: 8px;
-        background: var(--gunmetal);
-        padding: 0.75rem;
-        max-width: min(92vw, 1400px);
-        max-height: 92vh;
-        width: fit-content;
-        height: fit-content;
-        cursor: zoom-out;
+      /* ── footer ──────────────────────────────── */
+      footer {
+        border-top: 1px solid var(--line);
+        padding: 2rem 0 3rem;
+        color: var(--slate);
+        font-size: 0.95rem;
       }
-      .lightbox img {
-        display: block;
-        max-width: 100%;
-        max-height: 82vh;
-        border-radius: 4px;
+      .foot-inner {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 1rem 2rem;
+        align-items: center;
       }
-      /* prev / next — stopPropagation keeps them from triggering the
-       dialog's click-anywhere-to-close */
-      .lb-nav {
-        position: absolute;
-        top: 50%;
-        transform: translateY(-50%);
-        width: 2.4rem;
-        height: 2.4rem;
+      .foot-inner .lang {
+        margin-left: auto;
         display: flex;
         align-items: center;
-        justify-content: center;
-        font-family: var(--mono);
-        font-size: 1.5rem;
-        line-height: 1;
-        padding: 0 0 0.2rem;
-        color: var(--fog);
-        background: rgba(26, 29, 33, 0.85);
-        border: 1px solid var(--line);
-        border-radius: 50%;
-        cursor: pointer;
-        appearance: none;
-        -webkit-appearance: none;
+        gap: 0.5rem;
       }
-      .lb-nav:hover {
-        border-color: var(--cobalt);
-        color: var(--paper);
+
+      /* ── lightbox ────────────────────────────── */
+      .lightbox {
+        border: 0;
+        padding: 0;
+        background: transparent;
+        max-width: 100vw;
+        max-height: 100vh;
+        width: 100vw;
+        height: 100vh;
+        color: var(--ink);
+      }
+      .lightbox::backdrop {
+        background: rgba(0, 0, 0, 0.88);
+      }
+      .lightbox img {
+        max-width: 92vw;
+        max-height: 84vh;
+        margin: 4vh auto 0;
+        border-radius: 8px;
+        object-fit: contain;
+      }
+      .lightbox-bar {
+        display: flex;
+        justify-content: center;
+        gap: 1.5rem;
+        margin-top: 0.75rem;
+      }
+      .lightbox-hint {
+        text-align: center;
+        opacity: 0.6;
+        font-size: 0.9rem;
+        margin-top: 0.4rem;
+      }
+      .lb-nav {
+        position: fixed;
+        top: 50%;
+        transform: translateY(-50%);
+        background: rgba(255, 255, 255, 0.12);
+        color: var(--white);
+        border: 0;
+        border-radius: 50%;
+        width: 2.75rem;
+        height: 2.75rem;
+        font-size: 1.6rem;
+        cursor: pointer;
       }
       .lb-nav.prev {
         left: 1rem;
@@ -536,523 +563,437 @@
       .lb-nav.next {
         right: 1rem;
       }
-      @media (max-width: 820px) {
-        .lb-nav {
-          width: 2rem;
-          height: 2rem;
-          font-size: 1.25rem;
-        }
-        .lb-nav.prev {
-          left: 0.5rem;
-        }
-        .lb-nav.next {
-          right: 0.5rem;
-        }
-      }
-      .lightbox-bar {
-        display: flex;
-        justify-content: space-between;
-        align-items: baseline;
-        gap: 1rem;
-        margin-top: 0.6rem;
-        font-family: var(--mono);
-        font-size: 0.72rem;
-      }
-      .lightbox-cap {
-        color: var(--steel);
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-      .lightbox-count {
-        color: var(--muted);
-        flex-shrink: 0;
-      }
-      .lightbox-hint {
-        font-family: var(--mono);
-        font-size: 0.68rem;
-        color: var(--muted);
-        text-align: center;
-        margin-top: 0.35rem;
-      }
-      .lightbox::backdrop {
-        background: rgba(10, 11, 13, 0.82);
-      }
-
-      /* download cards */
-      .dl-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-        gap: 1rem;
-      }
-      .dl-card {
-        display: block;
-        background: var(--gunmetal);
-        border: 1px solid var(--line);
-        border-radius: 8px;
-        padding: 1.15rem 1.25rem 1.05rem;
-        text-decoration: none;
-      }
-      .dl-card:hover {
-        border-color: var(--cobalt);
-      }
-      .dl-card .top {
-        display: flex;
-        align-items: baseline;
-        justify-content: space-between;
-      }
-      .dl-card .os {
-        font-family: var(--mono);
-        font-weight: 700;
-        font-size: 1rem;
-        color: var(--fog);
-      }
-      .dl-card .arrow {
-        font-family: var(--mono);
-        font-size: 0.95rem;
-        color: var(--cobalt-bright);
-      }
-      .dl-card .arch {
-        font-family: var(--mono);
-        font-size: 0.7rem;
-        color: var(--muted);
-        margin: 0.15rem 0 1.1rem;
-      }
-      .dl-card .file {
-        font-family: var(--mono);
-        font-size: 0.72rem;
-        color: var(--cobalt-bright);
-        word-break: break-all;
-      }
-      .dl-card:hover .file {
-        text-decoration: underline;
-        text-underline-offset: 3px;
-      }
-      .dl-note {
-        margin-top: 1.75rem;
-        color: var(--muted);
-        font-size: 0.88rem;
-        max-width: 56ch;
-      }
-      .dl-note code {
-        font-family: var(--mono);
-        font-size: 0.82em;
-        color: var(--fog);
-        background: var(--gunmetal);
-        border: 1px solid var(--line);
-        border-radius: 4px;
-        padding: 0.1em 0.35em;
-      }
-
-      /* footer */
-      footer {
-        border-top: 1px solid var(--line);
-      }
-      .foot-inner {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 1.75rem 0;
-        font-family: var(--mono);
-        font-size: 0.72rem;
-        color: var(--muted);
-      }
-      .foot-inner a {
-        color: var(--muted);
-        text-underline-offset: 3px;
-      }
-      .foot-inner a:hover {
-        color: var(--fog);
-      }
-
-      /* ── small screens ───────────────────────── */
-
-      @media (max-width: 820px) {
-        .hero {
-          grid-template-columns: 1fr;
-          gap: 2.75rem;
-          padding: 3.5rem 0 4rem;
-        }
-        .nav-links a.plain {
-          display: none;
-        }
-        .spec-row {
-          grid-template-columns: 1fr;
-          gap: 0.3rem;
-        }
-        .shots {
-          grid-template-columns: 1fr;
-        }
-      }
     </style>
   </head>
 
   <body x-data>
     <nav>
       <div class="wrap nav-inner">
-        <a class="wordmark" href="#">bau<b>cord</b></a>
+        <a class="wordmark" href="#">baucord</a>
         <div class="nav-links">
-          <a class="plain" href="#features" x-i18n="nav-features">features</a>
+          <a class="plain" href="#features" x-i18n="nav-features">Features</a>
           <a class="plain" href="#screenshots" x-i18n="nav-interface"
-            >interface</a
+            >Screenshots</a
           >
-          <a class="plain" href="#selfhost" x-i18n="nav-selfhost">host it</a>
+          <a class="plain" href="#hosting" x-i18n="nav-hosting">Hosting</a>
           <a
             class="plain"
-            href="https://github.com/baucord/baucord"
+            href="https://github.com/mpwsh/baucord"
             target="_blank"
             rel="noopener"
             x-i18n="nav-source"
-            >source</a
+            >Source</a
           >
           <select
             class="lang-select"
             aria-label="Language"
+            x-i18n:aria-label="lang-label"
             @change="$store.i18n.set($event.target.value, true)"
             x-model="$store.i18n.lang"
           >
-            <option value="en">EN</option>
-            <option value="es">ES</option>
-            <option value="pt-BR">PT-BR</option>
+            <option value="en">English</option>
+            <option value="es">Español</option>
+            <option value="pt-BR">Português</option>
           </select>
-          <a class="dl" href="#download" x-i18n="nav-download">download</a>
+          <a class="btn solid" href="#download" x-i18n="nav-download"
+            >Download</a
+          >
         </div>
       </div>
     </nav>
 
     <header class="wrap hero">
       <div>
-        <h1>bau<b>cord</b></h1>
-        <p x-i18n="hero-lede">
-          Voice, text and screen sharing on a server you or a friend run. Free,
-          fast, and so lightweight you forget it's there — it sits in the tray
-          using less memory than a browser tab. No accounts, no telemetry, no
-          feed. Just your people, talking.
+        <h1 x-i18n="hero-title">Take control of your communications</h1>
+        <p class="lede" x-i18n="hero-lede">
+          Talk, type and share your screen with the people you actually play
+          with. One of you runs the server, everyone else types the address. No
+          accounts, no feed, and the app uses about 40 MB of memory.
         </p>
-        <div class="btn-row">
-          <a class="btn solid" href="#download" x-i18n="hero-download"
-            >Download</a
-          >
-          <a
-            class="btn ghost"
-            href="https://github.com/baucord/baucord"
-            target="_blank"
-            rel="noopener"
-            x-i18n="hero-source"
-            >Source on GitHub</a
-          >
+
+        <!-- Download control. Without JS: a plain link to the list below.
+             With JS: the detected platform's zip, plus a menu of the rest. -->
+        <div x-data="dl">
+          <div class="dl-control">
+            <a
+              class="dl-main"
+              :class="{ alone: !ready }"
+              :href="href"
+              x-text="label"
+              >Download</a
+            >
+            <details class="dl-menu" x-show="ready" x-cloak>
+              <summary
+                aria-label="Other platforms"
+                x-i18n:aria-label="dl-other-aria"
+              >
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <path
+                    d="M3 6l5 5 5-5"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                </svg>
+              </summary>
+              <ul>
+                <template x-for="p in others" :key="p.id">
+                  <li>
+                    <a :href="p.file"
+                      ><span x-text="p.name"></span
+                      ><small x-text="p.arch"></small
+                    ></a>
+                  </li>
+                </template>
+                <li class="more">
+                  <a href="#download" x-i18n="dl-all">All downloads</a>
+                </li>
+              </ul>
+            </details>
+          </div>
+          <p class="dl-meta" x-show="ready" x-cloak x-text="metaText"></p>
+          <p class="dl-meta" x-show="!ready" x-cloak x-i18n="dl-meta-generic">
+            Version __VERSION__ for Windows, macOS and Linux.
+          </p>
+          <p class="dl-mobile" x-show="mobile" x-cloak x-i18n="dl-mobile">
+            baucord is a desktop app. Open this page on a Windows, macOS or
+            Linux machine to download it.
+          </p>
         </div>
-        <p class="facts" x-i18n="hero-facts">
-          Windows / macOS / Linux &nbsp;·&nbsp; ~30–50 MB of RAM &nbsp;·&nbsp;
-          free &amp; open source
-        </p>
       </div>
 
       <figure class="hero-shot">
         <a class="shot-link" href="img/call.png">
           <img
             src="img/call.png"
-            alt="baucord during a call — voice channels in the sidebar, chat on the right, someone streaming in another channel"
+            width="2000"
+            height="1280"
+            alt="baucord during a call: voice channels and users on the left, the shared text chat on the right"
             x-i18n:alt="shot-call-alt"
           />
         </a>
-        <figcaption x-i18n="hero-shot-cap">
-          tuesday on someone's spare machine — movie in one channel, snacks in
-          another
-        </figcaption>
       </figure>
     </header>
 
-    <section id="features">
-      <div class="wrap">
-        <h2 x-i18n="features-title">What it does</h2>
-        <p class="section-note" x-i18n="features-note">
-          Hang out with a handful of friends: talk, type, share your screen.
-          Nothing you don't need.
-        </p>
-
-        <dl class="spec">
-          <div class="spec-row">
-            <dt x-i18n="spec-voice-t">voice</dt>
-            <dd x-i18n="spec-voice-d">
-              Opus over UDP with voice activity detection or push-to-talk. Tuned
-              to keep the gap between someone speaking and you hearing them as
-              short as it can be.
-            </dd>
+    <div class="band">
+      <section id="features">
+        <div class="wrap">
+          <h2 x-i18n="features-title">What you get</h2>
+          <p class="lede" x-i18n="features-lede">
+            Everything a group of friends needs to hang out, and nothing that
+            needs an account.
+          </p>
+          <div class="features">
+            <div>
+              <h3 x-i18n="f-voice-t">Voice that keeps up</h3>
+              <p x-i18n="f-voice-d">
+                Opus audio with voice activation, tuned for the shortest gap
+                between someone speaking and you hearing them. Each person has
+                their own jitter buffer, so one friend on hotel Wi-Fi doesn't
+                affect anyone else's audio.
+              </p>
+            </div>
+            <div>
+              <h3 x-i18n="f-channels-t">Channels</h3>
+              <p x-i18n="f-channels-d">
+                Everyone lands in the Lobby and splits off from there: a room
+                for the game, one for the movie, an AFK corner. Channels can
+                have a password and a user limit, and whoever hosts can edit the
+                list while everyone is connected.
+              </p>
+            </div>
+            <div>
+              <h3 x-i18n="f-share-t">Screen sharing</h3>
+              <p x-i18n="f-share-d">
+                Share your screen with its audio at 720p or 1080p, up to 60 fps,
+                to your channel or the whole server. Viewers watch in a
+                resizable window; a slow connection loses a moment of video,
+                never the voices.
+              </p>
+            </div>
+            <div>
+              <h3 x-i18n="f-chat-t">Text chat</h3>
+              <p x-i18n="f-chat-d">
+                One room for the whole server, whichever channel you're in.
+                Links, images, gifs and emoji, and a place to type when a mic
+                dies.
+              </p>
+            </div>
+            <div>
+              <h3 x-i18n="f-peruser-t">Per-person volume</h3>
+              <p x-i18n="f-peruser-d">
+                Right-click anyone to adjust their volume or mute them. It's
+                remembered, so the loud friend stays quieter next time too.
+              </p>
+            </div>
+            <div>
+              <h3 x-i18n="f-hotkeys-t">Global hotkeys</h3>
+              <p x-i18n="f-hotkeys-d">
+                Mute, deafen and start sharing from any window. Rebind a key by
+                pressing it.
+              </p>
+            </div>
+            <div>
+              <h3 x-i18n="f-private-t">Private by construction</h3>
+              <p x-i18n="f-private-d">
+                Every connection is encrypted, and your client remembers your
+                server's identity so it can't be swapped out on you. Nothing is
+                sent anywhere except to the server your friend runs.
+              </p>
+            </div>
+            <div>
+              <h3 x-i18n="f-light-t">Light on your machine</h3>
+              <p x-i18n="f-light-d">
+                Around 30 to 50 MB of memory at idle. Closes to the tray and
+                keeps the call going. No installer, no background services;
+                settings live in one file next to the app.
+              </p>
+            </div>
           </div>
-          <div class="spec-row">
-            <dt x-i18n="spec-net-t">rough connections</dt>
-            <dd x-i18n="spec-net-d">
-              Each person gets their own adaptive jitter buffer, so one friend
-              on hotel wi-fi doesn't drag everyone else's audio down with them.
-            </dd>
-          </div>
-          <div class="spec-row">
-            <dt x-i18n="spec-channels-t">channels</dt>
-            <dd x-i18n="spec-channels-d">
-              Everyone lands in the Lobby, then splits off — a room for the
-              game, one for the movie, an AFK corner. Lock a channel with a
-              password or cap how many fit. Whoever hosts can edit the list
-              while everyone's connected; the sidebar just updates.
-            </dd>
-          </div>
-          <div class="spec-row">
-            <dt x-i18n="spec-share-t">screen share</dt>
-            <dd x-i18n="spec-share-d">
-              Share your screen with its audio, 720p or 1080p, up to 60 fps.
-              Show it to just your channel or to the whole server — anyone
-              allowed to watch can hop in and out, in a resizable window with
-              live stats if they're curious.
-            </dd>
-          </div>
-          <div class="spec-row">
-            <dt x-i18n="spec-peruser-t">per-user audio</dt>
-            <dd x-i18n="spec-peruser-d">
-              Right-click anyone to mute them or ride their volume. Settings
-              stick around, so the loud friend stays quiet next time too.
-            </dd>
-          </div>
-          <div class="spec-row">
-            <dt x-i18n="spec-hotkeys-t">global hotkeys</dt>
-            <dd x-i18n="spec-hotkeys-d">
-              Mute, deafen and start a screen share from any window. Rebind by
-              pressing the keys you want, not by editing config.
-            </dd>
-          </div>
-          <div class="spec-row">
-            <dt x-i18n="spec-chat-t">text chat</dt>
-            <dd x-i18n="spec-chat-d">
-              One shared room for the whole server, whatever channel you're in.
-              Links, images, gifs, emoji — and whoever's mic just died.
-            </dd>
-          </div>
-          <div class="spec-row">
-            <dt x-i18n="spec-machine-t">your machine</dt>
-            <dd x-i18n="spec-machine-d">
-              The whole app idles around 30–50 MB of RAM. Closes to the tray and
-              keeps the call running. Settings live in one small file next to
-              the app — no installer, no registry, no background services.
-            </dd>
-          </div>
-          <div class="spec-row">
-            <dt x-i18n="spec-lang-t">your language</dt>
-            <dd x-i18n="spec-lang-d">
-              English, Español and Português out of the box, in the app and on
-              this page.
-            </dd>
-          </div>
-          <div class="spec-row">
-            <dt x-i18n="spec-server-t">the server</dt>
-            <dd x-i18n="spec-server-d">
-              A dumb relay. It forwards packets, that's it — no mixing, no
-              transcoding, no accounts to manage. One small file describes the
-              whole thing, channels included, and it ships in the same zip as
-              the client.
-            </dd>
-          </div>
-        </dl>
-      </div>
-    </section>
+        </div>
+      </section>
+    </div>
 
     <section id="screenshots">
       <div class="wrap">
-        <h2 x-i18n="shots-title">A look around</h2>
-        <p class="section-note" x-i18n="shots-note">
-          One window, native widgets, nothing to learn. Click any shot to zoom.
+        <h2 x-i18n="shots-title">Screenshots</h2>
+        <p class="lede" x-i18n="shots-lede">
+          The whole interface, as it looks on a call.
         </p>
-
         <div class="shots">
           <figure>
             <a class="shot-link" href="img/share.png">
               <img
                 src="img/share.png"
-                alt="baucord share screen dialog — monitor, quality, and who can watch"
-                x-i18n:alt="shot-share-alt"
                 loading="lazy"
+                alt="watching a friend's screen share in its own window, with the call sidebar behind it"
+                x-i18n:alt="shot-share-alt"
               />
             </a>
             <figcaption x-i18n="shot-share-cap">
-              sharing — pick a monitor, a quality, and who gets to watch
+              Watching a screen share
             </figcaption>
           </figure>
           <figure>
             <a class="shot-link" href="img/popover.png">
               <img
                 src="img/popover.png"
-                alt="baucord per-user volume popover — one friend turned up to 125%"
-                x-i18n:alt="shot-popover-alt"
                 loading="lazy"
+                alt="the per-user popover with a volume slider and a mute toggle"
+                x-i18n:alt="shot-popover-alt"
               />
             </a>
             <figcaption x-i18n="shot-popover-cap">
-              per-person volume — the quiet friend, turned up, remembered
+              Per-person volume and mute
             </figcaption>
           </figure>
           <figure>
             <a class="shot-link" href="img/prompt.png">
               <img
                 src="img/prompt.png"
-                alt="baucord asking for a locked channel's password"
-                x-i18n:alt="shot-prompt-alt"
                 loading="lazy"
+                alt="the password prompt for a locked channel"
+                x-i18n:alt="shot-prompt-alt"
               />
             </a>
             <figcaption x-i18n="shot-prompt-cap">
-              locked channels ask once — the password is remembered
-            </figcaption>
-          </figure>
-          <figure>
-            <a class="shot-link" href="img/settings-servers.png">
-              <img
-                src="img/settings-servers.png"
-                alt="baucord server list settings — two saved servers, one marked default"
-                x-i18n:alt="shot-servers-alt"
-                loading="lazy"
-              />
-            </a>
-            <figcaption x-i18n="shot-servers-cap">
-              your servers — save a few, set a default, hop between them
-            </figcaption>
-          </figure>
-          <figure>
-            <a class="shot-link" href="img/settings-audio.png">
-              <img
-                src="img/settings-audio.png"
-                alt="baucord audio settings — devices, mic test, voice sensitivity"
-                x-i18n:alt="shot-audio-alt"
-                loading="lazy"
-              />
-            </a>
-            <figcaption x-i18n="shot-audio-cap">
-              audio — test your mic, set how sensitive it is, done
+              Joining a locked channel
             </figcaption>
           </figure>
           <figure>
             <a class="shot-link" href="img/connect.png">
               <img
                 src="img/connect.png"
-                alt="baucord connect screen — a nickname and a saved server"
-                x-i18n:alt="shot-connect-alt"
                 loading="lazy"
+                alt="the connect screen: a nickname field and a server picker"
+                x-i18n:alt="shot-connect-alt"
               />
             </a>
-            <figcaption x-i18n="shot-connect-cap">
-              connecting — a nickname and a saved server, that's the login
-            </figcaption>
+            <figcaption x-i18n="shot-connect-cap">Connect screen</figcaption>
+          </figure>
+          <figure>
+            <a class="shot-link" href="img/settings-servers.png">
+              <img
+                class="tall"
+                src="img/settings-servers.png"
+                loading="lazy"
+                alt="settings: the saved servers list with address, password and identity fields"
+                x-i18n:alt="shot-servers-alt"
+              />
+            </a>
+            <figcaption x-i18n="shot-servers-cap">Saved servers</figcaption>
+          </figure>
+          <figure>
+            <a class="shot-link" href="img/settings-audio.png">
+              <img
+                class="tall"
+                src="img/settings-audio.png"
+                loading="lazy"
+                alt="settings: input and output device pickers and the voice activation threshold"
+                x-i18n:alt="shot-audio-alt"
+              />
+            </a>
+            <figcaption x-i18n="shot-audio-cap">Audio settings</figcaption>
           </figure>
         </div>
       </div>
     </section>
 
-    <section id="selfhost">
-      <div class="wrap">
-        <h2 x-i18n="selfhost-title">Hosting it is the easy part</h2>
-        <p class="section-note" x-i18n="selfhost-note">
-          There's no company in the middle. One of you runs the server —
-          everyone else just connects to it. No sign-ups, nothing to configure
-          unless you want channels with passwords.
-        </p>
-
-        <div class="steps">
-          <div class="step">
+    <div class="band">
+      <section id="hosting">
+        <div class="wrap">
+          <h2 x-i18n="host-title">Hosting a server</h2>
+          <p class="lede" x-i18n="host-lede">
+            The server is in the same zip as the app. Any machine your friends
+            can reach will do: a spare PC, a small VPS, a homelab.
+          </p>
+          <div class="steps">
             <div>
-              <h3 x-i18n="step-1-t">one friend runs the server</h3>
-              <p x-i18n="step-1-d">
-                On anything that stays on: a spare computer, a cheap rented box,
-                the homelab. Unzip, run it, done.
+              <h3 x-i18n="step-1-t">Run the server</h3>
+              <p x-i18n.html="step-1-d">
+                Unzip and start <code>dedicated-server</code>. It writes a
+                config file on first start; set a room password there and open
+                UDP port 5000.
               </p>
             </div>
-          </div>
-          <div class="step">
             <div>
-              <h3 x-i18n="step-2-t">share the address</h3>
+              <h3 x-i18n="step-2-t">Share the invite</h3>
               <p x-i18n="step-2-d">
-                That's the invite. There are no accounts to create — a nickname
-                is all anyone needs.
+                The server prints an invite at startup: its address plus its
+                identity. Send that to your friends however you like.
               </p>
             </div>
-          </div>
-          <div class="step">
             <div>
-              <h3 x-i18n="step-3-t">everyone types it once</h3>
+              <h3 x-i18n="step-3-t">Everyone connects</h3>
               <p x-i18n="step-3-d">
-                baucord remembers it. From then on it's open the app, hit
-                connect, start talking.
+                They paste the invite into baucord once, pick a nickname and
+                connect. The server is remembered from then on.
               </p>
             </div>
           </div>
+          <p class="host-note" x-i18n.html="host-note">
+            Prefer containers? The repository includes a Dockerfile, a compose
+            file and a setup script for a Linux host. Details are in the
+            <a href="https://github.com/mpwsh/baucord#deploying-a-server"
+              >deployment guide</a
+            >.
+          </p>
         </div>
-
-        <div
-          class="term"
-          aria-label="deployment example"
-          x-i18n:aria-label="term-aria"
-        >
-          <div class="term-bar">
-            <span>~/baucord</span>
-            <span>v__VERSION__</span>
-          </div>
-          <pre
-            class="term-body"
-          ><span class="c" x-i18n="term-c-host"># on whoever's hosting:</span>
-<span class="p">$</span> unzip baucord-v__VERSION__-linux-x64.zip
-<span class="p">$</span> ./dedicated-server
-
-<span class="c" x-i18n="term-c-everyone"># everyone else:</span>
-<span class="p">$</span> ./baucord <span class="c" x-i18n="term-c-run"># enter host:port, pick a name</span>
-
-<span class="c" x-i18n="term-c-tagline"># we have discord at home</span>
-<span class="p">$</span> <span class="cursor"></span></pre>
-        </div>
-      </div>
-    </section>
+      </section>
+    </div>
 
     <section id="download">
       <div class="wrap">
         <h2 x-i18n="dl-title">Download</h2>
-        <p class="section-note" x-i18n="dl-note-top">
-          Every zip has the client and the dedicated server for that platform.
-          Grab the one you need; anyone hosting also needs the server-side one.
+        <p class="lede" x-i18n="dl-lede">
+          Version __VERSION__. Every zip contains the app and the dedicated
+          server for that platform, so whoever hosts needs nothing extra.
         </p>
-
-        <div class="dl-grid">
-          <a class="dl-card" href="baucord-v__VERSION__-win-x64.zip">
-            <div class="top">
-              <span class="os">Windows</span><span class="arrow">&darr;</span>
-            </div>
-            <div class="arch">x86_64</div>
-            <div class="file">baucord-v__VERSION__-win-x64.zip</div>
-          </a>
-          <a class="dl-card" href="baucord-v__VERSION__-macos-arm64.zip">
-            <div class="top">
-              <span class="os">macOS</span><span class="arrow">&darr;</span>
-            </div>
-            <div class="arch">Apple Silicon</div>
-            <div class="file">baucord-v__VERSION__-macos-arm64.zip</div>
-          </a>
-          <a class="dl-card" href="baucord-v__VERSION__-macos-intel.zip">
-            <div class="top">
-              <span class="os">macOS</span><span class="arrow">&darr;</span>
-            </div>
-            <div class="arch">Intel</div>
-            <div class="file">baucord-v__VERSION__-macos-intel.zip</div>
-          </a>
-          <a class="dl-card" href="baucord-v__VERSION__-linux-x64.zip">
-            <div class="top">
-              <span class="os">Linux</span><span class="arrow">&darr;</span>
-            </div>
-            <div class="arch">x86_64</div>
-            <div class="file">baucord-v__VERSION__-linux-x64.zip</div>
-          </a>
-        </div>
-
-        <p class="dl-note" x-i18n.html="dl-note-bottom">
-          Unzip, run <code>dedicated-server</code> somewhere your friends can
-          reach — a spare box, a cheap VPS, a homelab — then hand them the
-          address. That's the whole deployment.
+        <table class="dl-table" x-data="dl">
+          <thead>
+            <tr>
+              <th x-i18n="dl-th-platform">Platform</th>
+              <th x-i18n="dl-th-file">File</th>
+              <th x-i18n="dl-th-size">Size</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="p in platforms" :key="p.id">
+              <tr>
+                <td>
+                  <strong x-text="p.name"></strong>
+                  <span x-text="' (' + p.arch + ')'"></span>
+                </td>
+                <td class="file" x-text="p.file"></td>
+                <td class="size" x-text="p.size || ''"></td>
+                <td>
+                  <a class="btn solid" :href="p.file" x-i18n="dl-btn"
+                    >Download</a
+                  >
+                </td>
+              </tr>
+            </template>
+          </tbody>
+          <!-- no-JS fallback: the same four rows, static -->
+          <noscript>
+            <tbody>
+              <tr>
+                <td><strong>Windows</strong> (64-bit)</td>
+                <td class="file">baucord-v__VERSION__-win-x64.zip</td>
+                <td></td>
+                <td>
+                  <a class="btn solid" href="baucord-v__VERSION__-win-x64.zip"
+                    >Download</a
+                  >
+                </td>
+              </tr>
+              <tr>
+                <td><strong>macOS</strong> (Apple Silicon)</td>
+                <td class="file">baucord-v__VERSION__-macos-arm64.zip</td>
+                <td></td>
+                <td>
+                  <a
+                    class="btn solid"
+                    href="baucord-v__VERSION__-macos-arm64.zip"
+                    >Download</a
+                  >
+                </td>
+              </tr>
+              <tr>
+                <td><strong>macOS</strong> (Intel)</td>
+                <td class="file">baucord-v__VERSION__-macos-intel.zip</td>
+                <td></td>
+                <td>
+                  <a
+                    class="btn solid"
+                    href="baucord-v__VERSION__-macos-intel.zip"
+                    >Download</a
+                  >
+                </td>
+              </tr>
+              <tr>
+                <td><strong>Linux</strong> (x86-64)</td>
+                <td class="file">baucord-v__VERSION__-linux-x64.zip</td>
+                <td></td>
+                <td>
+                  <a class="btn solid" href="baucord-v__VERSION__-linux-x64.zip"
+                    >Download</a
+                  >
+                </td>
+              </tr>
+            </tbody>
+          </noscript>
+        </table>
+        <p class="dl-after" x-i18n.html="dl-after">
+          Free and open source. The app checks for updates on start and replaces
+          itself in place; the server is updated by unzipping the new one over
+          it. Older versions and checksums are on the
+          <a href="https://github.com/mpwsh/baucord/releases">releases page</a>.
         </p>
+      </div>
+    </section>
 
-        <p class="lang-note">
+    <footer>
+      <div class="wrap foot-inner">
+        <span>baucord</span>
+        <a
+          href="https://github.com/mpwsh/baucord"
+          target="_blank"
+          rel="noopener"
+          x-i18n="nav-source"
+          >Source</a
+        >
+        <a
+          href="https://github.com/mpwsh/baucord/issues"
+          target="_blank"
+          rel="noopener"
+          x-i18n="foot-issues"
+          >Report a problem</a
+        >
+        <span class="lang">
           <label for="lang-select-footer" x-i18n="lang-label">Language</label>
           <select
             id="lang-select-footer"
@@ -1062,30 +1003,17 @@
           >
             <option value="en">English</option>
             <option value="es">Español</option>
-            <option value="pt-BR">Português (Brasil)</option>
+            <option value="pt-BR">Português</option>
           </select>
-        </p>
-      </div>
-    </section>
-
-    <footer>
-      <div class="wrap foot-inner">
-        <span>&copy; 2025&ndash;2026 baucord</span>
-        <a
-          href="https://github.com/baucord/baucord"
-          target="_blank"
-          rel="noopener"
-          >github.com/baucord/baucord</a
-        >
+        </span>
       </div>
     </footer>
 
     <dialog
       class="lightbox"
-      aria-label="screenshot viewer"
+      aria-label="screenshot"
       x-i18n:aria-label="lightbox-aria"
     >
-      <img alt="" />
       <button
         class="lb-nav prev"
         type="button"
@@ -1094,6 +1022,7 @@
       >
         &lsaquo;
       </button>
+      <img alt="" />
       <button
         class="lb-nav next"
         type="button"
@@ -1107,111 +1036,300 @@
         <span class="lightbox-count"></span>
       </div>
       <p class="lightbox-hint" x-i18n="lightbox-hint">
-        &larr; &rarr; to switch &nbsp;·&nbsp; click anywhere or press esc to
-        close
+        Arrow keys switch, Escape or a click closes.
       </p>
     </dialog>
 
-    <script>
-      // Show the top bar only once the hero wordmark has scrolled out of
-      // view. The .js class gates the behavior so the bar stays a plain
-      // sticky header when scripts are unavailable.
-      document.documentElement.classList.add("js");
-      var nav = document.querySelector("nav");
-      new IntersectionObserver(function (entries) {
-        nav.classList.toggle("shown", !entries[0].isIntersecting);
-      }).observe(document.querySelector(".hero h1"));
-
-      // Screenshot lightbox. The thumbnails are plain links to the image
-      // file, so without JS a click still opens the full-size PNG. With
-      // JS, every .shot-link (hero included) joins one cycle: ← / → keys
-      // or the on-screen arrows move through it, wrapping at the ends.
-      var shots = Array.prototype.slice.call(
-        document.querySelectorAll(".shot-link"),
-      );
-      var box = document.querySelector(".lightbox");
-      var boxImg = box.querySelector("img");
-      var boxCap = box.querySelector(".lightbox-cap");
-      var boxCount = box.querySelector(".lightbox-count");
-      var current = 0;
-
-      function show(i) {
-        current = (i + shots.length) % shots.length;
-        var a = shots[current];
-        boxImg.src = a.href;
-        boxImg.alt = a.querySelector("img").alt;
-        // Caption comes from the figure, so it follows the current
-        // language for free.
-        var fig = a.closest("figure");
-        var cap = fig && fig.querySelector("figcaption");
-        boxCap.textContent = cap ? cap.textContent.trim() : "";
-        boxCount.textContent = current + 1 + " / " + shots.length;
-        // Warm the neighbors so arrowing feels instant.
-        [current + 1, current - 1].forEach(function (j) {
-          new Image().src = shots[(j + shots.length) % shots.length].href;
-        });
+    <style>
+      [x-cloak] {
+        display: none !important;
       }
+    </style>
 
-      shots.forEach(function (a, i) {
-        a.addEventListener("click", function (ev) {
-          ev.preventDefault();
-          show(i);
-          box.showModal();
+    <script>
+      // Screenshot lightbox. Thumbnails are plain links to the image file,
+      // so without JS a click still opens the full-size PNG. With JS every
+      // .shot-link joins one cycle: arrow keys or the on-screen arrows move
+      // through it, wrapping at the ends.
+      (function () {
+        var shots = Array.prototype.slice.call(
+          document.querySelectorAll(".shot-link"),
+        );
+        var box = document.querySelector(".lightbox");
+        if (!box || !box.showModal) return;
+        var boxImg = box.querySelector("img");
+        var boxCap = box.querySelector(".lightbox-cap");
+        var boxCount = box.querySelector(".lightbox-count");
+        var current = 0;
+
+        function show(i) {
+          current = (i + shots.length) % shots.length;
+          var a = shots[current];
+          boxImg.src = a.href;
+          boxImg.alt = a.querySelector("img").alt;
+          var fig = a.closest("figure");
+          var cap = fig && fig.querySelector("figcaption");
+          boxCap.textContent = cap ? cap.textContent.trim() : boxImg.alt;
+          boxCount.textContent = current + 1 + " / " + shots.length;
+          [current + 1, current - 1].forEach(function (j) {
+            new Image().src = shots[(j + shots.length) % shots.length].href;
+          });
+        }
+        shots.forEach(function (a, i) {
+          a.addEventListener("click", function (ev) {
+            ev.preventDefault();
+            show(i);
+            box.showModal();
+          });
         });
+        box.addEventListener("click", function () {
+          box.close();
+        });
+        box
+          .querySelector(".lb-nav.prev")
+          .addEventListener("click", function (ev) {
+            ev.stopPropagation();
+            show(current - 1);
+          });
+        box
+          .querySelector(".lb-nav.next")
+          .addEventListener("click", function (ev) {
+            ev.stopPropagation();
+            show(current + 1);
+          });
+        box.addEventListener("keydown", function (ev) {
+          if (ev.key === "ArrowRight") {
+            ev.preventDefault();
+            show(current + 1);
+          } else if (ev.key === "ArrowLeft") {
+            ev.preventDefault();
+            show(current - 1);
+          }
+        });
+      })();
+
+      // Close the "other platforms" menu on Escape or an outside click.
+      document.addEventListener("click", function (ev) {
+        document
+          .querySelectorAll("details.dl-menu[open]")
+          .forEach(function (d) {
+            if (!d.contains(ev.target)) d.removeAttribute("open");
+          });
       });
-      box.addEventListener("click", function () {
-        box.close();
-      });
-      box
-        .querySelector(".lb-nav.prev")
-        .addEventListener("click", function (ev) {
-          ev.stopPropagation();
-          show(current - 1);
-        });
-      box
-        .querySelector(".lb-nav.next")
-        .addEventListener("click", function (ev) {
-          ev.stopPropagation();
-          show(current + 1);
-        });
-      box.addEventListener("keydown", function (ev) {
-        if (ev.key === "ArrowRight") {
-          ev.preventDefault();
-          show(current + 1);
-        } else if (ev.key === "ArrowLeft") {
-          ev.preventDefault();
-          show(current - 1);
+      document.addEventListener("keydown", function (ev) {
+        if (ev.key === "Escape") {
+          document
+            .querySelectorAll("details.dl-menu[open]")
+            .forEach(function (d) {
+              d.removeAttribute("open");
+            });
         }
       });
     </script>
 
     <script>
-      // i18n. English lives in the markup and is the fallback — non-English
-      // strings are fetched on demand, so no-JS visitors, crawlers and link
-      // unfurlers keep the English page.
-      //
-      //   x-i18n="key"            swap text content
-      //   x-i18n.html="key"       swap innerHTML (our own strings only)
-      //   x-i18n:alt="key"        swap an attribute (alt, aria-label, …)
-      //
-      // Add a language:
-      //   1. drop a JSON file into i18n/  (e.g. i18n/fr.json)
-      //   2. add it to LANGS below
-      //   3. add an <option> to the two <select class="lang-select">
-      // Missing keys fall back to the English left in the markup, so a
-      // half-translated file never blanks text.
+      // Downloads. One list of builds, shared by the hero control and the
+      // table. The hero picks the visitor's platform:
+      //   Windows / Linux  -> from the user agent
+      //   macOS            -> Chromium reports the CPU through UA client
+      //                       hints; Safari doesn't, so we look at the WebGL
+      //                       renderer string (Intel/AMD => Intel Mac) and
+      //                       default to Apple Silicon otherwise.
+      //   phones/tablets   -> a "desktop only" note, no button
+      // Sizes come from a HEAD request to each zip (same origin), so the
+      // page never has to be edited when a build changes size.
+      document.addEventListener("alpine:init", function () {
+        var VERSION = "__VERSION__";
+        var PLATFORMS = [
+          {
+            id: "win-x64",
+            name: "Windows",
+            arch: "64-bit",
+            file: "baucord-v" + VERSION + "-win-x64.zip",
+          },
+          {
+            id: "macos-arm64",
+            name: "macOS",
+            arch: "Apple Silicon",
+            file: "baucord-v" + VERSION + "-macos-arm64.zip",
+          },
+          {
+            id: "macos-intel",
+            name: "macOS",
+            arch: "Intel",
+            file: "baucord-v" + VERSION + "-macos-intel.zip",
+          },
+          {
+            id: "linux-x64",
+            name: "Linux",
+            arch: "x86-64",
+            file: "baucord-v" + VERSION + "-linux-x64.zip",
+          },
+        ];
+        var sizes = {}; // id -> "51 MB"
+
+        function formatSize(bytes) {
+          var mb = bytes / 1048576;
+          return (
+            (mb >= 100 ? Math.round(mb) : mb.toFixed(mb >= 10 ? 0 : 1)) + " MB"
+          );
+        }
+        function fetchSizes(store) {
+          if (!window.fetch) return;
+          PLATFORMS.forEach(function (p) {
+            fetch(p.file, { method: "HEAD" })
+              .then(function (r) {
+                var len = r.ok && r.headers.get("content-length");
+                if (len) {
+                  sizes[p.id] = formatSize(parseInt(len, 10));
+                  store.sizesVersion++;
+                }
+              })
+              .catch(function () {});
+          });
+        }
+
+        function webglGuess() {
+          try {
+            var c = document.createElement("canvas");
+            var gl =
+              c.getContext("webgl") || c.getContext("experimental-webgl");
+            var ext = gl && gl.getExtension("WEBGL_debug_renderer_info");
+            var r = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : "";
+            if (/intel|amd|radeon|nvidia/i.test(r)) return "macos-intel";
+          } catch (e) {}
+          return "macos-arm64";
+        }
+        function detect(cb) {
+          var ua = navigator.userAgent || "";
+          var plat = (navigator.platform || "").toLowerCase();
+          var touchMac = plat === "macintel" && navigator.maxTouchPoints > 1; // iPadOS
+          if (/android|iphone|ipad|ipod/i.test(ua) || touchMac)
+            return cb("mobile");
+          if (/windows/i.test(ua)) return cb("win-x64");
+          if (/cros|linux|x11/i.test(ua)) return cb("linux-x64");
+          if (/mac/i.test(plat) || /macintosh/i.test(ua)) {
+            var uad = navigator.userAgentData;
+            if (uad && uad.getHighEntropyValues) {
+              uad
+                .getHighEntropyValues(["architecture"])
+                .then(function (v) {
+                  cb(v.architecture === "x86" ? "macos-intel" : "macos-arm64");
+                })
+                .catch(function () {
+                  cb(webglGuess());
+                });
+              return;
+            }
+            return cb(webglGuess());
+          }
+          cb(null);
+        }
+
+        // Shared, reactive state.
+        var shared = Alpine.reactive({
+          selected: null,
+          mobile: false,
+          sizesVersion: 0,
+        });
+        detect(function (id) {
+          if (id === "mobile") shared.mobile = true;
+          else shared.selected = id;
+        });
+        fetchSizes(shared);
+
+        Alpine.data("dl", function () {
+          return {
+            get platforms() {
+              shared.sizesVersion; // subscribe
+              return PLATFORMS.map(function (p) {
+                return Object.assign({ size: sizes[p.id] || "" }, p);
+              });
+            },
+            get current() {
+              return (
+                PLATFORMS.filter(function (p) {
+                  return p.id === shared.selected;
+                })[0] || null
+              );
+            },
+            get ready() {
+              return !!this.current;
+            },
+            get mobile() {
+              return shared.mobile;
+            },
+            get href() {
+              return this.current ? this.current.file : "#download";
+            },
+            get label() {
+              var i18n = Alpine.store("i18n");
+              if (!this.current) return i18n.t("dl-btn-plain", "Download");
+              return i18n
+                .t("dl-btn-for", "Download for {platform}")
+                .replace(
+                  "{platform}",
+                  this.current.name + " (" + this.current.arch + ")",
+                );
+            },
+            get size() {
+              shared.sizesVersion;
+              return this.current ? sizes[this.current.id] || "" : "";
+            },
+            get others() {
+              return this.platforms.filter(function (p) {
+                return p.id !== shared.selected;
+              });
+            },
+            // "Version 1.0.1, 51 MB. Also for Windows, Linux and macOS (Intel)."
+            get metaText() {
+              var i18n = Alpine.store("i18n");
+              var cur = this.current;
+              if (!cur) return "";
+              var head = i18n.t("dl-version", "Version") + " " + VERSION;
+              if (this.size) head += ", " + this.size;
+              // Same-OS alternatives keep their architecture so "macOS"
+              // never lists itself; the rest go by name.
+              var names = [];
+              this.others.forEach(function (p) {
+                var n =
+                  p.name === cur.name ? p.name + " (" + p.arch + ")" : p.name;
+                if (names.indexOf(n) === -1) names.push(n);
+              });
+              var last = names.pop();
+              var list = names.length
+                ? names.join(", ") + " " + i18n.t("dl-and", "and") + " " + last
+                : last;
+              return (
+                head +
+                ". " +
+                i18n
+                  .t("dl-also", "Also for {platforms}.")
+                  .replace("{platforms}", list)
+              );
+            },
+          };
+        });
+      });
+    </script>
+
+    <script>
+      // i18n. English lives in the markup and is the fallback; other
+      // languages are fetched on demand, so crawlers and no-JS visitors keep
+      // the English page.
+      //   x-i18n="key"         swap text content
+      //   x-i18n.html="key"    swap innerHTML (our own strings only)
+      //   x-i18n:alt="key"     swap an attribute
+      // Scripts use $store.i18n.t(key, fallback).
+      // Add a language: drop i18n/<code>.json, add it to LANGS, add an
+      // <option> to both <select class="lang-select">.
       document.addEventListener("alpine:init", function () {
         var STORAGE_KEY = "baucord-lang";
         var originalTitle = document.title;
-
-        // Non-English languages only — English is the baked-in fallback.
-        //   file:   filename under i18n/ (without the .json)
-        //   match:  navigator.language prefixes that auto-select this lang
         var LANGS = {
           es: { file: "es", match: ["es"] },
           "pt-BR": { file: "pt-BR", match: ["pt"] },
         };
-
         function detect() {
           var nav = (navigator.language || "").toLowerCase();
           for (var code in LANGS) {
@@ -1222,19 +1340,21 @@
           }
           return "en";
         }
-
         Alpine.store("i18n", {
           lang: "en",
-          dicts: {}, // code -> loaded dictionary
-          loading: {}, // code -> in-flight promise, dedupes fetches
+          dicts: {},
+          loading: {},
           init: function () {
             var saved = null;
             try {
               saved = localStorage.getItem(STORAGE_KEY);
             } catch (e) {}
-            // Ignore a saved value we no longer ship a dictionary for.
             if (saved && saved !== "en" && !LANGS[saved]) saved = null;
             this.set(saved || detect(), false);
+          },
+          t: function (key, fallback) {
+            var dict = this.dicts[this.lang];
+            return (dict && dict[key]) || fallback;
           },
           set: function (lang, persist) {
             var store = this;
@@ -1275,10 +1395,9 @@
             }
           },
         });
-
         Alpine.directive("i18n", function (el, directive, utils) {
           var key = directive.expression;
-          var attr = directive.value; // "alt" from x-i18n:alt, else undefined
+          var attr = directive.value;
           var html = directive.modifiers.indexOf("html") !== -1;
           var original = attr
             ? el.getAttribute(attr)
