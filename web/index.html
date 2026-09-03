@@ -143,11 +143,19 @@
         height: 3.75rem;
       }
       .wordmark {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.6rem;
         font-weight: 700;
         font-size: 1.25rem;
         letter-spacing: -0.02em;
         color: var(--ink);
         margin-right: auto;
+      }
+      .wordmark img {
+        width: 28px;
+        height: 28px;
+        border-radius: 6px;
       }
       .wordmark:hover {
         text-decoration: none;
@@ -569,7 +577,10 @@
   <body x-data>
     <nav>
       <div class="wrap nav-inner">
-        <a class="wordmark" href="#">baucord</a>
+        <a class="wordmark" href="#">
+          <img src="img/logo.png" alt="" width="28" height="28" />
+          baucord
+        </a>
         <div class="nav-links">
           <a class="plain" href="#features" x-i18n="nav-features">Features</a>
           <a class="plain" href="#screenshots" x-i18n="nav-interface"
