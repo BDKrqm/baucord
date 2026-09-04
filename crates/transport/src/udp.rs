@@ -39,6 +39,7 @@ pub struct RecvOutcome {
 
 /// DSCP "Expedited Forwarding" (46): the class routers and `QoS` engines
 /// file interactive voice under. As a `TOS` byte it is `46 << 2`.
+#[cfg(not(windows))]
 const DSCP_EF: u32 = 46;
 
 /// A bound, nonblocking UDP socket with the `quinn-udp` extras.
