@@ -277,7 +277,7 @@ mod windows_qos {
                 MajorVersion: 1,
                 MinorVersion: 0,
             };
-            let mut handle: HANDLE = std::ptr::null_mut();
+            let mut handle: HANDLE = 0;
             // SAFETY: plain FFI with valid out-pointers; qwave.dll is part
             // of Windows Vista and later.
             let ok = unsafe { QOSCreateHandle(&version, &mut handle) };
