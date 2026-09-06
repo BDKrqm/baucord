@@ -31,7 +31,9 @@ language-note =
     actualizan al reabrirlas, y el historial del chat conserva su
     idioma original.
 # ── Server config (connect + settings) ──────────────────────────────────
-server-password = Contraseña del servidor (opcional)
+invite-code = Código de invitación
+invite-code-placeholder = p. ej. K7FQ-2MX9-ABCD — solo hace falta la primera vez
+server-invite-note = Se manda una sola vez, en tu primera visita; después la clave de este dispositivo es el login.
 settings-server = Servidor
 tab-servers = Servidores
 server-name = Nombre
@@ -43,10 +45,82 @@ server-remove = Quitar
 server-manage = Administrar servidores
 server-new-name = Servidor nuevo
 save = Guardar
-connect-access-denied = Acceso denegado: contraseña — escribila abajo, Guardá y volvé a Conectar
 server-fingerprint = Identidad del servidor (SHA256:…, de la invitación; se aprende en la primera conexión)
 server-config-note =
-    La contraseña es el secreto de la sala que comparten todos en tu servidor. La identidad se aprende en la primera conexión y queda fijada; pegala desde una invitación para verificar el servidor de antemano. Ambas aplican en la próxima conexión.
+    La identidad se aprende en la primera conexión y queda fijada; pegala desde el log de inicio del servidor para verificarlo de antemano. Aplica en la próxima conexión.
+
+# ── Veredictos de admisión (tarjeta de conexión) ────────────────────────
+connect-need-invite = Este servidor todavía no conoce este dispositivo. Escribí el código de invitación que te dieron y apretá Conectar.
+connect-invite-expired = Ese código de invitación venció — pedí uno nuevo.
+connect-invite-revoked = Ese código de invitación fue revocado — pedí uno nuevo.
+connect-invite-exhausted = Ese código de invitación ya se usó — pedí uno nuevo.
+connect-invite-unknown = Ese no es un código de invitación válido. Revisalo y probá de nuevo.
+connect-key-retired = Este dispositivo fue desvinculado de tu usuario en este servidor. Pedile a un admin que lo vuelva a vincular, o regenerá tu identidad en Ajustes para empezar como usuario nuevo.
+connect-name-in-use = Ese apodo ya está en uso en este servidor — elegí otro.
+error-invite-code-malformed = Eso no parece un código ni un link de invitación.
+error-no-identity = No se pudo cargar tu clave de identidad ({ $path }). Arreglá o borrá el archivo y reiniciá.
+error-banned = Estás baneado de este servidor{ $until }{ $reason }
+ban-for = por { $left }
+ban-indefinite = indefinidamente
+removed-disconnected = Desconectado por { $by }: { $reason }
+removed-kicked = Expulsado por { $by }: { $reason } — vas a necesitar una invitación nueva para volver.
+removed-banned = Baneado por { $by }{ $until }{ $reason }
+removed-replaced = Iniciaste sesión desde otro dispositivo o conexión; esta se cerró.
+chat-server-not-persistent = Este servidor no guarda nada entre reinicios: roles, invitaciones y baneos duran hasta que se apaga.
+
+# ── Invitaciones (/invite en el compositor) ─────────────────────────────
+chat-invite-created = Código de invitación { $code } (copiado) — { $role }, { $expiry }, { $uses }. Pasalo junto con la dirección y el puerto del servidor.
+chat-invite-usage = Uso: /invite [guest|member|organizer] [24h|7d] [usos]
+chat-invite-no-permission = No podés crear esa invitación acá.
+chat-invite-role-not-allowed = Los códigos de invitación no pueden dar ese rol.
+invite-uses = { $count } uso(s)
+invite-uses-unlimited = usos ilimitados
+invite-expires-in = vence en { $left }
+invite-never-expires = no vence
+
+# ── Moderación (comandos; spec §4, §8) ──────────────────────────────────
+chat-commands-help = Comandos: { $commands }
+chat-command-unknown = Comando desconocido /{ $command }. Probá /help.
+chat-command-usage = Uso: /{ $command } nombre …
+chat-command-usage-revoke-invite = Uso: /revoke-invite <código>
+chat-command-usage-unlink = Uso: /unlink <hash de clave, 64 dígitos hex> (ver /users)
+chat-command-usage-link = Uso: /link <nombre> <hash de clave, 64 dígitos hex>
+chat-command-no-such-user = No hay nadie conectado que se llame { $name }.
+chat-admin-refused = Rechazado: { $why }.
+chat-admin-done = Listo.
+chat-server-muted-locked = El servidor te silenció; vas a poder activar el micrófono cuando se levante.
+chat-your-roles-changed = Tus roles ahora son: { $roles }
+roles-none = ninguno
+reason-none = (sin motivo)
+chat-admin-users-header = { $count } usuario(s) registrados (● conectados):
+chat-admin-restrictions-header = { $count } restricción(es):
+chat-admin-invites-header = { $count } invitación(es):
+restricted-voice = El servidor te silenció{ $until }{ $reason }
+restricted-text = No podés escribir en el chat{ $until }{ $reason }
+restricted-dm = No podés mandar mensajes directos{ $until }{ $reason }
+restricted-upload = No podés subir archivos{ $until }{ $reason }
+restricted-share = No podés compartir pantalla{ $until }{ $reason }
+restricted-profile = No podés cambiar tu perfil{ $until }{ $reason }
+restricted-server = No podés entrar{ $until }{ $reason }
+lifted-voice = Te levantaron el silencio.
+lifted-text = Ya podés escribir en el chat de nuevo.
+lifted-dm = Ya podés mandar mensajes directos de nuevo.
+lifted-upload = Ya podés subir archivos de nuevo.
+lifted-share = Ya podés compartir pantalla de nuevo.
+lifted-profile = Ya podés cambiar tu perfil de nuevo.
+lifted-server = Ya podés entrar de nuevo.
+restricted-by-role = tu rol no lo permite
+
+# ── Identidad (Ajustes → General) ───────────────────────────────────────
+identity-header = Identidad
+identity-export = Exportar
+identity-import = Importar
+identity-regenerate = Regenerar
+identity-note = La clave de este dispositivo es quién sos en todos los servidores. Exportala para ser el mismo usuario en otra máquina; Importar reemplaza la clave de este dispositivo; Regenerar crea una nueva (usuario nuevo — vas a necesitar una invitación).
+identity-missing = sin clave de identidad
+identity-exported = Identidad exportada.
+identity-imported = Identidad importada — ahora sos esta clave. Reconectá para usarla.
+identity-regenerated = Nueva identidad creada. La próxima conexión necesita una invitación.
 
 # ── Barra lateral ───────────────────────────────────────────────────────
 users-count = Usuarios: { $count }
@@ -257,3 +331,239 @@ error-refused-rate-limited = Demasiados intentos fallidos — esperá un minuto 
 error-outdated = Esta versión de baucord no coincide con el servidor. Actualizá baucord y probá de nuevo.
 error-local = No se pudo iniciar la conexión: { $detail }
 error-lost-restart = El servidor se está reiniciando.
+
+# ── Historial, progreso, canales (spec §5, §6, §9) ───────────────────────
+chat-history-loaded = { $count } mensaje(s) anteriores{ $more ->
+    [yes] ; /history carga más
+   *[no] .
+}
+chat-history-unavailable = El historial no está disponible ahora; probá de nuevo en { $secs } s.
+chat-edited-mark = (editado)
+chat-deleted-placeholder = Mensaje borrado
+chat-message-edited = El mensaje #{ $id } fue editado: { $text }
+chat-message-deleted = El mensaje #{ $id } fue borrado.
+chat-rate-limited = Más despacio: el chat tiene límite; probá de nuevo en { $secs } s.
+chat-level-up = ¡Subiste de nivel! Ahora sos nivel { $level } ({ $xp } xp).
+chat-moved-idle = Te movieron al canal AFK después de { $min } minutos sin actividad.
+chat-command-usage-channel = Uso: /channel list · /channel create <nombre> [contraseña] · /channel keep <nombre> · /channel delete <nombre> · /channel kick <usuario>
+channel-owner-server = servidor
+chat-admin-no-telemetry = No llegó telemetría de esa persona en esta sesión.
+
+# ── 1.1 menú del roster, insignias, diálogo de moderación ───────────────
+menu-volume = Volumen…
+menu-mute-for-me = Silenciar para mí
+menu-unmute-for-me = Dejar de silenciar para mí
+menu-role = Rol
+menu-move-to = Mover a
+menu-channel-kick = Mandar al canal principal
+menu-mute = Silenciar
+menu-mute-voice = Voz…
+menu-mute-chat = Chat…
+menu-unmute-voice = Reactivar la voz
+menu-unmute-chat = Reactivar el chat
+menu-disconnect = Desconectar…
+menu-kick = Expulsar…
+menu-ban = Banear…
+role-guest = Invitado
+role-member = Miembro
+role-organizer = Organizador
+role-admin = Admin
+tooltip-level = Nivel { $level }
+tooltip-telemetry-age = Telemetría { $ago }
+tooltip-no-telemetry = Todavía no llegó telemetría de esta persona.
+moderation-duration = Duración
+moderation-reason = Motivo
+moderation-reason-placeholder = Opcional — se le muestra y queda en el registro
+server-not-persistent-note = Este servidor no guarda cambios. Los roles, baneos e invitaciones duran hasta que se reinicie.
+mod-title-mute-voice = ¿Silenciar la voz de { $name }?
+mod-title-mute-chat = ¿Silenciar a { $name } en el chat?
+mod-title-disconnect = ¿Desconectar a { $name }?
+mod-title-kick = ¿Expulsar a { $name }?
+mod-title-ban = ¿Banear a { $name }?
+mod-hint-mute-voice = Sigue conectado; el servidor descarta su voz hasta que termine el silencio.
+mod-hint-mute-chat = Sigue conectado; el servidor descarta sus mensajes e imágenes hasta que termine el silencio.
+mod-hint-disconnect = Se cierra su conexión. Volver a entrar es un clic.
+mod-hint-kick = Se cierra su conexión y se olvida este dispositivo: necesita una invitación nueva para volver.
+mod-hint-ban = Se cierra su conexión, y su usuario, dispositivo y dirección quedan rechazados hasta que termine el baneo.
+mod-confirm-mute = Silenciar a { $name }
+mod-confirm-disconnect = Desconectar a { $name }
+mod-confirm-kick = Expulsar a { $name }
+mod-confirm-ban = Banear a { $name }
+duration-10m = 10 minutos
+duration-30m = 30 minutos
+duration-2h = 2 horas
+duration-24h = 24 horas
+duration-7d = 7 días
+duration-30d = 30 días
+duration-forever = Hasta que se levante
+
+# ── 1.1 chat: editar / borrar / cargar anteriores ──────────────────────
+menu-edit-message = Editar mensaje
+menu-delete-message = Borrar mensaje
+chat-editing = Editando tu mensaje — Enter guarda, Esc cancela
+chat-load-earlier = Cargar mensajes anteriores
+chat-loading = Cargando…
+chat-no-earlier = No hay mensajes anteriores.
+chat-edit-not-applied = El servidor no aplicó la edición — puede que el mensaje sea muy viejo para cambiarlo.
+chat-delete-not-applied = El servidor no borró el mensaje — puede que sea muy viejo para cambiarlo.
+confirm-delete-message-title = ¿Borrar este mensaje?
+confirm-delete-message-body = Se elimina para todos.
+confirm-delete-message-body-admin = Se elimina para todos; el registro de auditoría guarda una línea.
+confirm-delete-message = Borrar mensaje
+
+# ── 1.1 canales desde la interfaz ─────────────────────────────────────
+channel-new = Canal nuevo
+channel-name = Nombre
+channel-name-placeholder = Hasta 40 caracteres
+channel-password-placeholder = Opcional
+channel-limit = Límite de usuarios
+channel-limit-placeholder = Sin límite
+channel-afk = AFK después de (minutos)
+channel-afk-placeholder = Valor del servidor
+channel-keep = Conservar este canal
+channel-keep-hint = Si no, se elimina después de estar vacío un rato.
+channel-members-only = Solo miembros
+channel-members-only-hint = Los invitados no lo ven ni pueden entrar.
+channel-create = Crear canal
+channel-save = Guardar cambios
+channel-not-persistent-note = Este servidor no guarda canales: dura hasta que el servidor se reinicie.
+channel-dialog-title-new = Canal nuevo
+channel-dialog-title-edit = Editar { $name }
+channel-password-unknown = Este canal tiene una contraseña que este dispositivo no conoce. Escribila para conservarla, o dejá el campo vacío para quitarla.
+channel-error-name = Dale al canal un nombre de hasta 40 caracteres.
+channel-error-limit = El límite de usuarios tiene que ser un número entero de 1 o más, o vacío.
+channel-error-afk = Los minutos de AFK tienen que ser un número entero de 1 o más, o vacío.
+channel-denied-name-taken = Ya existe un canal con ese nombre.
+channel-denied-no-permission = No podés hacer eso con este canal.
+channel-denied-config-owned = Ese canal está definido en el archivo de configuración del servidor y no se puede cambiar acá.
+channel-denied-limit = Ya tenés tantos canales como permite este servidor.
+channel-denied-no-such = Ese canal ya no existe.
+channel-denied-invalid = El servidor no aceptó esa configuración.
+menu-channel-edit = Editar canal…
+menu-channel-delete = Borrar canal…
+menu-channel-config-owned = Definido en la configuración del servidor
+confirm-delete-channel-title = ¿Borrar { $name }?
+confirm-delete-channel-body = Todos los que están adentro pasan al canal principal.
+confirm-delete-channel = Borrar canal
+
+menu-select-text = Seleccionar texto
+menu-show-formatting = Mostrar formato
+channel-join = Entrar al canal
+
+# ── Configuración: pestaña de perfil, adiciones a general ──────────────
+tab-profile = Perfil
+identity-regenerate-confirm = Regenerar — usuario nuevo, ¿seguro?
+profile-lead = Cómo te ven los demás.
+profile-no-name = Todavía sin apodo
+profile-nickname-hint = Te renombra para todos mientras estés conectado.
+profile-name-color = Color del nombre
+profile-name-style = Estilo del nombre
+name-style-normal = Normal
+name-style-bold = Negrita
+name-style-italic = Cursiva
+profile-avatar-choose = Elegir imagen…
+profile-avatar-remove = Quitar
+profile-avatar-error = No se pudo usar esa imagen: { $error }
+profile-role-line = En { $server }: { $role } · Nivel { $level }
+profile-role-line-no-level = En { $server }: { $role }
+profile-not-connected = Sin conexión — tu rol aparece acá cuando te conectes.
+general-lead = Idioma, tamaño del texto, sonidos y archivos.
+text-size = Tamaño del texto
+text-size-hint = Se aplica en todos lados, al instante.
+text-size-small = Chico
+text-size-default = Normal
+text-size-large = Grande
+text-size-larger = Más grande
+sounds-header = Sonidos
+sounds-enabled = Reproducir sonidos
+sounds-enabled-hint = Apagado, silencia todo lo de abajo.
+sounds-join-leave = Alguien entra o sale de tu canal
+files-header = Archivos
+files-note = La configuración, la clave de identidad y el avatar viven en esta carpeta.
+servers-lead = Servidores guardados; el predeterminado es con el que arranca la pantalla de conexión.
+audio-lead = Dispositivos, puerta de entrada y nivel de salida — cada cambio se aplica en vivo.
+
+# ── Configuración: inicio, notificaciones, chat, privacidad, transmisión ─
+sounds-mention = Un mensaje te nombra
+sounds-mention-hint = Tu apodo como palabra, o @apodo. Apagado por defecto: el chat general puede ser movido. Los mensajes comunes nunca suenan.
+startup-header = Inicio
+startup-auto-connect = Conectar al servidor predeterminado al abrir
+startup-auto-connect-hint = Necesita un apodo; se salta la pantalla de conexión.
+startup-minimized = Iniciar en la bandeja
+startup-minimized-hint = La ventana queda oculta hasta que la abras desde el ícono de la bandeja.
+startup-check-updates = Buscar una versión nueva al abrir
+startup-check-updates-hint = Apagado, la app va directo a la pantalla de conexión.
+chat-header = Chat
+chat-show-timestamps = Mostrar la hora en cada mensaje
+chat-compact-rows = Filas compactas
+chat-image-size = Imágenes que enviás
+chat-image-size-hint = Las imágenes más grandes se achican para entrar. Los servidores limitan las subidas a 10 MB.
+image-size-max = Máximo (10 MB)
+privacy-header = Privacidad
+privacy-note = Mientras estás conectado, un servidor ve tu apodo, el id de tu clave, tus roles y nivel, en qué canal estás, y cada 10 segundos una línea de telemetría: latencia ida y vuelta, pérdida de paquetes, los nombres de tus dispositivos de audio y video, tu versión de la app y sistema operativo. Los admins de ese servidor pueden leer la última línea en el roster. Nada va a ningún otro lado.
+audio-transmission = Transmisión
+audio-vad = Detección de voz
+audio-ptt = Pulsar para hablar
+audio-vad-hint = Tu voz se envía cada vez que supera la sensibilidad de abajo.
+audio-ptt-hint = Mantené apretada para hablar:
+audio-ptt-unbound = Todavía no hay tecla — asigná una en la pestaña Teclado.
+ptt-tooltip = Pulsar para hablar — mantené
+
+# ── Perfiles por la red (spec §7.1) ───────────────────────────────────
+chat-user-renamed = { $old } ahora es { $new }.
+profile-denied-reserved-color = Los nombres dorados están reservados para admins; elegí otro color.
+profile-denied-low-contrast = Ese color no se lee sobre el fondo del chat; elegí otro.
+profile-denied-rate-limited = Un cambio de perfil cada 30 segundos.
+profile-denied-locked = Un admin bloqueó tu perfil.
+profile-denied-bad-avatar = El servidor no aceptó esa imagen.
+profile-avatar-refused = La imagen fue rechazada: { $why }
+rename-denied-taken = Ese nombre está en uso acá.
+rename-denied-invalid = Ese nombre está vacío.
+rename-denied-rate-limited = Un cambio de nombre cada 30 segundos.
+viewer-fullscreen = Pantalla completa (F)
+viewer-exit-fullscreen = Salir de pantalla completa (Esc)
+
+# ── Separadores de día en el chat ─────────────────────────────────────
+chat-day-today = Hoy
+chat-day-yesterday = Ayer
+chat-day-label = { $weekday }, { $day } de { $month }
+chat-day-label-year = { $weekday }, { $day } de { $month } de { $year }
+weekday-mon = lunes
+weekday-tue = martes
+weekday-wed = miércoles
+weekday-thu = jueves
+weekday-fri = viernes
+weekday-sat = sábado
+weekday-sun = domingo
+month-1 = enero
+month-2 = febrero
+month-3 = marzo
+month-4 = abril
+month-5 = mayo
+month-6 = junio
+month-7 = julio
+month-8 = agosto
+month-9 = septiembre
+month-10 = octubre
+month-11 = noviembre
+month-12 = diciembre
+
+# ── Mensajes directos (spec §6) ───────────────────────────────────────
+chat-dm-received = Mensaje directo de { $name }: { $text }
+dm-failed-offline = No está conectado, y este servidor no guarda mensajes.
+dm-failed-no-permission = Los mensajes directos son para miembros.
+dm-failed-no-such-user = No existe ese usuario.
+dm-failed-store = El servidor no pudo guardar el mensaje. Probá de nuevo.
+
+messages-header = Mensajes
+dm-general = General
+dm-direct-message = Mensaje directo
+dm-note-memory = Le llega solo mientras esté conectado; este servidor no guarda nada.
+dm-back = Volver a General
+chat-placeholder-dm = Mensaje para
+menu-message = Mensaje…
+sounds-dm = Llega un mensaje directo
+chat-dm-with-offline = { $name } no está conectado; el mensaje espera en el servidor.
+chat-command-usage-dm = Uso: /dm <nombre> <mensaje>
+chat-dm-unknown = Acá nadie se llama { $name }.
+chat-dm-no-images = Las imágenes en mensajes directos llegan con la actualización de archivos.

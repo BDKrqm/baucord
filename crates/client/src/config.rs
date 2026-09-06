@@ -27,14 +27,13 @@ pub enum BindableAction {
 }
 
 impl BindableAction {
-    /// Actions shown in the keybind UI. `PushToTalk` is intentionally
-    /// excluded (not implemented yet) — but the enum variant must stay:
-    /// removing it would break deserialization of settings.json files
-    /// that already contain a `push_to_talk` keybind entry.
+    /// Actions shown in the keybind UI. Push to talk is a hold, not a
+    /// toggle: the hotkey layer forwards its release as well.
     pub const ALL: &'static [BindableAction] = &[
         BindableAction::ToggleMute,
         BindableAction::ToggleDeafen,
         BindableAction::ToggleScreenShare,
+        BindableAction::PushToTalk,
     ];
 
     pub fn label(&self) -> &'static str {
@@ -113,6 +112,147 @@ pub struct UserSettings {
     pub nickname: String,
 }
 
+/// How the app itself reads and sounds — nothing a server sees.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UiSettings {
+    /// Multiplier on every font size in the UI (1.0 = the design size).
+    #[serde(default = "default_text_scale")]
+    pub text_scale: f32,
+    /// `[HH:MM]` in front of chat rows.
+    #[serde(default = "default_true")]
+    pub show_timestamps: bool,
+    /// Tighter chat rows.
+    #[serde(default)]
+    pub compact_rows: bool,
+    /// Outgoing chat images are shrunk to fit this many KB; the wire
+    /// cap (`protocol::MAX_CHAT_IMAGE_BYTES`) is the ceiling.
+    #[serde(default = "default_image_max_kb")]
+    pub image_max_kb: u32,
+}
+
+impl Default for UiSettings {
+    fn default() -> Self {
+        Self {
+            text_scale: default_text_scale(),
+            show_timestamps: true,
+            compact_rows: false,
+            image_max_kb: default_image_max_kb(),
+        }
+    }
+}
+
+fn default_text_scale() -> f32 {
+    1.0
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_image_max_kb() -> u32 {
+    u32::try_from(protocol::MAX_CHAT_IMAGE_BYTES / 1024).unwrap_or(u32::MAX)
+}
+
+/// Which notification sounds play. `enabled` is the master switch;
+/// the rest pick. Ordinary chat messages never make a sound — a busy
+/// general chat must not be able to disturb anyone.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SoundSettings {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Someone joins or leaves our channel.
+    #[serde(default = "default_true")]
+    pub join_leave: bool,
+    /// A message names us (the nickname as a word, or `@nickname`).
+    /// Off by default.
+    #[serde(default)]
+    pub mention: bool,
+    /// A direct message arrives (spec §6). On by default: it is for
+    /// us, and only us.
+    #[serde(default = "default_true")]
+    pub direct_message: bool,
+}
+
+impl Default for SoundSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            join_leave: true,
+            mention: false,
+            direct_message: true,
+        }
+    }
+}
+
+impl SoundSettings {
+    /// Whether a given sound plays: the master switch, then its own.
+    #[must_use]
+    pub fn join_leave_on(&self) -> bool {
+        self.enabled && self.join_leave
+    }
+
+    #[must_use]
+    pub fn mention_on(&self) -> bool {
+        self.enabled && self.mention
+    }
+
+    #[must_use]
+    pub fn direct_message_on(&self) -> bool {
+        self.enabled && self.direct_message
+    }
+}
+
+/// What happens when the app launches.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StartupSettings {
+    /// Connect to the default server as soon as the connect screen
+    /// would appear (needs a nickname).
+    #[serde(default)]
+    pub auto_connect: bool,
+    /// Start in the tray without showing the window (builds with the
+    /// tray only; ignored otherwise).
+    #[serde(default)]
+    pub start_minimized: bool,
+    /// Look for a newer release before showing the connect screen.
+    #[serde(default = "default_true")]
+    pub check_updates: bool,
+}
+
+impl Default for StartupSettings {
+    fn default() -> Self {
+        Self {
+            auto_connect: false,
+            start_minimized: false,
+            check_updates: true,
+        }
+    }
+}
+
+/// How the user's name is drawn (spec §7.1). Kept here, sent in
+/// `SetProfile` once servers carry profiles (1.1.2).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum NameStyle {
+    #[default]
+    Normal,
+    Bold,
+    Italic,
+}
+
+/// The client-held profile (spec §7.1): name color, name style, and
+/// whether an avatar file sits next to the settings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ProfileSettings {
+    /// `0xRRGGBB`; `None` = the theme's default name color.
+    #[serde(default)]
+    pub name_color: Option<u32>,
+    #[serde(default)]
+    pub name_style: NameStyle,
+    /// `avatar.png` (128×128) exists in the config directory.
+    #[serde(default)]
+    pub avatar: bool,
+}
+
 /// One saved server the user can connect to.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServerEntry {
@@ -120,18 +260,20 @@ pub struct ServerEntry {
     pub name: String,
     /// `ip:port` (or `[v6]:port`) — parsed as a `SocketAddr` on connect.
     pub address: String,
-    /// Shared room password sent in `Hello`, if the server requires one
-    /// (`authentication.secure: true`).
-    ///
-    /// Stored in settings.json as plain text on purpose: this is a
-    /// shared room secret for a friends server, not a personal
-    /// credential — treat it accordingly (and don't reuse a personal
-    /// password for it). An OS-keychain integration would add a
-    /// per-platform dependency for a secret every member knows.
-    ///
-    /// (0.5 files called this `token_password`; it migrates on load.)
-    #[serde(default, alias = "token_password")]
+    /// The 1.0 room password. Servers ignore it since 1.1 (the device
+    /// key is the login and invites are the door); kept so old files
+    /// load and old entries survive a round trip.
+    #[serde(
+        default,
+        alias = "token_password",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub password: Option<String>,
+    /// The invite code to present on the first visit (spec §3.1),
+    /// typed when the server asks. Sent once: cleared the moment the
+    /// server admits us, because from then on the key is the login.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invite_code: Option<String>,
     /// The server's pinned identity, `SHA256:<base64>` (spec §3.2).
     /// Filled from an invite string, or on first successful connection
     /// (trust on first use). A server presenting a different key is
@@ -156,20 +298,23 @@ impl ServerEntry {
         Self {
             name: "baucord".to_string(),
             address: "216.238.121.18:5000".to_string(),
-            password: Some("conos".to_string()),
+            password: None,
+            invite_code: None,
             fingerprint: None,
             channel_passwords: HashMap::new(),
         }
     }
 
-    /// Parse an invite string: `host:port` or `host:port#SHA256:…`
-    /// (spec §3.2). The name defaults to the address.
+    /// Parse the address line the server prints at startup:
+    /// `host:port` or `host:port#SHA256:…` (the pin is optional; it is
+    /// learned on first connect otherwise). The name defaults to the
+    /// address.
     #[must_use]
-    pub fn from_invite(invite: &str) -> Option<Self> {
-        let invite = invite.trim();
-        let (address, fingerprint) = match invite.split_once('#') {
+    pub fn from_address(line: &str) -> Option<Self> {
+        let line = line.trim();
+        let (address, fingerprint) = match line.split_once('#') {
             Some((addr, fp)) => (addr.trim(), Some(fp.trim())),
-            None => (invite, None),
+            None => (line, None),
         };
         if address.is_empty() || !address.contains(':') {
             return None;
@@ -186,17 +331,36 @@ impl ServerEntry {
             name: address.to_string(),
             address: address.to_string(),
             password: None,
+            invite_code: None,
             fingerprint,
             channel_passwords: HashMap::new(),
         })
     }
 
-    /// The invite string for this entry (with the pin, once known).
+    /// The address with the pin once known, the way the server prints
+    /// it — what to hand a friend along with a code.
     #[must_use]
-    pub fn invite(&self) -> String {
+    pub fn pinned_address(&self) -> String {
         match &self.fingerprint {
             Some(fp) => format!("{}#{fp}", self.address),
             None => self.address.clone(),
+        }
+    }
+
+    /// Take a typed code as the one to present next time. Returns
+    /// whether the input reads as a code (blank clears it).
+    pub fn set_invite_input(&mut self, input: &str) -> bool {
+        let input = input.trim();
+        if input.is_empty() {
+            self.invite_code = None;
+            return true;
+        }
+        match protocol::invite::normalize_code(input) {
+            Some(code) => {
+                self.invite_code = Some(code);
+                true
+            }
+            None => false,
         }
     }
 }
@@ -253,6 +417,10 @@ pub struct AudioSettings {
     pub input: AudioInputSettings,
     pub output: AudioOutputSettings,
     pub gate_threshold: f32,
+    /// Transmit only while the push-to-talk key is held (the gate
+    /// still applies); off = voice activity.
+    #[serde(default)]
+    pub push_to_talk: bool,
 }
 
 impl Default for AudioSettings {
@@ -261,6 +429,7 @@ impl Default for AudioSettings {
             input: AudioInputSettings::default(),
             output: AudioOutputSettings::default(),
             gate_threshold: 0.010,
+            push_to_talk: false,
         }
     }
 }
@@ -354,6 +523,14 @@ pub struct Settings {
     pub language: Option<String>,
     #[serde(default)]
     pub share: ShareSettings,
+    #[serde(default)]
+    pub ui: UiSettings,
+    #[serde(default)]
+    pub profile: ProfileSettings,
+    #[serde(default)]
+    pub startup: StartupSettings,
+    #[serde(default)]
+    pub sounds: SoundSettings,
 }
 
 /// Deserialization shadow of [`Settings`]: `server` accepts both the
@@ -381,6 +558,14 @@ struct SettingsDe {
     language: Option<String>,
     #[serde(default)]
     share: ShareSettings,
+    #[serde(default)]
+    ui: UiSettings,
+    #[serde(default)]
+    profile: ProfileSettings,
+    #[serde(default)]
+    startup: StartupSettings,
+    #[serde(default)]
+    sounds: SoundSettings,
 }
 
 #[derive(Deserialize)]
@@ -412,6 +597,7 @@ impl From<SettingsDe> for Settings {
                         name: legacy.address.clone(),
                         address: legacy.address,
                         password: legacy.token_password,
+                        invite_code: None,
                         fingerprint: None,
                         channel_passwords: HashMap::new(),
                     }
@@ -433,6 +619,10 @@ impl From<SettingsDe> for Settings {
             peer_settings: de.peer_settings,
             language: de.language,
             share: de.share,
+            ui: de.ui,
+            profile: de.profile,
+            startup: de.startup,
+            sounds: de.sounds,
         };
         settings.normalize_servers();
         settings
@@ -451,6 +641,10 @@ impl Default for Settings {
             peer_settings: HashMap::new(),
             language: None,
             share: ShareSettings::default(),
+            ui: UiSettings::default(),
+            profile: ProfileSettings::default(),
+            startup: StartupSettings::default(),
+            sounds: SoundSettings::default(),
         }
     }
 }
@@ -546,6 +740,11 @@ impl Settings {
             if blank(&entry.password) {
                 entry.password = None;
             }
+            // Codes are stored canonical; anything else is not a code.
+            entry.invite_code = entry
+                .invite_code
+                .as_deref()
+                .and_then(protocol::invite::normalize_code);
             if blank(&entry.fingerprint)
                 || entry
                     .fingerprint
@@ -611,6 +810,14 @@ impl Settings {
 /// builds always use the platform config dir, keeping state out of
 /// target/.
 fn config_base_dir() -> PathBuf {
+    if let Some(dir) = CONFIG_DIR_OVERRIDE.get() {
+        return dir.clone();
+    }
+    if let Ok(dir) = std::env::var(CONFIG_DIR_ENV)
+        && !dir.trim().is_empty()
+    {
+        return PathBuf::from(dir.trim());
+    }
     #[cfg(not(debug_assertions))]
     {
         if let Some(dir) = writable_exe_dir() {
@@ -618,6 +825,40 @@ fn config_base_dir() -> PathBuf {
         }
     }
     platform_config_dir().unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Environment variable that relocates the whole config directory —
+/// settings, identity key, everything — for this process.
+pub const CONFIG_DIR_ENV: &str = "BAUCORD_CONFIG_DIR";
+
+static CONFIG_DIR_OVERRIDE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Relocate the config directory for this process (`--config-dir`,
+/// `--profile`). Call before anything reads settings or the key; a
+/// second call is ignored.
+pub fn set_config_dir(dir: PathBuf) {
+    let _ = CONFIG_DIR_OVERRIDE.set(dir);
+}
+
+/// The directory a named profile lives in: a second settings file and
+/// identity under the platform config dir, so two people (or two test
+/// instances) share one machine without sharing a key.
+#[must_use]
+pub fn profile_dir(name: &str) -> PathBuf {
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    platform_config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("profiles")
+        .join(safe)
 }
 
 fn platform_config_dir() -> Option<PathBuf> {
@@ -656,10 +897,27 @@ pub fn client_key_path() -> PathBuf {
     config_base_dir().join("identity.key")
 }
 
+/// Where the profile avatar lives (128×128 PNG): next to settings.json.
+#[must_use]
+pub fn avatar_path() -> PathBuf {
+    config_base_dir().join("avatar.png")
+}
+
+/// Where other people's avatars are cached by hash (spec §7.1: one
+/// transfer per client per change): `avatars/<hex>` next to settings.
+#[must_use]
+pub fn avatar_cache_dir() -> PathBuf {
+    config_base_dir().join("avatars")
+}
+
 /// Whether settings live next to the executable (a portable install),
-/// for the telemetry client info.
+/// for the telemetry client info. Never true under a relocated
+/// config directory.
 #[must_use]
 pub fn is_portable_install() -> bool {
+    if CONFIG_DIR_OVERRIDE.get().is_some() || std::env::var_os(CONFIG_DIR_ENV).is_some() {
+        return false;
+    }
     std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
@@ -667,18 +925,73 @@ pub fn is_portable_install() -> bool {
 }
 
 /// Load (or create) the client's identity key. Failure is logged and
-/// treated as "no key": the session still works, without a stable user
-/// id.
+/// treated as "no key": since 1.1 that means no session — the app
+/// shows the error instead of connecting.
 #[must_use]
 pub fn load_client_key() -> Option<std::sync::Arc<transport::ClientKey>> {
     let path = client_key_path();
     match transport::ClientKey::load_or_create(&path) {
         Ok(key) => Some(std::sync::Arc::new(key)),
         Err(e) => {
-            log::warn!("client key unavailable ({e}); connecting without one");
+            log::warn!("client key unavailable ({e}); cannot connect without one");
             None
         }
     }
+}
+
+/// Copy the identity key file to `to` (Settings → Identity → Export),
+/// so another machine can be the same user.
+///
+/// # Errors
+/// No key file yet, or the copy failed.
+pub fn export_client_key(to: &std::path::Path) -> Result<(), String> {
+    let from = client_key_path();
+    if !from.is_file() {
+        return Err(format!("no identity key at {}", from.display()));
+    }
+    std::fs::copy(&from, to)
+        .map(|_| ())
+        .map_err(|e| format!("could not write {}: {e}", to.display()))
+}
+
+/// Replace the identity key with the file at `from` (Settings →
+/// Identity → Import). The file must be a PKCS#8 Ed25519 key; the
+/// current key, if any, is overwritten — this device becomes whoever
+/// the imported key is. Returns the new key.
+///
+/// # Errors
+/// Unreadable or malformed file, or the write failed.
+pub fn import_client_key(
+    from: &std::path::Path,
+) -> Result<std::sync::Arc<transport::ClientKey>, String> {
+    let der = std::fs::read(from).map_err(|e| format!("could not read {}: {e}", from.display()))?;
+    transport::ClientKey::from_pkcs8(&der)?;
+    let to = client_key_path();
+    if let Some(dir) = to.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    }
+    std::fs::write(&to, &der).map_err(|e| format!("could not write {}: {e}", to.display()))?;
+    transport::ClientKey::load_or_create(&to)
+        .map(std::sync::Arc::new)
+        .map_err(|e| e.to_string())
+}
+
+/// Throw the identity key away and make a fresh one (Settings →
+/// Identity → Regenerate). The next connection is an unknown device
+/// that needs an invite: a new user, on purpose.
+///
+/// # Errors
+/// The old file could not be removed or the new one written.
+pub fn regenerate_client_key() -> Result<std::sync::Arc<transport::ClientKey>, String> {
+    let path = client_key_path();
+    if path.exists() {
+        std::fs::remove_file(&path)
+            .map_err(|e| format!("could not remove {}: {e}", path.display()))?;
+    }
+    transport::ClientKey::load_or_create(&path)
+        .map(std::sync::Arc::new)
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -708,7 +1021,9 @@ mod tests {
         assert_eq!(e.address, "10.0.0.7:6000");
         // The 0.5 token password becomes the room password; the issuer
         // URL is gone with the issuer.
+        // The 0.5 token password still loads (a 1.1 server ignores it).
         assert_eq!(e.password.as_deref(), Some("sekrit"));
+        assert_eq!(e.invite_code, None);
         assert_eq!(e.fingerprint, None);
         // Pre-existing settings survive the migration.
         assert_eq!(s.user.nickname, "empe");
@@ -790,7 +1105,7 @@ mod tests {
         assert_eq!(s.servers[0].password.as_deref(), Some("pw"));
         assert!(s.servers[0].fingerprint.is_some());
         assert_eq!(
-            s.servers[0].invite(),
+            s.servers[0].pinned_address(),
             "1.2.3.4:5000#SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
         );
         // A malformed pin is dropped rather than trusted.
@@ -800,20 +1115,32 @@ mod tests {
         );
         assert_eq!(s.servers[0].fingerprint, None);
 
-        let e = ServerEntry::from_invite(
+        let e = ServerEntry::from_address(
             " 10.0.0.1:5000#SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= ",
         )
-        .expect("invite");
+        .expect("address");
         assert_eq!(e.address, "10.0.0.1:5000");
         assert!(e.fingerprint.is_some());
         assert_eq!(
-            ServerEntry::from_invite("10.0.0.1:5000")
+            ServerEntry::from_address("10.0.0.1:5000")
                 .expect("bare")
                 .fingerprint,
             None
         );
-        assert!(ServerEntry::from_invite("nope").is_none());
-        assert!(ServerEntry::from_invite("10.0.0.1:5000#bad").is_none());
+        assert!(ServerEntry::from_address("nope").is_none());
+        assert!(ServerEntry::from_address("10.0.0.1:5000#bad").is_none());
+
+        // Codes are stored canonical and sent once.
+        let mut s = parse(
+            r#"{ "server": "x", "servers": [ { "name": "x", "address": "1.2.3.4:5000",
+                "invite_code": "k7fq 2mx9 abcd" } ] }"#,
+        );
+        assert_eq!(s.servers[0].invite_code.as_deref(), Some("K7FQ2MX9ABCD"));
+        assert!(!s.servers[0].set_invite_input("garbage"));
+        assert!(s.servers[0].set_invite_input("abcd-efgh-jkmn"));
+        assert_eq!(s.servers[0].invite_code.as_deref(), Some("ABCDEFGHJKMN"));
+        assert!(s.servers[0].set_invite_input("  "));
+        assert_eq!(s.servers[0].invite_code, None);
     }
 
     #[test]

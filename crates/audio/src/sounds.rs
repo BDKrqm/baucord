@@ -28,6 +28,10 @@ const LEAVE_WAV: &[u8] = include_bytes!("../../../assets/sounds/leave.wav");
 pub enum SoundType {
     UserJoined,
     UserLeft,
+    /// A message named us.
+    Mention,
+    /// A direct message arrived.
+    DirectMessage,
 }
 
 // ── Sound bank ──────────────────────────────────────────────────────────
@@ -36,6 +40,8 @@ pub enum SoundType {
 pub struct SoundBank {
     join: Vec<f32>,
     leave: Vec<f32>,
+    mention: Vec<f32>,
+    direct: Vec<f32>,
 }
 impl Default for SoundBank {
     fn default() -> Self {
@@ -48,6 +54,11 @@ impl SoundBank {
         Self {
             join: decode_wav("join", JOIN_WAV),
             leave: decode_wav("leave", LEAVE_WAV),
+            // Synthesized rather than shipped: two soft sines with a
+            // short envelope, quieter than the join/leave chimes. Built
+            // once here, next to the WAV decodes — ~10k samples, 40 KB.
+            mention: synth_notes(&[(660.0, 0.09), (880.0, 0.12)], 0.30),
+            direct: synth_notes(&[(523.0, 0.08), (659.0, 0.08), (784.0, 0.12)], 0.28),
         }
     }
 
@@ -56,8 +67,37 @@ impl SoundBank {
         match sound {
             SoundType::UserJoined => &self.join,
             SoundType::UserLeft => &self.leave,
+            SoundType::Mention => &self.mention,
+            SoundType::DirectMessage => &self.direct,
         }
     }
+}
+
+// ── Synthesis ───────────────────────────────────────────────────────────
+
+/// A sequence of sine notes `(hz, seconds)` at 48 kHz mono, each with
+/// a 5 ms attack and a decay over its whole length so they never click.
+fn synth_notes(notes: &[(f32, f32)], gain: f32) -> Vec<f32> {
+    const RATE: f32 = 48_000.0;
+    let mut out = Vec::new();
+    for &(hz, secs) in notes {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let len = (secs * RATE) as usize;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let attack = (RATE * 0.005) as usize;
+        for i in 0..len {
+            #[allow(clippy::cast_precision_loss)]
+            let t = i as f32 / RATE;
+            #[allow(clippy::cast_precision_loss)]
+            let env = if i < attack {
+                i as f32 / attack as f32
+            } else {
+                1.0 - (i - attack) as f32 / (len - attack).max(1) as f32
+            };
+            out.push((t * hz * std::f32::consts::TAU).sin() * env * gain);
+        }
+    }
+    out
 }
 
 // ── WAV decoding ────────────────────────────────────────────────────────

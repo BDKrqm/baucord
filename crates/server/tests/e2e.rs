@@ -2,20 +2,34 @@
 //! `ChatServer` and real client `Driver`s, every message crossing the
 //! simulated wire through the full QUIC stack, on a fake clock.
 
-use std::{collections::HashMap, net::SocketAddr, time::Duration};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant, SystemTime},
+};
 
 use protocol::{
-    features, Auth, ChannelDenyReason, ClientId, ClientMessage, DenyReason, Lane, RefusedReason,
-    ServerMessage, ShareScope,
+    features,
+    permissions::{self, RoleId, ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER},
+    AdminCommand, AdminError, AdminOutcome, AdminTarget, Auth, ChannelDenyReason, ChannelSpec,
+    ChannelUiDenyReason, ClientId, ClientKeyProof, ClientMessage, ConvRef, DenyReason,
+    InviteDenyReason, InviteInvalidReason, Lane, NeedInviteReason, RefusedReason, RemovedKind,
+    RestrictionKind, ServerMessage, ShareScope, UserId,
 };
 use server::{
+    clock::Clock,
     config::{ChannelSettings, Config},
+    policy::Restriction,
     server::ChatServer,
 };
+use sha2::Digest;
 use transport::{
+    identity::{CLIENT_AUTH_EXPORTER_BYTES, CLIENT_AUTH_EXPORTER_LABEL},
     sim::{LinkSpec, NodeId, SimNet},
-    Budget, DisconnectReason, Driver, Event, Fingerprint, PeerId, ServerIdentity, VideoItem,
-    OWN_TRACK,
+    Budget, ClientKey, DisconnectReason, Driver, Event, Fingerprint, PeerId, ServerIdentity,
+    VideoItem, OWN_TRACK,
 };
 
 const TICK: Duration = Duration::from_millis(2);
@@ -30,7 +44,40 @@ fn test_config(channels: Vec<ChannelSettings>) -> Config {
         ..Config::default()
     };
     config.logging.link_stats_interval_secs = 0;
+    // Memory mode unless a test turns the store on at a temp path.
+    config.persistence.enabled = false;
+    // Scenarios send a dozen lines in a few simulated milliseconds;
+    // only `chat_is_rate_limited_per_session` wants the default bite.
+    config.limits.chat.burst = 1000;
     config
+}
+
+/// A fresh scratch directory for tests that need a real database.
+fn temp_dir(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "baucord-e2e-{tag}-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    dir
+}
+
+/// `test_config` with the `SQLite` store on at `dir/baucord.db`.
+fn persistent_config(channels: Vec<ChannelSettings>, dir: &std::path::Path) -> Config {
+    let mut config = test_config(channels);
+    config.persistence.enabled = true;
+    config.persistence.path = dir.join("baucord.db").to_string_lossy().into_owned();
+    config
+}
+
+/// Rows in `messages` of the database at `dir`, read directly.
+fn stored_message_count(dir: &std::path::Path) -> i64 {
+    let conn = rusqlite::Connection::open(dir.join("baucord.db")).expect("open db");
+    conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+        .expect("count")
 }
 
 fn open_channel(name: &str, default: bool) -> ChannelSettings {
@@ -47,6 +94,10 @@ struct World {
     server: NodeId,
     fingerprint: Fingerprint,
     next_client: u8,
+    /// Standing codes, minted at start, so tests that are not about
+    /// admission just `connect` (a guest) or `connect_member`.
+    guest_code: String,
+    member_code: String,
 }
 
 struct TestClient {
@@ -55,8 +106,21 @@ struct TestClient {
     peer: PeerId,
     /// The id the server assigned to this client.
     id: ClientId,
+    /// This device's key: the identity the server knows it by.
+    key: Arc<ClientKey>,
     inbox: Vec<ServerMessage>,
     events: Vec<Event>,
+}
+
+/// Enough for `unwrap_err` on an admission verdict.
+impl std::fmt::Debug for TestClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TestClient")
+            .field("id", &self.id)
+            .field("key", &self.key)
+            .field("inbox", &self.inbox.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl World {
@@ -64,7 +128,13 @@ impl World {
         let _ = env_logger::builder().is_test(true).try_init();
         let identity = ServerIdentity::generate();
         let fingerprint = identity.fingerprint();
-        let server = ChatServer::new(config, &identity).expect("server start");
+        let mut server = ChatServer::new(config, &identity).expect("server start");
+        let (guest_code, _) = server
+            .mint_invite(None, ROLE_GUEST, None, None)
+            .expect("guest invite");
+        let (member_code, _) = server
+            .mint_invite(None, ROLE_MEMBER, None, None)
+            .expect("member invite");
         let mut net = SimNet::new(0xBA0C);
         let server = net.add_node(server, SERVER_ADDR.parse().expect("addr"));
         World {
@@ -72,7 +142,35 @@ impl World {
             server,
             fingerprint,
             next_client: 2,
+            guest_code,
+            member_code,
         }
+    }
+
+    /// Mint a code granting `role` (as the operator would from the
+    /// CLI, or an admin from the client).
+    fn invite(&mut self, role: RoleId) -> String {
+        self.server()
+            .mint_invite(None, role, None, None)
+            .expect("invite")
+            .0
+    }
+
+    /// Jump the server's wall clock forward without ticking through
+    /// the interval (invite expiry, restriction `until`).
+    fn advance_wall(&mut self, by: Duration) {
+        let now = self.net.now();
+        let wall =
+            self.server().clock().wall_ms(now) + u64::try_from(by.as_millis()).expect("fits");
+        self.server().set_clock(Clock::fixed(wall, now));
+    }
+
+    /// The bootstrap admin code from the startup log.
+    fn bootstrap_code(&mut self) -> String {
+        self.server()
+            .bootstrap_invite()
+            .expect("bootstrap invite")
+            .to_string()
     }
 
     fn server(&mut self) -> &mut ChatServer {
@@ -146,15 +244,38 @@ impl World {
             node,
             peer,
             id: 0,
+            key: Arc::new(ClientKey::generate()),
             inbox: Vec::new(),
             events: Vec::new(),
         }
     }
 
-    /// Connect, say Hello, and wait for `Init` (panics on refusal).
-    fn connect(&mut self, name: &str, password: Option<&str>) -> TestClient {
+    /// Connect a fresh device as a guest through the standing guest
+    /// code and wait for `Init` (panics on refusal).
+    fn connect(&mut self, name: &str) -> TestClient {
+        let code = self.guest_code.clone();
+        self.connect_as(name, Auth::Invite { code })
+    }
+
+    /// Connect a fresh device as a member: what the tests about media
+    /// use, since sharing and uploading need `SHARE` / `UPLOAD`
+    /// (spec §4).
+    fn connect_member(&mut self, name: &str) -> TestClient {
+        let code = self.member_code.clone();
+        self.connect_as(name, Auth::Invite { code })
+    }
+
+    /// Connect a fresh device with `auth` and wait for `Init`.
+    fn connect_as(&mut self, name: &str, auth: Auth) -> TestClient {
+        let key = Arc::new(ClientKey::generate());
+        self.connect_with_key(name, auth, key)
+    }
+
+    /// Connect a device whose key the server may already know.
+    fn connect_with_key(&mut self, name: &str, auth: Auth, key: Arc<ClientKey>) -> TestClient {
         let mut client = self.open();
-        client.hello(self, name, password);
+        client.key = key;
+        client.hello(self, name, auth);
         let id = client.wait_for(self, &mut [], |m| match m {
             ServerMessage::Init { client_id, .. } => Some(*client_id),
             _ => None,
@@ -169,24 +290,46 @@ impl World {
         &mut self,
         addr: SocketAddr,
         name: &str,
-        password: Option<&str>,
+        auth: Auth,
+        key: Option<Arc<ClientKey>>,
     ) -> Result<TestClient, RefusedReason> {
         let mut client = self.open_attempt_from(addr);
+        if let Some(key) = key {
+            client.key = key;
+        }
         let deadline = self.net.now() + WAIT;
         while !self.net.driver(client.node).is_connected(client.peer) {
             assert!(self.net.now() < deadline, "handshake timed out");
             self.pump(&mut [&mut client]);
         }
-        self.admission(&mut client, name, password).map(|()| client)
+        self.admission(&mut client, name, auth).map(|()| client)
+    }
+
+    /// Say Hello with a fresh device and return the verdict.
+    fn try_connect(&mut self, name: &str, auth: Auth) -> Result<TestClient, RefusedReason> {
+        let mut client = self.open();
+        self.admission(&mut client, name, auth).map(|()| client)
+    }
+
+    /// Say Hello with a known device and return the verdict.
+    fn try_connect_with_key(
+        &mut self,
+        name: &str,
+        auth: Auth,
+        key: Arc<ClientKey>,
+    ) -> Result<TestClient, RefusedReason> {
+        let mut client = self.open();
+        client.key = key;
+        self.admission(&mut client, name, auth).map(|()| client)
     }
 
     fn admission(
         &mut self,
         client: &mut TestClient,
         name: &str,
-        password: Option<&str>,
+        auth: Auth,
     ) -> Result<(), RefusedReason> {
-        client.hello(self, name, password);
+        client.hello(self, name, auth);
         let deadline = self.net.now() + WAIT;
         loop {
             self.pump(&mut [client]);
@@ -196,7 +339,7 @@ impl World {
                         client.id = *client_id;
                         return Ok(());
                     }
-                    ServerMessage::Refused { reason } => return Err(*reason),
+                    ServerMessage::Refused { reason } => return Err(reason.clone()),
                     _ => {}
                 }
             }
@@ -206,7 +349,33 @@ impl World {
 }
 
 impl TestClient {
-    fn hello(&mut self, world: &mut World, name: &str, password: Option<&str>) {
+    /// `Hello` the way the 1.1 client sends it: the device key signs
+    /// this connection's TLS exporter.
+    fn hello(&mut self, world: &mut World, name: &str, auth: Auth) {
+        let mut exported = [0u8; CLIENT_AUTH_EXPORTER_BYTES];
+        world
+            .net
+            .driver(self.node)
+            .export_keying_material(self.peer, CLIENT_AUTH_EXPORTER_LABEL, b"", &mut exported)
+            .expect("exporter after handshake");
+        let proof = ClientKeyProof {
+            public_key: self.key.public_key(),
+            signature: self.key.sign(&exported),
+        };
+        self.send(
+            world,
+            &ClientMessage::Hello {
+                username: name.to_string(),
+                auth,
+                client_key: Some(proof),
+                features: features::CLIENT_1_1,
+                client_version: protocol::CLIENT_VERSION.to_string(),
+            },
+        );
+    }
+
+    /// `Hello` the way a 1.0 client sends it: the shared password, no key.
+    fn hello_legacy(&mut self, world: &mut World, name: &str, password: Option<&str>) {
         self.send(
             world,
             &ClientMessage::Hello {
@@ -216,9 +385,56 @@ impl TestClient {
                 },
                 client_key: None,
                 features: features::CLIENT_1_0,
-                client_version: protocol::CLIENT_VERSION.to_string(),
+                client_version: "1.0.3".to_string(),
             },
         );
+    }
+
+    /// Close the connection the way the client's Disconnect button
+    /// does, and let the server notice.
+    fn leave(mut self, world: &mut World) {
+        let now = world.net.now();
+        world.net.driver(self.node).close(now, self.peer, "bye");
+        world.settle(&mut [&mut self], Duration::from_secs(1));
+    }
+
+    /// Send an admin command tagged `request_id`.
+    fn admin(&mut self, world: &mut World, request_id: u32, command: AdminCommand) {
+        self.send(
+            world,
+            &ClientMessage::Admin {
+                request_id,
+                command,
+            },
+        );
+    }
+
+    /// Wait for the answer to `request_id`.
+    fn admin_result(
+        &mut self,
+        world: &mut World,
+        others: &mut [&mut TestClient],
+        request_id: u32,
+    ) -> Result<AdminOutcome, AdminError> {
+        self.wait_for(world, others, |m| match m {
+            ServerMessage::AdminResult {
+                request_id: id,
+                result,
+            } if *id == request_id => Some(result.clone()),
+            _ => None,
+        })
+    }
+
+    /// The `Session` the server sent after `Welcome`.
+    fn session(&self) -> Option<(UserId, u64, bool)> {
+        self.inbox.iter().find_map(|m| match m {
+            ServerMessage::Session {
+                user_id,
+                permissions,
+                persistent,
+            } => Some((*user_id, *permissions, *persistent)),
+            _ => None,
+        })
     }
 
     fn send(&mut self, world: &mut World, msg: &ClientMessage) {
@@ -277,6 +493,92 @@ impl TestClient {
             .count()
     }
 
+    /// Announce and send a blob the way the client does (spec §7):
+    /// `UploadBegin` on the signal lane, then the chunks on one Media
+    /// stream when the server wants them. Returns the hash.
+    fn upload_blob(
+        &mut self,
+        world: &mut World,
+        upload_id: u32,
+        mime: &str,
+        bytes: &[u8],
+    ) -> [u8; 32] {
+        let sha256: [u8; 32] = sha2::Sha256::digest(bytes).into();
+        self.send(
+            world,
+            &ClientMessage::UploadBegin {
+                upload_id,
+                name: "avatar.png".into(),
+                mime: mime.into(),
+                size: u32::try_from(bytes.len()).unwrap(),
+                sha256,
+            },
+        );
+        let needed = self.wait_for(world, &mut [], |m| match m {
+            ServerMessage::UploadAccept {
+                upload_id: id,
+                needed,
+            } if *id == upload_id => Some(*needed),
+            ServerMessage::UploadRejected {
+                upload_id: id,
+                reason,
+            } if *id == upload_id => {
+                panic!("upload rejected: {reason:?}")
+            }
+            _ => None,
+        });
+        if needed {
+            self.send_blob_chunks(world, upload_id, bytes);
+        }
+        sha256
+    }
+
+    /// The chunks of an announced upload, on one paced Media stream.
+    fn send_blob_chunks(&mut self, world: &mut World, upload_id: u32, bytes: &[u8]) {
+        let count = u32::try_from(bytes.len().div_ceil(protocol::IMAGE_CHUNK_BYTES)).unwrap();
+        let frames: Vec<protocol::Bytes> = bytes
+            .chunks(protocol::IMAGE_CHUNK_BYTES)
+            .enumerate()
+            .map(|(i, chunk)| {
+                let msg = ClientMessage::UploadChunk {
+                    upload_id,
+                    index: u32::try_from(i).unwrap(),
+                    count,
+                    data: chunk.to_vec(),
+                };
+                protocol::Bytes::from(protocol::encode_client_message(&msg).expect("encode"))
+            })
+            .collect();
+        let now = world.net.now();
+        world
+            .net
+            .driver(self.node)
+            .send_media(now, self.peer, frames)
+            .expect("send_media");
+    }
+
+    /// A fetched blob reassembled from the inbox, once every chunk is in.
+    fn blob_received(&self, blob_id: &[u8; 32]) -> Option<Vec<u8>> {
+        let mut parts: Vec<Option<Vec<u8>>> = Vec::new();
+        for msg in &self.inbox {
+            if let ServerMessage::BlobChunk {
+                blob_id: id,
+                index,
+                count,
+                data,
+            } = msg
+                && id == blob_id
+            {
+                parts.resize(*count as usize, None);
+                parts[*index as usize] = Some(data.clone());
+            }
+        }
+        if parts.is_empty() || parts.iter().any(Option::is_none) {
+            return None;
+        }
+        Some(parts.into_iter().flatten().flatten().collect())
+    }
+
     /// Pump until `pred` finds a match in this client's inbox
     /// (returned), or panic after 5 s of simulated time.
     fn wait_for<T>(
@@ -330,8 +632,8 @@ fn png_blob(seed: u8, len: usize) -> Vec<u8> {
 #[test]
 fn open_mode_admits_anyone_and_assigns_ids() {
     let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
-    let a = w.connect("alice", None);
-    let b = w.connect("bob", None);
+    let a = w.connect("alice");
+    let b = w.connect("bob");
     assert_ne!(a.id, 0);
     assert_ne!(a.id, b.id);
     let welcome = a
@@ -341,67 +643,1590 @@ fn open_mode_admits_anyone_and_assigns_ids() {
         .expect("welcome");
     assert!(matches!(
         welcome,
-        ServerMessage::Welcome { client_id, user_id: None, features }
-            if *client_id == a.id && *features == features::SERVER_1_0
+        ServerMessage::Welcome { client_id, user_id: Some(user_id), features }
+            if *client_id == a.id
+                && *user_id == a.key.user_id()
+                && *features == features::SERVER_1_1
     ));
+    let (user_id, perms, persistent) = a.session().expect("Session after Welcome");
+    assert_eq!(user_id, a.key.user_id());
+    assert_eq!(perms, permissions::GUEST_PERMISSIONS);
+    assert!(!persistent, "test servers run in memory mode");
+}
+
+// ── Admission (spec §3) ─────────────────────────────────────────────────
+
+/// The first test of step B: with auto-reconnect, every blackout
+/// produces "the user connects while their old session is still in
+/// its idle window". That is a replacement, never `NameInUse`
+/// against yourself.
+#[test]
+fn a_key_login_replaces_its_own_live_session() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let mut a = w.connect("alice");
+    let mut b = w.connect("bob");
+    let bob_id = b.id;
+    a.wait_for(&mut w, &mut [&mut b], |m| {
+        matches!(m, ServerMessage::UserJoined { client_id, .. } if *client_id == bob_id)
+            .then_some(())
+    });
+    let old_id = a.id;
+
+    // A blackout: alice's old connection is never closed; her client
+    // reconnects with the same key and the same name.
+    let mut a2 = w.connect_with_key("alice", Auth::Key, Arc::clone(&a.key));
+    assert_ne!(a2.id, old_id);
+    assert_eq!(a2.session().map(|s| s.0), Some(a.key.user_id()));
+
+    // The old session is told it was replaced, then closed.
+    a.wait_for(&mut w, &mut [&mut a2, &mut b], |m| {
+        matches!(
+            m,
+            ServerMessage::Removed {
+                kind: RemovedKind::Replaced,
+                ..
+            }
+        )
+        .then_some(())
+    });
+    let deadline = w.net.now() + WAIT;
+    while a.disconnected().is_none() {
+        assert!(w.net.now() < deadline, "old session never closed");
+        w.pump(&mut [&mut a, &mut a2, &mut b]);
+    }
+
+    // Bob saw the old alice leave and the new one arrive; the roster
+    // holds one alice.
+    assert!(b.inbox.iter().any(|m| matches!(
+        m,
+        ServerMessage::UserLeft { client_id } if *client_id == old_id
+    )));
+    assert!(b.inbox.iter().any(|m| matches!(
+        m,
+        ServerMessage::UserJoined { client_id, username, .. }
+            if *client_id == a2.id && username == "alice"
+    )));
+    let user = a2.key.user_id();
+    let sessions = w
+        .server()
+        .clients()
+        .into_iter()
+        .filter(|c| w.server().user_of(*c) == Some(user))
+        .count();
+    assert_eq!(sessions, 1);
 }
 
 #[test]
-fn secure_mode_checks_the_password_and_rate_limits_failures() {
-    let mut config = test_config(vec![open_channel("Lobby", true)]);
-    config.authentication.secure = true;
-    config.authentication.password = Some("hunter2".to_string());
-    let mut w = World::new(config);
+fn a_1_0_client_is_refused_with_bad_hello() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let mut c = w.open();
+    c.hello_legacy(&mut w, "oldtimer", Some("hunter2"));
+    let reason = c.wait_for(&mut w, &mut [], |m| match m {
+        ServerMessage::Refused { reason } => Some(reason.clone()),
+        _ => None,
+    });
+    assert_eq!(reason, RefusedReason::BadHello);
+}
+
+#[test]
+fn an_unknown_key_needs_an_invite_and_that_does_not_count_as_a_failure() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    for _ in 0..8 {
+        let err = w
+            .try_connect("newcomer", Auth::Key)
+            .expect_err("unknown key");
+        assert_eq!(
+            err,
+            RefusedReason::NeedInvite {
+                why: NeedInviteReason::UnknownKey
+            }
+        );
+    }
+}
+
+#[test]
+fn an_invite_admits_once_and_the_key_logs_in_from_then_on() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let code = w.invite(ROLE_GUEST);
+    let a = w.connect_as("alice", Auth::Invite { code: code.clone() });
+    let (user_id, perms, _) = a.session().expect("session");
+    assert_eq!(
+        user_id,
+        a.key.user_id(),
+        "user id is the founding key's hash"
+    );
+    assert_eq!(perms, permissions::GUEST_PERMISSIONS);
+    assert_eq!(w.server().policy().invites[&code].uses, 1);
+    assert_eq!(
+        w.server().policy().users[&user_id].invited_with.as_deref(),
+        Some(code.as_str())
+    );
+
+    let key = Arc::clone(&a.key);
+    a.leave(&mut w);
+
+    // Next visit: the key is the login, no code needed.
+    let again = w.connect_with_key("alice", Auth::Key, Arc::clone(&key));
+    assert_eq!(again.session().map(|s| s.0), Some(user_id));
+
+    // A code sent anyway by a known key burns no use.
+    again.leave(&mut w);
+    let _third = w.connect_with_key("alice", Auth::Invite { code: code.clone() }, key);
+    assert_eq!(w.server().policy().invites[&code].uses, 1);
+}
+
+#[test]
+fn invalid_codes_say_which_and_count_toward_the_rate_limit() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let good = w.invite(ROLE_GUEST);
 
     // Mallory keeps one address and rotates ports, as a real attacker
     // (or a NAT) would.
     let mut mallory_port = 7000u16;
-    let mut mallory = |w: &mut World, password: Option<&str>| {
+    let mut mallory = |w: &mut World, code: &str| {
         let addr: SocketAddr = format!("10.0.0.99:{mallory_port}").parse().expect("addr");
         mallory_port += 1;
-        w.try_connect_from(addr, "mallory", password).err()
+        w.try_connect_from(
+            addr,
+            "mallory",
+            Auth::Invite {
+                code: code.to_string(),
+            },
+            None,
+        )
+        .err()
     };
+    let invalid = |why| Some(RefusedReason::InviteInvalid { why });
 
-    // Wrong and missing passwords are refused.
     assert_eq!(
-        mallory(&mut w, Some("wrong")),
-        Some(RefusedReason::WrongPassword)
+        mallory(&mut w, "ABCDEFGHJKMN"),
+        invalid(InviteInvalidReason::Unknown)
     );
-    assert_eq!(mallory(&mut w, None), Some(RefusedReason::WrongPassword));
+    assert_eq!(
+        mallory(&mut w, "not a code"),
+        invalid(InviteInvalidReason::Unknown)
+    );
 
-    // Right password from elsewhere: in.
-    let alice = w.connect("alice", Some("hunter2"));
-    assert!(alice
-        .inbox
-        .iter()
-        .any(|m| matches!(m, ServerMessage::Init { .. })));
+    // Alice, elsewhere, gets in fine.
+    let alice = w.connect_as("alice", Auth::Invite { code: good.clone() });
+    assert!(alice.session().is_some());
 
     // Five failures from one address within a minute, then even the
-    // right password is refused as rate-limited.
+    // right code is refused as rate-limited.
     for _ in 0..3 {
         assert_eq!(
-            mallory(&mut w, Some("nope")),
-            Some(RefusedReason::WrongPassword)
+            mallory(&mut w, "ABCDEFGHJKMN"),
+            invalid(InviteInvalidReason::Unknown)
         );
     }
-    assert_eq!(
-        mallory(&mut w, Some("hunter2")),
-        Some(RefusedReason::RateLimited)
-    );
+    assert_eq!(mallory(&mut w, &good), Some(RefusedReason::RateLimited));
     // Rate-limited refusals do not extend the ban; after the window it
     // lifts.
     w.settle(&mut [], Duration::from_secs(61));
-    assert_eq!(mallory(&mut w, Some("hunter2")), None);
+    assert_eq!(mallory(&mut w, &good), None);
 }
 
 #[test]
-fn refused_connections_are_closed_after_the_verdict() {
+fn expired_exhausted_and_revoked_codes_are_told_apart() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let invalid = |why| RefusedReason::InviteInvalid { why };
+
+    // Expiry rides on the tick's clock: run it forward.
+    let (short, _) = w
+        .server()
+        .mint_invite(None, ROLE_GUEST, Some(60 * 60 * 1000), None)
+        .expect("invite");
+    w.advance_wall(Duration::from_hours(2));
+    assert_eq!(
+        w.try_connect("late", Auth::Invite { code: short })
+            .unwrap_err(),
+        invalid(InviteInvalidReason::Expired)
+    );
+
+    let (once, _) = w
+        .server()
+        .mint_invite(None, ROLE_GUEST, None, Some(1))
+        .expect("invite");
+    let _first = w.connect_as("first", Auth::Invite { code: once.clone() });
+    assert_eq!(
+        w.try_connect("second", Auth::Invite { code: once })
+            .unwrap_err(),
+        invalid(InviteInvalidReason::Exhausted)
+    );
+
+    let revoked = w.invite(ROLE_GUEST);
+    assert!(w.server().revoke_invite(&revoked, None));
+    assert_eq!(
+        w.try_connect("nope", Auth::Invite { code: revoked })
+            .unwrap_err(),
+        invalid(InviteInvalidReason::Revoked)
+    );
+
+    // Codes are read out loud: case and separators do not matter.
+    let code = w.invite(ROLE_GUEST);
+    let spoken = format!(
+        "{}-{} {}",
+        &code[..4].to_ascii_lowercase(),
+        &code[4..8],
+        &code[8..].to_ascii_lowercase()
+    );
+    assert!(w
+        .try_connect("spoken", Auth::Invite { code: spoken })
+        .is_ok());
+}
+
+#[test]
+fn the_bootstrap_code_makes_the_first_admin_exactly_once() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    assert!(!w.server().policy().has_admin());
+    let code = w.bootstrap_code();
+    let admin = w.connect_as("mpw", Auth::Invite { code: code.clone() });
+    let (_, perms, _) = admin.session().expect("session");
+    assert!(permissions::has(perms, permissions::ADMIN));
+    assert!(w.server().policy().has_admin());
+    assert!(w.server().bootstrap_invite().is_none(), "one shot");
+    assert_eq!(
+        w.try_connect("impostor", Auth::Invite { code })
+            .unwrap_err(),
+        RefusedReason::InviteInvalid {
+            why: InviteInvalidReason::Exhausted
+        }
+    );
+}
+
+#[test]
+fn online_duplicate_names_are_refused_case_insensitively() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let _alice = w.connect("alice");
+    let code = w.guest_code.clone();
+    assert_eq!(
+        w.try_connect("ALICE", Auth::Invite { code: code.clone() })
+            .unwrap_err(),
+        RefusedReason::NameInUse
+    );
+    assert!(w.try_connect("alice2", Auth::Invite { code }).is_ok());
+}
+
+#[test]
+fn a_guest_cannot_take_an_offline_members_name() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let member_code = w.invite(ROLE_MEMBER);
+    let alice = w.connect_as(
+        "Alice",
+        Auth::Invite {
+            code: member_code.clone(),
+        },
+    );
+    let key = Arc::clone(&alice.key);
+    alice.leave(&mut w);
+    assert!(w.server().clients().is_empty(), "alice's session is gone");
+
+    let guest_code = w.guest_code.clone();
+    assert_eq!(
+        w.try_connect("alice", Auth::Invite { code: guest_code })
+            .unwrap_err(),
+        RefusedReason::NameInUse
+    );
+    // Another member may; the rule is against guests impersonating.
+    let other = w.connect_as("alice", Auth::Invite { code: member_code });
+    other.leave(&mut w);
+    // And Alice herself, of course — under a new name too: the name of
+    // record follows the Hello.
+    let back = w.connect_with_key("Alice again", Auth::Key, key);
+    let user = back.session().expect("session").0;
+    assert_eq!(w.server().policy().users[&user].name, "Alice again");
+}
+
+#[test]
+fn a_ban_removes_the_session_and_refuses_the_key_until_it_lifts() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let mut a = w.connect("alice");
+    let mut b = w.connect("bob");
+    let user_id = a.key.user_id();
+    let until = w.server().clock().wall_ms(w.net.now()) + 60 * 60 * 1000;
+    w.server().restrict(
+        Restriction {
+            id: 0,
+            user_id: Some(user_id),
+            key_hash: Some(user_id),
+            ip: None,
+            kind: RestrictionKind::Server,
+            until: Some(until),
+            reason: "spam".to_string(),
+            by: None,
+            created_at: 0,
+        },
+        "mpw",
+    );
+    a.wait_for(&mut w, &mut [&mut b], |m| match m {
+        ServerMessage::Removed {
+            kind: RemovedKind::Banned { until: got },
+            reason,
+            by,
+        } if *got == Some(until) && reason == "spam" && by == "mpw" => Some(()),
+        _ => None,
+    });
+    let old_id = a.id;
+    b.wait_for(&mut w, &mut [&mut a], |m| {
+        matches!(m, ServerMessage::UserLeft { client_id } if *client_id == old_id).then_some(())
+    });
+
+    // The key is refused with the reason, whatever name or code it tries.
+    let key = Arc::clone(&a.key);
+    let guest_code = w.guest_code.clone();
+    assert_eq!(
+        w.try_connect_with_key(
+            "innocent",
+            Auth::Invite { code: guest_code },
+            Arc::clone(&key)
+        )
+        .unwrap_err(),
+        RefusedReason::Banned {
+            until: Some(until),
+            reason: "spam".to_string()
+        }
+    );
+    // After `until`, the key is a login again.
+    w.advance_wall(Duration::from_hours(2));
+    assert!(w.try_connect_with_key("alice", Auth::Key, key).is_ok());
+}
+
+#[test]
+fn a_retired_key_needs_a_relink_even_with_a_code() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let a = w.connect("alice");
+    let key = Arc::clone(&a.key);
+    a.leave(&mut w);
+    assert!(w.server().unlink_key(&key.user_id()));
+    let need = RefusedReason::NeedInvite {
+        why: NeedInviteReason::KeyRetired,
+    };
+    assert_eq!(
+        w.try_connect_with_key("alice", Auth::Key, Arc::clone(&key))
+            .unwrap_err(),
+        need
+    );
+    let code = w.guest_code.clone();
+    assert_eq!(
+        w.try_connect_with_key("alice", Auth::Invite { code }, key)
+            .unwrap_err(),
+        need
+    );
+}
+
+#[test]
+fn members_mint_guest_codes_and_admins_choose() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let create = |grants_role, expires_secs| ClientMessage::CreateInvite {
+        grants_role,
+        expires_secs,
+        max_uses: Some(1),
+    };
+    let answer = |c: &mut TestClient, w: &mut World| {
+        c.wait_for(w, &mut [], |m| match m {
+            ServerMessage::InviteCreated {
+                code,
+                grants_role,
+                expires_at,
+                max_uses,
+            } => Some(Ok((code.clone(), *grants_role, *expires_at, *max_uses))),
+            ServerMessage::InviteDenied { reason } => Some(Err(*reason)),
+            _ => None,
+        })
+    };
+
+    let mut guest = w.connect("guest");
+    guest.send(&mut w, &create(None, None));
+    assert_eq!(
+        answer(&mut guest, &mut w),
+        Err(InviteDenyReason::NoPermission)
+    );
+
+    let member_code = w.invite(ROLE_MEMBER);
+    let mut member = w.connect_as("member", Auth::Invite { code: member_code });
+    member.send(&mut w, &create(None, Some(7 * 24 * 3600)));
+    let (code, role, expires_at, max_uses) = answer(&mut member, &mut w).expect("guest code");
+    assert_eq!(role, ROLE_GUEST);
+    assert_eq!(max_uses, Some(1));
+    let now = w.server().clock().wall_ms(w.net.now());
+    assert!(
+        expires_at.expect("expiry") <= now + 24 * 60 * 60 * 1000 + 1000,
+        "a member's code is clamped to the default expiry"
+    );
+    assert!(w.try_connect("via member", Auth::Invite { code }).is_ok());
+    member.inbox.clear();
+    member.send(&mut w, &create(Some(ROLE_MEMBER), None));
+    assert_eq!(
+        answer(&mut member, &mut w),
+        Err(InviteDenyReason::NoPermission)
+    );
+
+    let boot = w.bootstrap_code();
+    let mut admin = w.connect_as("admin", Auth::Invite { code: boot });
+    admin.send(&mut w, &create(Some(ROLE_MEMBER), Some(7 * 24 * 3600)));
+    let (code, role, expires_at, _) = answer(&mut admin, &mut w).expect("member code");
+    assert_eq!(role, ROLE_MEMBER);
+    assert!(expires_at.expect("expiry") > now + 6 * 24 * 60 * 60 * 1000);
+    let newbie = w.connect_as("newbie", Auth::Invite { code });
+    assert_eq!(
+        newbie.session().expect("session").1,
+        permissions::MEMBER_PERMISSIONS
+    );
+    admin.inbox.clear();
+    admin.send(&mut w, &create(Some(ROLE_ADMIN), None));
+    assert_eq!(
+        answer(&mut admin, &mut w),
+        Err(InviteDenyReason::RoleNotAllowed)
+    );
+}
+
+// ── Moderation and roles (spec §4, §8) ──────────────────────────────────
+
+#[test]
+fn a_kick_forgets_the_device_so_a_new_invite_is_needed() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let boot = w.bootstrap_code();
+    let mut admin = w.connect_as("mpw", Auth::Invite { code: boot });
+    let member_code = w.invite(ROLE_MEMBER);
+    let mut troll = w.connect_as("troll", Auth::Invite { code: member_code });
+    let troll_user = troll.key.user_id();
+
+    // By name: the admin types what they see in the roster.
+    admin.admin(
+        &mut w,
+        1,
+        AdminCommand::Kick {
+            target: AdminTarget::Name("TROLL".to_string()),
+            reason: "spam".to_string(),
+        },
+    );
+    assert_eq!(
+        admin.admin_result(&mut w, &mut [&mut troll], 1),
+        Ok(AdminOutcome::Done)
+    );
+    troll.wait_for(&mut w, &mut [&mut admin], |m| match m {
+        ServerMessage::Removed {
+            kind: RemovedKind::Kicked,
+            reason,
+            by,
+        } if reason == "spam" && by == "mpw" => Some(()),
+        _ => None,
+    });
+    let deadline = w.net.now() + WAIT;
+    while troll.disconnected().is_none() {
+        assert!(w.net.now() < deadline, "kicked session never closed");
+        w.pump(&mut [&mut troll, &mut admin]);
+    }
+
+    // Nothing to lift: the device is simply unknown again, and the
+    // roles are gone. A fresh code gets them back in — as whatever the
+    // code grants.
+    assert!(w.server().policy().restrictions.is_empty());
+    assert!(w.server().policy().users[&troll_user].roles.is_empty());
+    let key = Arc::clone(&troll.key);
+    assert_eq!(
+        w.try_connect_with_key("troll", Auth::Key, Arc::clone(&key))
+            .unwrap_err(),
+        RefusedReason::NeedInvite {
+            why: NeedInviteReason::UnknownKey
+        }
+    );
+    let code = w.guest_code.clone();
+    let back = w.connect_with_key("troll", Auth::Invite { code }, key);
+    let (user, perms, _) = back.session().expect("session");
+    assert_eq!(user, troll_user, "same key, same user id");
+    assert_eq!(perms, permissions::GUEST_PERMISSIONS);
+}
+
+#[test]
+fn a_ban_blocks_the_key_under_any_name_and_lifts_on_time() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let boot = w.bootstrap_code();
+    let mut admin = w.connect_as("mpw", Auth::Invite { code: boot });
+    let mut alice = w.connect("alice");
+    let alice_user = alice.key.user_id();
+
+    admin.admin(
+        &mut w,
+        1,
+        AdminCommand::Ban {
+            target: AdminTarget::User(alice_user),
+            duration_secs: Some(3600),
+            reason: "cool off".to_string(),
+        },
+    );
+    assert_eq!(
+        admin.admin_result(&mut w, &mut [&mut alice], 1),
+        Ok(AdminOutcome::Done)
+    );
+    let until = alice.wait_for(&mut w, &mut [&mut admin], |m| match m {
+        ServerMessage::Removed {
+            kind: RemovedKind::Banned { until },
+            ..
+        } => Some(*until),
+        _ => None,
+    });
+    assert!(until.is_some());
+
+    // Same key, a fresh code, another name: still out.
+    let code = w.invite(ROLE_GUEST);
+    let key = Arc::clone(&alice.key);
+    assert!(matches!(
+        w.try_connect_with_key("innocent", Auth::Invite { code }, Arc::clone(&key))
+            .unwrap_err(),
+        RefusedReason::Banned { .. }
+    ));
+    // Lifted by name while she is offline — the server resolves it.
+    admin.admin(
+        &mut w,
+        2,
+        AdminCommand::Unban {
+            target: AdminTarget::Name("alice".to_string()),
+        },
+    );
+    assert_eq!(
+        admin.admin_result(&mut w, &mut [], 2),
+        Ok(AdminOutcome::Done)
+    );
+    assert!(w
+        .try_connect_with_key("alice", Auth::Key, Arc::clone(&key))
+        .is_ok());
+
+    // And a timed one runs out on its own.
+    let mut alice = w.connect_with_key("alice", Auth::Key, key);
+    admin.admin(
+        &mut w,
+        3,
+        AdminCommand::Ban {
+            target: AdminTarget::User(alice_user),
+            duration_secs: Some(60),
+            reason: "one minute".to_string(),
+        },
+    );
+    assert_eq!(
+        admin.admin_result(&mut w, &mut [&mut alice], 3),
+        Ok(AdminOutcome::Done)
+    );
+    let key = Arc::clone(&alice.key);
+    w.advance_wall(Duration::from_hours(2));
+    // The sweep runs once a second of tick time.
+    w.settle(&mut [&mut admin], Duration::from_secs(2));
+    assert!(w.try_connect_with_key("alice", Auth::Key, key).is_ok());
+}
+
+#[test]
+fn a_ban_on_a_shared_address_hits_only_the_named_user() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let boot = w.bootstrap_code();
+    let mut admin = w.connect_as("mpw", Auth::Invite { code: boot });
+    // Two people behind one address (a household NAT, one machine).
+    let shared: SocketAddr = "10.0.0.9:7001".parse().expect("addr");
+    let code = w.guest_code.clone();
+    let mut alice = w
+        .try_connect_from(shared, "alice", Auth::Invite { code: code.clone() }, None)
+        .expect("alice in");
+    let shared2: SocketAddr = "10.0.0.9:7002".parse().expect("addr");
+    let mut bob = w
+        .try_connect_from(shared2, "bob", Auth::Invite { code }, None)
+        .expect("bob in");
+    w.settle(
+        &mut [&mut admin, &mut alice, &mut bob],
+        Duration::from_millis(200),
+    );
+    let alice_user = alice.key.user_id();
+
+    admin.admin(
+        &mut w,
+        1,
+        AdminCommand::Ban {
+            target: AdminTarget::User(alice_user),
+            duration_secs: None,
+            reason: String::new(),
+        },
+    );
+    assert_eq!(
+        admin.admin_result(&mut w, &mut [&mut alice, &mut bob], 1),
+        Ok(AdminOutcome::Done)
+    );
+    alice.wait_for(&mut w, &mut [&mut admin, &mut bob], |m| {
+        matches!(
+            m,
+            ServerMessage::Removed {
+                kind: RemovedKind::Banned { .. },
+                ..
+            }
+        )
+        .then_some(())
+    });
+    w.settle(
+        &mut [&mut admin, &mut alice, &mut bob],
+        Duration::from_millis(500),
+    );
+    // Bob shares the address and stays; the admin stays; the row does
+    // not carry the shared address at all.
+    assert!(bob.disconnected().is_none(), "bob was caught by the ban");
+    assert!(
+        admin.disconnected().is_none(),
+        "the admin banned themselves"
+    );
+    let bans = &w.server().policy().restrictions;
+    assert_eq!(bans.len(), 1);
+    assert_eq!(bans[0].ip, None);
+    assert_eq!(bans[0].user_id, Some(alice_user));
+}
+
+#[test]
+fn nobody_acts_on_themselves_or_on_an_equal_rank() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let boot = w.bootstrap_code();
+    let mut admin = w.connect_as("mpw", Auth::Invite { code: boot });
+    let mut guest = w.connect("guest");
+    let admin_user = admin.key.user_id();
+    let guest_user = guest.key.user_id();
+
+    // A guest has no admin bits at all.
+    guest.admin(
+        &mut w,
+        1,
+        AdminCommand::Kick {
+            target: AdminTarget::User(admin_user),
+            reason: String::new(),
+        },
+    );
+    assert_eq!(
+        guest.admin_result(&mut w, &mut [&mut admin], 1),
+        Err(AdminError::NoPermission)
+    );
+
+    // Not on yourself.
+    admin.admin(
+        &mut w,
+        2,
+        AdminCommand::Kick {
+            target: AdminTarget::User(admin_user),
+            reason: String::new(),
+        },
+    );
+    assert_eq!(
+        admin.admin_result(&mut w, &mut [], 2),
+        Err(AdminError::Yourself)
+    );
+
+    // Promote the guest to admin: now they are equal, and neither can
+    // touch the other.
+    admin.admin(
+        &mut w,
+        3,
+        AdminCommand::SetRoles {
+            target: AdminTarget::User(guest_user),
+            roles: vec![ROLE_ADMIN],
+        },
+    );
+    assert_eq!(
+        admin.admin_result(&mut w, &mut [&mut guest], 3),
+        Ok(AdminOutcome::Done)
+    );
+    let (_, perms, _) = guest.wait_for(&mut w, &mut [&mut admin], |m| match m {
+        ServerMessage::Session {
+            user_id,
+            permissions,
+            persistent,
+        } if permissions::has(*permissions, permissions::ADMIN) => {
+            Some((*user_id, *permissions, *persistent))
+        }
+        _ => None,
+    });
+    assert_eq!(perms, permissions::ADMIN_PERMISSIONS);
+    admin.admin(
+        &mut w,
+        4,
+        AdminCommand::Kick {
+            target: AdminTarget::User(guest_user),
+            reason: String::new(),
+        },
+    );
+    assert_eq!(
+        admin.admin_result(&mut w, &mut [&mut guest], 4),
+        Err(AdminError::Outranked)
+    );
+
+    // Two admins: one may step down; the last one may not.
+    admin.admin(
+        &mut w,
+        5,
+        AdminCommand::SetRoles {
+            target: AdminTarget::User(admin_user),
+            roles: vec![ROLE_MEMBER],
+        },
+    );
+    assert_eq!(
+        admin.admin_result(&mut w, &mut [&mut guest], 5),
+        Ok(AdminOutcome::Done)
+    );
+    guest.admin(
+        &mut w,
+        6,
+        AdminCommand::SetRoles {
+            target: AdminTarget::User(guest_user),
+            roles: vec![ROLE_MEMBER],
+        },
+    );
+    assert_eq!(
+        guest.admin_result(&mut w, &mut [&mut admin], 6),
+        Err(AdminError::LastAdmin)
+    );
+}
+
+#[test]
+fn a_mute_drops_voice_at_the_relay_and_the_client_is_told_both_ways() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let boot = w.bootstrap_code();
+    let mut admin = w.connect_as("mpw", Auth::Invite { code: boot });
+    let mut alice = w.connect("alice");
+    let mut bob = w.connect("bob");
+    let alice_user = alice.key.user_id();
+
+    let voice_reaches_bob = |w: &mut World,
+                             alice: &mut TestClient,
+                             bob: &mut TestClient,
+                             admin: &mut TestClient,
+                             seq0: u32| {
+        for seq in seq0..seq0 + 20 {
+            let pkt = protocol::pack_voice(seq, seq * 20, &[0xAB; 60]).expect("voice");
+            let now = w.net.now();
+            w.net
+                .driver(alice.node)
+                .send(now, alice.peer, Lane::Voice, &pkt)
+                .expect("send voice");
+            w.settle(&mut [alice, bob, admin], Duration::from_millis(20));
+        }
+        w.settle(&mut [alice, bob, admin], Duration::from_millis(500));
+        let mut got = 0;
+        while w.net.driver(bob.node).recv(bob.peer, Lane::Voice).is_some() {
+            got += 1;
+        }
+        got
+    };
+    assert_eq!(
+        voice_reaches_bob(&mut w, &mut alice, &mut bob, &mut admin, 0),
+        20
+    );
+
+    admin.admin(
+        &mut w,
+        1,
+        AdminCommand::Restrict {
+            target: AdminTarget::User(alice_user),
+            kind: RestrictionKind::Voice,
+            duration_secs: Some(30 * 60),
+            reason: "hot mic".to_string(),
+        },
+    );
+    assert_eq!(
+        admin.admin_result(&mut w, &mut [&mut alice, &mut bob], 1),
+        Ok(AdminOutcome::Done)
+    );
+    let until = alice.wait_for(&mut w, &mut [&mut admin, &mut bob], |m| match m {
+        ServerMessage::Restricted {
+            kind: RestrictionKind::Voice,
+            until,
+            reason,
+        } if reason == "hot mic" => Some(*until),
+        _ => None,
+    });
+    assert!(until.is_some());
+    assert_eq!(
+        voice_reaches_bob(&mut w, &mut alice, &mut bob, &mut admin, 100),
+        0
+    );
+
+    // Time runs out: the sweep lifts it and says so.
+    w.advance_wall(Duration::from_mins(31));
+    w.settle(
+        &mut [&mut alice, &mut bob, &mut admin],
+        Duration::from_secs(2),
+    );
+    alice.wait_for(&mut w, &mut [&mut admin, &mut bob], |m| {
+        matches!(
+            m,
+            ServerMessage::RestrictionLifted {
+                kind: RestrictionKind::Voice
+            }
+        )
+        .then_some(())
+    });
+    assert_eq!(
+        voice_reaches_bob(&mut w, &mut alice, &mut bob, &mut admin, 200),
+        20
+    );
+}
+
+#[test]
+fn a_text_restriction_refuses_chat_with_the_reason() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let boot = w.bootstrap_code();
+    let mut admin = w.connect_as("mpw", Auth::Invite { code: boot });
+    // A member: she holds `UPLOAD`, so the mute alone decides the image.
+    let mut alice = w.connect_member("alice");
+    let alice_user = alice.key.user_id();
+
+    admin.admin(
+        &mut w,
+        1,
+        AdminCommand::Restrict {
+            target: AdminTarget::User(alice_user),
+            kind: RestrictionKind::GeneralText,
+            duration_secs: None,
+            reason: "be nice".to_string(),
+        },
+    );
+    assert_eq!(
+        admin.admin_result(&mut w, &mut [&mut alice], 1),
+        Ok(AdminOutcome::Done)
+    );
+    alice.inbox.clear();
+    admin.inbox.clear();
+    alice.send(&mut w, &ClientMessage::Chat("hello?".to_string()));
+    alice.wait_for(&mut w, &mut [&mut admin], |m| match m {
+        ServerMessage::Restricted {
+            kind: RestrictionKind::GeneralText,
+            until: None,
+            reason,
+        } if reason == "be nice" => Some(()),
+        _ => None,
+    });
+    w.settle(&mut [&mut alice, &mut admin], Duration::from_millis(500));
+    assert!(
+        !admin
+            .inbox
+            .iter()
+            .any(|m| matches!(m, ServerMessage::Chat(c) if c.text == "hello?")),
+        "a restricted user's chat must not be delivered"
+    );
+    // Pictures are chat too.
+    admin.inbox.clear();
+    alice.send_image(&mut w, 1, &png_blob(1, 4 * 1024));
+    w.settle(&mut [&mut alice, &mut admin], Duration::from_secs(2));
+    assert_eq!(
+        admin.images_completed(),
+        0,
+        "a text-muted user's image must not be relayed"
+    );
+
+    // Lifted: the same image goes through, so the block above was the
+    // mute and not something else.
+    admin.admin(
+        &mut w,
+        2,
+        AdminCommand::Unmute {
+            target: AdminTarget::User(alice_user),
+            kind: RestrictionKind::GeneralText,
+        },
+    );
+    assert_eq!(
+        admin.admin_result(&mut w, &mut [&mut alice], 2),
+        Ok(AdminOutcome::Done)
+    );
+    alice.wait_for(&mut w, &mut [&mut admin], |m| {
+        matches!(
+            m,
+            ServerMessage::RestrictionLifted {
+                kind: RestrictionKind::GeneralText
+            }
+        )
+        .then_some(())
+    });
+    admin.inbox.clear();
+    alice.send_image(&mut w, 2, &png_blob(2, 4 * 1024));
+    w.settle(&mut [&mut alice, &mut admin], Duration::from_secs(2));
+    assert_eq!(
+        admin.images_completed(),
+        1,
+        "an unmuted member's image relays"
+    );
+}
+
+#[test]
+fn roles_change_live_for_the_user_and_every_roster() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let boot = w.bootstrap_code();
+    let mut admin = w.connect_as("mpw", Auth::Invite { code: boot });
+    let mut alice = w.connect("alice");
+    let alice_user = alice.key.user_id();
+
+    // The roster carried alice as a guest.
+    admin.wait_for(&mut w, &mut [&mut alice], |m| match m {
+        ServerMessage::UserDetails { user_id, roles, .. } if *user_id == alice_user => {
+            Some(roles.clone())
+        }
+        _ => None,
+    });
+    admin.inbox.clear();
+    alice.inbox.clear();
+
+    admin.admin(
+        &mut w,
+        1,
+        AdminCommand::SetRoles {
+            target: AdminTarget::User(alice_user),
+            roles: vec![ROLE_MEMBER],
+        },
+    );
+    assert_eq!(
+        admin.admin_result(&mut w, &mut [&mut alice], 1),
+        Ok(AdminOutcome::Done)
+    );
+    let perms = alice.wait_for(&mut w, &mut [&mut admin], |m| match m {
+        ServerMessage::Session { permissions, .. } => Some(*permissions),
+        _ => None,
+    });
+    assert_eq!(perms, permissions::MEMBER_PERMISSIONS);
+    let roles = admin.wait_for(&mut w, &mut [&mut alice], |m| match m {
+        ServerMessage::UserDetails { user_id, roles, .. } if *user_id == alice_user => {
+            Some(roles.clone())
+        }
+        _ => None,
+    });
+    assert_eq!(roles, vec![ROLE_MEMBER]);
+    assert_eq!(
+        w.server().policy().rank_of(&alice_user),
+        permissions::RANK_MEMBER
+    );
+}
+
+#[test]
+fn sharing_needs_the_permission_and_bypass_limits_ignores_the_cap() {
     let mut config = test_config(vec![open_channel("Lobby", true)]);
-    config.authentication.secure = true;
-    config.authentication.password = Some("pw".to_string());
+    config.limits.max_sharers = 1;
     let mut w = World::new(config);
+    let boot = w.bootstrap_code();
+    let mut admin = w.connect_as("mpw", Auth::Invite { code: boot });
+    let mut guest = w.connect("guest");
+    let member_code = w.invite(ROLE_MEMBER);
+    let mut member = w.connect_as("member", Auth::Invite { code: member_code });
+
+    let share = ClientMessage::ScreenShareStart {
+        width: 1280,
+        height: 720,
+        scope: ShareScope::Everyone,
+    };
+    guest.send(&mut w, &share);
+    let reason = guest.wait_for(&mut w, &mut [&mut admin, &mut member], |m| match m {
+        ServerMessage::ShareDenied { reason } => Some(*reason),
+        _ => None,
+    });
+    assert_eq!(reason, DenyReason::NotPermitted);
+
+    member.send(&mut w, &share);
+    member.wait_for(&mut w, &mut [&mut admin, &mut guest], |m| {
+        matches!(m, ServerMessage::ScreenShareStarted { .. }).then_some(())
+    });
+
+    // The cap is one sharer; the admin has BYPASS_LIMITS.
+    admin.send(&mut w, &share);
+    let admin_id = admin.id;
+    admin.wait_for(&mut w, &mut [&mut member, &mut guest], |m| {
+        matches!(m, ServerMessage::ScreenShareStarted { client_id, .. } if *client_id == admin_id)
+            .then_some(())
+    });
+    assert_eq!(w.server().video_sharer_count(), 2);
+}
+
+#[test]
+fn a_ban_written_by_the_cli_lands_on_a_live_session() {
+    let dir = temp_dir("cli-ban");
+    let mut w = World::new(persistent_config(vec![open_channel("Lobby", true)], &dir));
+    let mut alice = w.connect("alice");
+    let alice_user = alice.key.user_id();
+    // Her row must be on disk before the CLI looks her up.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while w.server().persistence().stats().queued > 0 {
+        assert!(Instant::now() < deadline, "rows never landed");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let db = dir.join("baucord.db");
+    let (found, _) = server::persistence::cli_find_user(&db, "ALICE").expect("by name");
+    assert_eq!(found, alice_user);
+    let id = server::persistence::cli_restrict(
+        &db,
+        Restriction {
+            id: 0,
+            user_id: Some(alice_user),
+            key_hash: None,
+            ip: None,
+            kind: RestrictionKind::Server,
+            until: None,
+            reason: "from the box".to_string(),
+            by: None,
+            created_at: 0,
+        },
+    )
+    .expect("cli restrict");
+    assert_eq!(id, 1);
+
+    // The running server polls data_version every 2 s of real time.
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        w.pump(&mut [&mut alice]);
+        if alice.inbox.iter().any(|m| {
+            matches!(
+                m,
+                ServerMessage::Removed {
+                    kind: RemovedKind::Banned { until: None },
+                    reason,
+                    ..
+                } if reason == "from the box"
+            )
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the CLI ban never reached the session"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(server::persistence::cli_lift_restriction(&db, id).expect("lift"));
+    drop(w);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_admin_moves_a_user_past_a_channel_password() {
+    let mut w = World::new(test_config(vec![
+        open_channel("Lobby", true),
+        ChannelSettings {
+            name: "Backroom".to_string(),
+            default: false,
+            password: Some("hunter2".to_string()),
+            user_limit: None,
+        },
+    ]));
+    let boot = w.bootstrap_code();
+    let mut admin = w.connect_as("mpw", Auth::Invite { code: boot });
+    let mut alice = w.connect("alice");
+    let alice_user = alice.key.user_id();
+
+    admin.admin(
+        &mut w,
+        1,
+        AdminCommand::MoveUser {
+            target: AdminTarget::User(alice_user),
+            channel_id: 1,
+        },
+    );
+    assert_eq!(
+        admin.admin_result(&mut w, &mut [&mut alice], 1),
+        Ok(AdminOutcome::Done)
+    );
+    let alice_id = alice.id;
+    alice.wait_for(&mut w, &mut [&mut admin], |m| {
+        matches!(
+            m,
+            ServerMessage::UserMovedChannel { client_id, channel_id: 1 } if *client_id == alice_id
+        )
+        .then_some(())
+    });
+    assert_eq!(w.server().channel_of(alice_id), Some(1));
+}
+
+// ── History, progress, channels from the UI (spec §5, §6, §9) ──────────
+
+#[test]
+fn history_replays_on_join_and_pages_back_through_the_store() {
+    let dir = temp_dir("history");
+    let mut config = persistent_config(vec![open_channel("Lobby", true)], &dir);
+    config.persistence.history.replay = 5;
+    let mut w = World::new(config);
+    let mut alice = w.connect("alice");
+    for i in 0..12 {
+        alice.send(&mut w, &ClientMessage::Chat(format!("line {i}")));
+        alice.wait_for(&mut w, &mut [], |m| match m {
+            ServerMessage::Chat(c) if c.text == format!("line {i}") => Some(()),
+            _ => None,
+        });
+    }
+
+    // The newcomer gets the last five, oldest first, with the author's
+    // name — and a `more` that leads further back.
+    let mut bob = w.connect("bob");
+    let (page, more) = bob.wait_for(&mut w, &mut [&mut alice], |m| match m {
+        ServerMessage::History {
+            conv: ConvRef::General,
+            messages,
+            more,
+        } => Some((messages.clone(), *more)),
+        _ => None,
+    });
+    assert_eq!(page.len(), 5);
+    assert_eq!(page[0].text, "line 7");
+    assert_eq!(page[4].text, "line 11");
+    assert_eq!(page[0].name, "alice");
+    assert!(page.iter().all(|m| m.user_id == alice.key.user_id()));
+    assert!(more);
+
+    // Paging back: the ring covers the rest of the session.
+    bob.inbox.clear();
+    bob.send(
+        &mut w,
+        &ClientMessage::FetchHistory {
+            conv: ConvRef::General,
+            before: Some(page[0].id),
+            limit: 4,
+        },
+    );
+    let older = bob.wait_for(&mut w, &mut [&mut alice], |m| match m {
+        ServerMessage::History { messages, .. } => Some(messages.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        older.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(),
+        ["line 3", "line 4", "line 5", "line 6"]
+    );
+
+    // After a restart the ring is primed from the database.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while w.server().persistence().stats().queued > 0 {
+        assert!(Instant::now() < deadline, "writes never landed");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    drop(w);
+    let mut config = persistent_config(vec![open_channel("Lobby", true)], &dir);
+    config.persistence.history.replay = 3;
+    let mut w = World::new(config);
+    let mut carol = w.connect("carol");
+    let (page, more) = carol.wait_for(&mut w, &mut [], |m| match m {
+        ServerMessage::History { messages, more, .. } => Some((messages.clone(), *more)),
+        _ => None,
+    });
+    assert_eq!(
+        page.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(),
+        ["line 9", "line 10", "line 11"]
+    );
+    assert!(more);
+    drop(w);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_stalled_store_answers_history_with_a_retry_hint() {
+    let dir = temp_dir("history-stall");
+    let mut w = World::new(persistent_config(vec![open_channel("Lobby", true)], &dir));
+    let mut alice = w.connect("alice");
+    let stalled = w.server().persistence().stall();
+    std::thread::sleep(Duration::from_millis(50));
+    // A page the ring cannot answer: before the oldest id there is.
+    alice.send(
+        &mut w,
+        &ClientMessage::FetchHistory {
+            conv: ConvRef::General,
+            before: Some(1),
+            limit: 10,
+        },
+    );
+    let retry = alice.wait_for(&mut w, &mut [], |m| match m {
+        ServerMessage::HistoryUnavailable { retry_secs, .. } => Some(*retry_secs),
+        _ => None,
+    });
+    assert!(retry > 0);
+    drop(stalled);
+    drop(w);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn authors_edit_and_delete_their_own_recent_messages() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let boot = w.bootstrap_code();
+    let mut admin = w.connect_as("mpw", Auth::Invite { code: boot });
+    let mut alice = w.connect("alice");
+    let mut bob = w.connect("bob");
+    alice.send(&mut w, &ClientMessage::Chat("typo".to_string()));
+    let id = alice.wait_for(&mut w, &mut [&mut bob, &mut admin], |m| match m {
+        ServerMessage::Chat(c) if c.text == "typo" => Some(c.id),
+        _ => None,
+    });
+
+    // Bob cannot edit alice's message; alice can.
+    bob.send(
+        &mut w,
+        &ClientMessage::EditMessage {
+            msg_id: id,
+            text: "hijack".to_string(),
+        },
+    );
+    alice.send(
+        &mut w,
+        &ClientMessage::EditMessage {
+            msg_id: id,
+            text: "fixed".to_string(),
+        },
+    );
+    let text = bob.wait_for(&mut w, &mut [&mut alice, &mut admin], |m| match m {
+        ServerMessage::MessageEdited { msg_id, text } if *msg_id == id => Some(text.clone()),
+        _ => None,
+    });
+    assert_eq!(text, "fixed");
+    assert!(!bob
+        .inbox
+        .iter()
+        .any(|m| matches!(m, ServerMessage::MessageEdited { text, .. } if text == "hijack")));
+
+    // A newcomer sees the edit and the flag.
+    let mut carol = w.connect("carol");
+    let page = carol.wait_for(
+        &mut w,
+        &mut [&mut alice, &mut bob, &mut admin],
+        |m| match m {
+            ServerMessage::History { messages, .. } => Some(messages.clone()),
+            _ => None,
+        },
+    );
+    assert_eq!(page[0].text, "fixed");
+    assert!(page[0].edited);
+
+    // An admin deletes it for everyone.
+    admin.admin(&mut w, 1, AdminCommand::DeleteMessage { msg_id: id });
+    assert_eq!(
+        admin.admin_result(&mut w, &mut [&mut alice, &mut bob, &mut carol], 1),
+        Ok(AdminOutcome::Done)
+    );
+    carol.wait_for(&mut w, &mut [&mut alice, &mut bob, &mut admin], |m| {
+        matches!(m, ServerMessage::MessageDeleted { msg_id } if *msg_id == id).then_some(())
+    });
+    let mut dave = w.connect("dave");
+    w.settle(&mut [&mut dave], Duration::from_millis(300));
+    assert!(dave.inbox.iter().all(|m| match m {
+        ServerMessage::History { messages, .. } => messages.iter().all(|x| x.id != id),
+        _ => true,
+    }));
+}
+
+#[test]
+fn chat_is_rate_limited_per_session() {
+    let mut config = test_config(vec![open_channel("Lobby", true)]);
+    config.limits.chat.burst = 3;
+    config.limits.chat.per_secs = 3;
+    let mut w = World::new(config);
+    let mut alice = w.connect("alice");
+    let mut bob = w.connect("bob");
+    for i in 0..5 {
+        alice.send(&mut w, &ClientMessage::Chat(format!("burst {i}")));
+    }
+    alice.wait_for(&mut w, &mut [&mut bob], |m| {
+        matches!(m, ServerMessage::ChatRateLimited { .. }).then_some(())
+    });
+    w.settle(&mut [&mut alice, &mut bob], Duration::from_millis(500));
+    let delivered = bob
+        .inbox
+        .iter()
+        .filter(|m| matches!(m, ServerMessage::Chat(c) if c.text.starts_with("burst")))
+        .count();
+    assert_eq!(delivered, 3, "three in the burst, the rest dropped");
+    // Tokens come back with time.
+    w.settle(&mut [&mut alice, &mut bob], Duration::from_secs(3));
+    alice.send(&mut w, &ClientMessage::Chat("later".to_string()));
+    bob.wait_for(&mut w, &mut [&mut alice], |m| {
+        matches!(m, ServerMessage::Chat(c) if c.text == "later").then_some(())
+    });
+}
+
+#[test]
+fn progress_accrues_by_the_minute_and_levels_up() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let mut alice = w.connect("alice");
+    let mut bob = w.connect("bob");
+    let alice_user = alice.key.user_id();
+    // Alice talks (with bob in the room) for two minutes: 6 xp/min.
+    for _ in 0..2 {
+        alice.send(&mut w, &ClientMessage::Speaking(true));
+        w.settle(&mut [&mut alice, &mut bob], Duration::from_secs(61));
+    }
+    let xp = w
+        .server()
+        .policy()
+        .xp
+        .get(&alice_user)
+        .copied()
+        .unwrap_or(0);
+    assert_eq!(xp, 12);
+    // Chat earns nothing; a third minute of talking crosses 13 xp.
+    alice.send(&mut w, &ClientMessage::Chat("gg".to_string()));
+    alice.send(&mut w, &ClientMessage::Speaking(true));
+    w.settle(&mut [&mut alice, &mut bob], Duration::from_secs(61));
+    let (xp, level) = alice.wait_for(&mut w, &mut [&mut bob], |m| match m {
+        ServerMessage::ProgressUpdate { xp, level } => Some((*xp, *level)),
+        _ => None,
+    });
+    assert_eq!(level, 2);
+    assert!(xp >= 13);
+    bob.wait_for(&mut w, &mut [&mut alice], |m| match m {
+        ServerMessage::UserDetails { user_id, level, .. } if *user_id == alice_user => {
+            (*level == 2).then_some(())
+        }
+        _ => None,
+    });
+}
+
+#[test]
+fn a_purge_removes_the_person_and_their_messages() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let boot = w.bootstrap_code();
+    let mut admin = w.connect_as("mpw", Auth::Invite { code: boot });
+    let mut troll = w.connect("troll");
+    let troll_user = troll.key.user_id();
+    troll.send(&mut w, &ClientMessage::Chat("garbage".to_string()));
+    admin.wait_for(&mut w, &mut [&mut troll], |m| {
+        matches!(m, ServerMessage::Chat(c) if c.text == "garbage").then_some(())
+    });
+
+    admin.admin(
+        &mut w,
+        1,
+        AdminCommand::PurgeUser {
+            target: AdminTarget::Name("troll".to_string()),
+        },
+    );
+    assert_eq!(
+        admin.admin_result(&mut w, &mut [&mut troll], 1),
+        Ok(AdminOutcome::Done)
+    );
+    assert!(!w.server().policy().users.contains_key(&troll_user));
+    let mut carol = w.connect("carol");
+    w.settle(&mut [&mut carol, &mut admin], Duration::from_millis(300));
+    assert!(carol.inbox.iter().all(|m| match m {
+        ServerMessage::History { messages, .. } => messages.iter().all(|x| x.text != "garbage"),
+        _ => true,
+    }));
+}
+
+#[test]
+fn organizers_make_channels_that_gate_by_role_and_evaporate_when_empty() {
+    let mut config = test_config(vec![open_channel("Lobby", true)]);
+    config.user_channels.temporary_after_min = 1;
+    let mut w = World::new(config);
+    let org_code = w.invite(protocol::permissions::ROLE_ORGANIZER);
+    let mut org = w.connect_as("org", Auth::Invite { code: org_code });
+    let mut guest = w.connect("guest");
+    let org_id = org.id;
+
+    // A guest may not create; an organizer may, and lands in it.
+    let spec = ChannelSpec {
+        name: "Backroom".to_string(),
+        password: None,
+        user_limit: None,
+        min_role: Some(ROLE_MEMBER),
+        permanent: false,
+        afk_after_min: None,
+    };
+    guest.send(&mut w, &ClientMessage::CreateChannel(spec.clone()));
+    let reason = guest.wait_for(&mut w, &mut [&mut org], |m| match m {
+        ServerMessage::ChannelDenied { reason } => Some(*reason),
+        _ => None,
+    });
+    assert_eq!(reason, ChannelUiDenyReason::NoPermission);
+    org.send(&mut w, &ClientMessage::CreateChannel(spec));
+    let channels = org.wait_for(&mut w, &mut [&mut guest], |m| match m {
+        ServerMessage::ChannelListUpdated { channels, .. } => Some(channels.clone()),
+        _ => None,
+    });
+    assert_eq!(channels.len(), 2);
+    assert_eq!(channels[1].name, "Backroom");
+    let backroom = channels[1].id;
+    org.wait_for(&mut w, &mut [&mut guest], |m| {
+        matches!(m, ServerMessage::UserMovedChannel { client_id, channel_id }
+            if *client_id == org_id && *channel_id == backroom)
+        .then_some(())
+    });
+    assert_eq!(w.server().channel_of(org_id), Some(backroom));
+    let org_user = org.key.user_id();
+    let details = guest.wait_for(&mut w, &mut [&mut org], |m| match m {
+        ServerMessage::ChannelDetails {
+            channel_id,
+            owner,
+            min_role,
+            permanent,
+            ..
+        } if *channel_id == backroom => Some((*owner, *min_role, *permanent)),
+        _ => None,
+    });
+    assert_eq!(details, (Some(org_user), Some(ROLE_MEMBER), false));
+
+    // The gate: a guest is refused, a member walks in.
+    guest.join(&mut w, backroom, None);
+    let reason = guest.wait_for(&mut w, &mut [&mut org], |m| match m {
+        ServerMessage::JoinChannelDenied { reason, .. } => Some(*reason),
+        _ => None,
+    });
+    assert_eq!(reason, ChannelDenyReason::NotPermitted);
+    let member_code = w.invite(ROLE_MEMBER);
+    let mut member = w.connect_as("member", Auth::Invite { code: member_code });
+    let member_id = member.id;
+    member.join(&mut w, backroom, None);
+    member.wait_for(&mut w, &mut [&mut org, &mut guest], |m| {
+        matches!(m, ServerMessage::UserMovedChannel { client_id, channel_id }
+            if *client_id == member_id && *channel_id == backroom)
+        .then_some(())
+    });
+
+    // The owner sends the member back; everyone leaves; a minute later
+    // the temporary channel is gone and the list is back to one.
+    let member_user = member.key.user_id();
+    org.send(
+        &mut w,
+        &ClientMessage::ChannelKick {
+            channel_id: backroom,
+            user_id: member_user,
+        },
+    );
+    member.wait_for(&mut w, &mut [&mut org, &mut guest], |m| {
+        matches!(m, ServerMessage::UserMovedChannel { client_id, channel_id: 0 }
+            if *client_id == member_id)
+        .then_some(())
+    });
+    org.join(&mut w, 0, None);
+    w.settle(
+        &mut [&mut org, &mut guest, &mut member],
+        Duration::from_secs(35),
+    );
+    assert_eq!(
+        w.server().policy().channels.len(),
+        1,
+        "empty, but not yet long enough"
+    );
+    w.advance_wall(Duration::from_mins(2));
+    w.settle(
+        &mut [&mut org, &mut guest, &mut member],
+        Duration::from_secs(35),
+    );
+    let channels = guest.wait_for(&mut w, &mut [&mut org, &mut member], |m| match m {
+        ServerMessage::ChannelListUpdated { channels, .. } if channels.len() == 1 => {
+            Some(channels.clone())
+        }
+        _ => None,
+    });
+    assert_eq!(channels[0].name, "Lobby");
+    assert!(w.server().policy().channels.is_empty());
+}
+
+#[test]
+fn the_owner_edits_or_deletes_and_an_admin_can_too_but_config_channels_stay() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let boot = w.bootstrap_code();
+    let mut admin = w.connect_as("mpw", Auth::Invite { code: boot });
+    let org_code = w.invite(protocol::permissions::ROLE_ORGANIZER);
+    let mut org = w.connect_as("org", Auth::Invite { code: org_code });
+    let mut spec = ChannelSpec {
+        name: "Games".to_string(),
+        password: None,
+        user_limit: None,
+        min_role: None,
+        permanent: true,
+        afk_after_min: None,
+    };
+    org.send(&mut w, &ClientMessage::CreateChannel(spec.clone()));
+    let games = org.wait_for(&mut w, &mut [&mut admin], |m| match m {
+        ServerMessage::ChannelListUpdated { channels, .. } if channels.len() == 2 => {
+            Some(channels[1].id)
+        }
+        _ => None,
+    });
+
+    // The config channel cannot be deleted by anyone.
+    admin.send(&mut w, &ClientMessage::DeleteChannel { channel_id: 0 });
+    let reason = admin.wait_for(&mut w, &mut [&mut org], |m| match m {
+        ServerMessage::ChannelDenied { reason } => Some(*reason),
+        _ => None,
+    });
+    assert_eq!(reason, ChannelUiDenyReason::ConfigOwned);
+
+    // A rename by the owner, a second organizer refused, a delete by
+    // the admin.
+    spec.name = "Board games".to_string();
+    org.send(
+        &mut w,
+        &ClientMessage::EditChannel {
+            channel_id: games,
+            spec: spec.clone(),
+        },
+    );
+    org.wait_for(&mut w, &mut [&mut admin], |m| match m {
+        ServerMessage::ChannelListUpdated { channels, .. }
+            if channels.get(1).is_some_and(|c| c.name == "Board games") =>
+        {
+            Some(())
+        }
+        _ => None,
+    });
+    let other_code = w.invite(protocol::permissions::ROLE_ORGANIZER);
+    let mut other = w.connect_as("other", Auth::Invite { code: other_code });
+    other.send(&mut w, &ClientMessage::DeleteChannel { channel_id: games });
+    let reason = other.wait_for(&mut w, &mut [&mut org, &mut admin], |m| match m {
+        ServerMessage::ChannelDenied { reason } => Some(*reason),
+        _ => None,
+    });
+    assert_eq!(reason, ChannelUiDenyReason::NoPermission);
+    admin.send(&mut w, &ClientMessage::DeleteChannel { channel_id: games });
+    admin.wait_for(&mut w, &mut [&mut org, &mut other], |m| match m {
+        ServerMessage::ChannelListUpdated { channels, .. } if channels.len() == 1 => Some(()),
+        _ => None,
+    });
+}
+
+#[test]
+fn idle_members_are_moved_to_the_afk_channel_where_voice_goes_nowhere() {
+    let mut config = test_config(vec![
+        open_channel("Lobby", true),
+        open_channel("AFK", false),
+    ]);
+    config.user_channels.afk_channel = Some("AFK".to_string());
+    config.user_channels.afk_after_min = 1;
+    let mut w = World::new(config);
+    let mut alice = w.connect("alice");
+    let mut bob = w.connect("bob");
+    // Alice keeps busy; bob does nothing. The channel sweep runs every
+    // 30 s: at 60 s bob is a few hundred ms short of a minute idle (he
+    // was admitted after the server started), at 90 s he is well past
+    // it, and alice's last activity is 28 s old.
+    for _ in 0..3 {
+        alice.send(&mut w, &ClientMessage::Speaking(true));
+        w.settle(&mut [&mut alice, &mut bob], Duration::from_secs(31));
+    }
+    let after = bob.wait_for(&mut w, &mut [&mut alice], |m| match m {
+        ServerMessage::MovedIdle { after_min } => Some(*after_min),
+        _ => None,
+    });
+    assert_eq!(after, 1);
+    assert_eq!(w.server().channel_of(bob.id), Some(1));
+    assert_eq!(w.server().channel_of(alice.id), Some(0));
+
+    // Voice from the AFK channel goes nowhere.
+    let pkt = protocol::pack_voice(1, 20, &[0xAB; 60]).expect("voice");
+    let now = w.net.now();
+    w.net
+        .driver(bob.node)
+        .send(now, bob.peer, Lane::Voice, &pkt)
+        .expect("send voice");
+    w.settle(&mut [&mut alice, &mut bob], Duration::from_millis(300));
+    assert!(w
+        .net
+        .driver(alice.node)
+        .recv(alice.peer, Lane::Voice)
+        .is_none());
+}
+
+#[test]
+fn a_refused_connection_is_closed_after_the_verdict() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
     let mut c = w.open();
-    c.hello(&mut w, "x", Some("wrong"));
+    c.hello(
+        &mut w,
+        "x",
+        Auth::Invite {
+            code: "ABCDEFGHJKMN".to_string(),
+        },
+    );
     let deadline = w.net.now() + WAIT;
     while c.disconnected().is_none() {
         assert!(w.net.now() < deadline, "never closed");
@@ -422,11 +2247,68 @@ fn refused_connections_are_closed_after_the_verdict() {
 }
 
 #[test]
+fn policy_survives_a_restart_with_persistence_on() {
+    let dir = temp_dir("policy");
+    let key = Arc::new(ClientKey::generate());
+    let user_id = key.user_id();
+    {
+        let mut w = World::new(persistent_config(vec![open_channel("Lobby", true)], &dir));
+        let code = w.invite(ROLE_MEMBER);
+        let a = w.connect_with_key("alice", Auth::Invite { code }, Arc::clone(&key));
+        assert!(a.session().expect("session").2, "persistent: true");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while w.server().persistence().stats().queued > 0 {
+            assert!(Instant::now() < deadline, "writes never landed");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    let mut w = World::new(persistent_config(vec![open_channel("Lobby", true)], &dir));
+    assert_eq!(w.server().policy().users[&user_id].name, "alice");
+    let again = w.connect_with_key("alice", Auth::Key, key);
+    let (id, perms, persistent) = again.session().expect("session");
+    assert_eq!(id, user_id);
+    assert_eq!(perms, permissions::MEMBER_PERMISSIONS);
+    assert!(persistent);
+    drop(w);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_code_minted_by_the_cli_is_picked_up_by_the_running_server() {
+    let dir = temp_dir("cli");
+    let mut w = World::new(persistent_config(vec![open_channel("Lobby", true)], &dir));
+    let (code, _) = server::persistence::cli_create_invite(
+        &dir.join("baucord.db"),
+        ROLE_MEMBER,
+        Some(60 * 60 * 1000),
+        Some(1),
+    )
+    .expect("cli invite");
+    // The persistence thread polls `data_version` every 2 s of real time.
+    let deadline = Instant::now() + Duration::from_secs(6);
+    while !w.server().policy().invites.contains_key(&code) {
+        assert!(
+            Instant::now() < deadline,
+            "server never noticed the CLI's write"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+        w.pump(&mut []);
+    }
+    let joined = w.connect_as("cli guest", Auth::Invite { code });
+    assert_eq!(
+        joined.session().expect("session").1,
+        permissions::MEMBER_PERMISSIONS
+    );
+    drop(w);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn server_full_is_refused_at_hello() {
     let mut config = test_config(vec![open_channel("Lobby", true)]);
     config.network.max_clients = 1;
     let mut w = World::new(config);
-    let _a = w.connect("alice", None);
+    let _a = w.connect("alice");
     // With one seat taken the transport already refuses the second
     // handshake; the app-level check is the backstop.
     let mut second = w.open_attempt();
@@ -459,7 +2341,7 @@ fn a_non_hello_first_message_is_refused() {
     let mut c = w.open();
     c.send(&mut w, &ClientMessage::Chat("hi".to_string()));
     let reason = c.wait_for(&mut w, &mut [], |m| match m {
-        ServerMessage::Refused { reason } => Some(*reason),
+        ServerMessage::Refused { reason } => Some(reason.clone()),
         _ => None,
     });
     assert_eq!(reason, RefusedReason::BadHello);
@@ -468,8 +2350,8 @@ fn a_non_hello_first_message_is_refused() {
 #[test]
 fn shutdown_closes_every_session_with_the_restart_reason() {
     let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
-    let mut a = w.connect("alice", None);
-    let mut b = w.connect("bob", None);
+    let mut a = w.connect("alice");
+    let mut b = w.connect("bob");
     let now = w.net.now();
     w.server().shutdown(now, "server restarting");
     let deadline = w.net.now() + WAIT;
@@ -502,7 +2384,7 @@ fn init_carries_channels_and_default_membership() {
             user_limit: Some(8),
         },
     ]));
-    let a = w.connect("alice", None);
+    let a = w.connect("alice");
 
     let (channels, memberships, my_id) = a
         .inbox
@@ -538,7 +2420,7 @@ fn join_password_flow_wrong_then_right() {
             user_limit: None,
         },
     ]));
-    let mut a = w.connect("alice", None);
+    let mut a = w.connect("alice");
 
     // Wrong password → denied.
     a.join(&mut w, 1, Some("wrong"));
@@ -586,8 +2468,8 @@ fn user_limit_fills_channel() {
             user_limit: Some(1),
         },
     ]));
-    let mut a = w.connect("alice", None);
-    let mut b = w.connect("bob", None);
+    let mut a = w.connect("alice");
+    let mut b = w.connect("bob");
 
     a.join(&mut w, 1, None);
     a.wait_for(&mut w, &mut [&mut b], |m| {
@@ -614,8 +2496,8 @@ fn channel_scoped_share_visibility_follows_membership() {
         open_channel("Lobby", true),
         open_channel("Movies", false),
     ]));
-    let mut sharer = w.connect("sharer", None);
-    let mut viewer = w.connect("viewer", None);
+    let mut sharer = w.connect_member("sharer");
+    let mut viewer = w.connect_member("viewer");
     let sharer_id = sharer.id;
 
     // Sharer moves to Movies and starts a channel-scoped share there.
@@ -721,15 +2603,16 @@ fn config_validation_rejects_bad_channel_lists() {
     let config: Config = serde_yaml::from_str("server:\n  name: test\n").expect("yaml");
     assert_eq!(config.validate_channels().expect("valid"), 0);
     assert_eq!(config.channels[0].name, "Lobby");
-    // Secure mode needs a password; a stale 0.5 key is ignored.
+    // A 1.0 `authentication:` section and a stale 0.5 key both still
+    // parse (warned about and ignored at startup), and the section is
+    // never written back.
     let config: Config = serde_yaml::from_str(
-        "authentication:\n  secure: true\nnetwork:\n  bytes_per_tick: 4194304\n",
+        "authentication:\n  secure: true\n  password: pw\nnetwork:\n  bytes_per_tick: 4194304\n",
     )
     .expect("yaml");
-    assert!(config.validate_authentication().is_err());
-    let config: Config =
-        serde_yaml::from_str("authentication:\n  secure: true\n  password: pw\n").expect("yaml");
-    assert!(config.validate_authentication().is_ok());
+    assert!(config.authentication.secure);
+    let written = serde_yaml::to_string(&config).expect("serialize");
+    assert!(!written.contains("authentication"));
 }
 
 #[test]
@@ -738,7 +2621,7 @@ fn hot_reload_moves_renamed_channel_members_to_default() {
         open_channel("Lobby", true),
         open_channel("Movies", false),
     ]));
-    let mut a = w.connect("alice", None);
+    let mut a = w.connect("alice");
     a.join(&mut w, 1, None);
     a.wait_for(&mut w, &mut [], |m| {
         matches!(m, ServerMessage::UserMovedChannel { channel_id: 1, .. }).then_some(())
@@ -770,8 +2653,8 @@ fn hot_reload_password_change_keeps_members_but_gates_new_joins() {
         open_channel("Lobby", true),
         open_channel("Duo", false),
     ]));
-    let mut a = w.connect("alice", None);
-    let mut b = w.connect("bob", None);
+    let mut a = w.connect("alice");
+    let mut b = w.connect("bob");
     a.join(&mut w, 1, None);
     a.wait_for(&mut w, &mut [&mut b], |m| {
         matches!(m, ServerMessage::UserMovedChannel { channel_id: 1, .. }).then_some(())
@@ -831,9 +2714,9 @@ fn hot_reload_rederives_channel_scoped_share_visibility() {
         open_channel("Lobby", true),
         open_channel("Movies", false),
     ]));
-    let mut sharer = w.connect("sharer", None);
-    let mut viewer = w.connect("viewer", None);
-    let mut lobbyist = w.connect("lobbyist", None);
+    let mut sharer = w.connect_member("sharer");
+    let mut viewer = w.connect_member("viewer");
+    let mut lobbyist = w.connect_member("lobbyist");
     let sharer_id = sharer.id;
     let viewer_id = viewer.id;
 
@@ -909,7 +2792,7 @@ fn hot_reload_rejects_invalid_lists_and_keeps_state() {
         open_channel("Lobby", true),
         open_channel("Movies", false),
     ]));
-    let mut a = w.connect("alice", None);
+    let mut a = w.connect("alice");
     a.join(&mut w, 1, None);
     a.wait_for(&mut w, &mut [], |m| {
         matches!(m, ServerMessage::UserMovedChannel { channel_id: 1, .. }).then_some(())
@@ -953,8 +2836,8 @@ fn per_client_image_byte_budget_brakes_one_spammer() {
     config.limits.max_image_kb_per_minute = 100; // 100 KiB/min per client
     config.limits.max_image_kb_per_minute_global = 100_000; // loose
     let mut w = World::new(config);
-    let mut a = w.connect("alice", None);
-    let mut b = w.connect("bob", None);
+    let mut a = w.connect_member("alice");
+    let mut b = w.connect_member("bob");
 
     // Three ~40 KiB images from alice: 40+40 fits the 100 KiB window,
     // the third (120 KiB total) must be dropped. Bob's own budget is
@@ -988,8 +2871,8 @@ fn global_image_byte_budget_brakes_coordinated_bursts() {
     config.limits.max_image_kb_per_minute = 100_000; // loose
     config.limits.max_image_kb_per_minute_global = 100; // 100 KiB/min room-wide
     let mut w = World::new(config);
-    let mut a = w.connect("alice", None);
-    let mut b = w.connect("bob", None);
+    let mut a = w.connect_member("alice");
+    let mut b = w.connect_member("bob");
 
     // 40 KiB from each side, alternating: the room window admits two
     // (80 KiB) and must drop the third and fourth.
@@ -1018,8 +2901,8 @@ fn relay_paces_large_images_instead_of_bursting() {
     config.limits.max_image_kb_per_minute_global = 100_000;
     config.limits.media_relay_kb_per_sec = 1024; // 1 MiB/s per receiver
     let mut w = World::new(config);
-    let mut a = w.connect("alice", None);
-    let mut b = w.connect("bob", None);
+    let mut a = w.connect_member("alice");
+    let mut b = w.connect_member("bob");
 
     // A 1 MiB image at 1 MiB/s must be *spread* over roughly a second
     // per receiver — the whole point is that it no longer lands as one
@@ -1051,9 +2934,9 @@ fn voice_is_relayed_within_the_channel_and_reported_back() {
         open_channel("Lobby", true),
         open_channel("Other", false),
     ]));
-    let mut a = w.connect("alice", None);
-    let mut b = w.connect("bob", None);
-    let mut c = w.connect("carol", None);
+    let mut a = w.connect("alice");
+    let mut b = w.connect("bob");
+    let mut c = w.connect("carol");
     c.join(&mut w, 1, None);
     c.wait_for(&mut w, &mut [&mut a, &mut b], |m| {
         matches!(m, ServerMessage::UserMovedChannel { channel_id: 1, .. }).then_some(())
@@ -1108,8 +2991,8 @@ fn voice_is_relayed_within_the_channel_and_reported_back() {
 #[test]
 fn video_groups_are_mirrored_to_subscribers_on_the_sharers_track() {
     let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
-    let mut sharer = w.connect("sharer", None);
-    let mut viewer = w.connect("viewer", None);
+    let mut sharer = w.connect_member("sharer");
+    let mut viewer = w.connect_member("viewer");
     let sharer_id = sharer.id;
 
     sharer.send(
@@ -1178,4 +3061,799 @@ fn video_groups_are_mirrored_to_subscribers_on_the_sharers_track() {
         assert_eq!(sender, sharer_id);
         assert!(protocol::parse_video_header(payload).is_some());
     }
+}
+
+// ── Persistence (spec §1, §11: the first test of 1.1) ───────────────────
+
+/// The persistence thread stalls — a slow disk — and nothing on the
+/// media or delivery path notices: voice is relayed, every chat is
+/// delivered, and the inserts that did not fit the queue are dropped
+/// and counted rather than waited for. Once the disk is back, what was
+/// queued lands.
+#[test]
+fn a_stalled_persistence_thread_never_touches_the_media_path() {
+    let dir = temp_dir("stall");
+    let mut config = persistent_config(vec![open_channel("Lobby", true)], &dir);
+    // A short queue so the overflow shows with a handful of messages.
+    config.persistence.write_queue = 8;
+    let mut w = World::new(config);
+    let mut a = w.connect("alice");
+    let mut b = w.connect("bob");
+    // Let the admission rows land first, so the queue holds chats only
+    // and no write is in flight when the disk stalls: the queue is
+    // empty *and* the written count sat still for a moment.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut written_before = w.server().persistence().stats().written;
+    loop {
+        std::thread::sleep(Duration::from_millis(20));
+        let stats = w.server().persistence().stats();
+        if stats.queued == 0 && stats.written == written_before {
+            break;
+        }
+        written_before = stats.written;
+        assert!(
+            Instant::now() < deadline,
+            "admission rows never landed: {stats}"
+        );
+    }
+
+    // The disk stalls. The thread is real; give it a moment to park.
+    let stalled = w.server().persistence().stall();
+    std::thread::sleep(Duration::from_millis(50));
+    let at_stall = w.server().persistence().stats();
+
+    // 20 chats: what the queue has room for is queued, the rest is
+    // dropped and counted — every one of them still delivered. (Other
+    // writes may ride along; the chats' own share is the delta.)
+    for i in 0..20 {
+        a.send(&mut w, &ClientMessage::Chat(format!("m{i}")));
+    }
+    for i in 0..20 {
+        let wanted = format!("m{i}");
+        b.wait_for(&mut w, &mut [&mut a], |m| {
+            matches!(m, ServerMessage::Chat(c) if c.text == wanted).then_some(())
+        });
+    }
+    let stats = w.server().persistence().stats();
+    let attempted = u64::try_from(stats.queued - at_stall.queued).unwrap_or(0)
+        + (stats.dropped_writes - at_stall.dropped_writes);
+    assert!(attempted >= 20, "{stats}");
+    assert_eq!(stats.queued, 8, "the queue is full: {stats}");
+    assert!(stats.dropped_writes >= 12, "{stats}");
+    assert_eq!(stats.written, written_before, "{stats}");
+
+    // Voice keeps flowing while the disk is stuck.
+    let mut got_b = 0u32;
+    for seq in 0..50u32 {
+        let pkt = protocol::pack_voice(seq, seq * 20, &[0xAB; 60]).expect("voice");
+        let now = w.net.now();
+        w.net
+            .driver(a.node)
+            .send(now, a.peer, Lane::Voice, &pkt)
+            .expect("send voice");
+        w.settle(&mut [&mut a, &mut b], Duration::from_millis(20));
+        while w.net.driver(b.node).recv(b.peer, Lane::Voice).is_some() {
+            got_b += 1;
+        }
+    }
+    w.settle(&mut [&mut a, &mut b], Duration::from_secs(1));
+    while w.net.driver(b.node).recv(b.peer, Lane::Voice).is_some() {
+        got_b += 1;
+    }
+    assert_eq!(got_b, 50, "voice must not wait for the disk");
+
+    // The disk comes back: what was queued lands, what was dropped is
+    // gone for good.
+    let queued = u64::try_from(w.server().persistence().stats().queued).unwrap_or(0);
+    drop(stalled);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while w.server().persistence().stats().written < written_before + queued {
+        assert!(
+            Instant::now() < deadline,
+            "queued writes never landed: {}",
+            w.server().persistence().stats()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    drop(w);
+    let stored = stored_message_count(&dir);
+    assert!(stored >= 1 && stored <= 8, "{stored} messages stored");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Message ids are rebased on the database's watermark at startup, so
+/// history stays uniquely keyed across restarts.
+#[test]
+fn message_ids_continue_across_restarts_with_persistence_on() {
+    let dir = temp_dir("restart");
+    let key = Arc::new(ClientKey::generate());
+    let last_id = {
+        let mut w = World::new(persistent_config(vec![open_channel("Lobby", true)], &dir));
+        let code = w.guest_code.clone();
+        let mut a = w.connect_with_key("alice", Auth::Invite { code }, Arc::clone(&key));
+        let mut last = 0;
+        for i in 0..3 {
+            a.send(&mut w, &ClientMessage::Chat(format!("first run {i}")));
+            last = a.wait_for(&mut w, &mut [], |m| match m {
+                ServerMessage::Chat(c) if c.text == format!("first run {i}") => Some(c.id),
+                _ => None,
+            });
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while stored_message_count(&dir) < 3 {
+            assert!(Instant::now() < deadline, "writes never landed");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        last
+    };
+    assert_eq!(stored_message_count(&dir), 3);
+
+    let mut w = World::new(persistent_config(vec![open_channel("Lobby", true)], &dir));
+    // The key is known now: it is the login.
+    let mut a = w.connect_with_key("alice", Auth::Key, key);
+    a.send(&mut w, &ClientMessage::Chat("second run".to_string()));
+    let id = a.wait_for(&mut w, &mut [], |m| match m {
+        ServerMessage::Chat(c) if c.text == "second run" => Some(c.id),
+        _ => None,
+    });
+    assert_eq!(id, last_id + 1, "ids continue after a restart");
+    drop(w);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// With persistence off, chat is live only: no database is created.
+#[test]
+fn persistence_off_writes_nothing_to_disk() {
+    let dir = temp_dir("off");
+    let mut config = test_config(vec![open_channel("Lobby", true)]);
+    config.persistence.path = dir.join("baucord.db").to_string_lossy().into_owned();
+    let mut w = World::new(config);
+    let mut a = w.connect("alice");
+    a.send(&mut w, &ClientMessage::Chat("hello".to_string()));
+    a.wait_for(&mut w, &mut [], |m| {
+        matches!(m, ServerMessage::Chat(c) if c.text == "hello").then_some(())
+    });
+    let stats = w.server().persistence().stats();
+    assert!(!stats.persistent);
+    assert_eq!(stats.dropped_writes, 0);
+    drop(w);
+    assert!(
+        !dir.join("baucord.db").exists(),
+        "memory mode must not create a database"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── Profiles and avatars (spec §7, §7.1) ─────────────────────────────
+
+fn set_profile(
+    client: &mut TestClient,
+    w: &mut World,
+    color: Option<u32>,
+    avatar: Option<[u8; 32]>,
+) {
+    // `wait_for` does not consume: an earlier verdict must not be
+    // mistaken for this attempt's.
+    let me = client.key.user_id();
+    client.inbox.retain(|m| {
+        !matches!(m, ServerMessage::ProfileDenied { .. })
+            && !matches!(m, ServerMessage::ProfileUpdated { user_id, .. } if *user_id == me)
+    });
+    client.send(
+        w,
+        &ClientMessage::SetProfile(protocol::Profile {
+            name_color: color,
+            name_style: protocol::NameStyle::Bold,
+            avatar,
+        }),
+    );
+}
+
+fn profile_verdict(
+    client: &mut TestClient,
+    w: &mut World,
+    others: &mut [&mut TestClient],
+) -> Result<protocol::Profile, protocol::ProfileDenyReason> {
+    let me = client.key.user_id();
+    client.wait_for(w, others, |m| match m {
+        ServerMessage::ProfileUpdated { user_id, profile } if *user_id == me => {
+            Some(Ok(profile.clone()))
+        }
+        ServerMessage::ProfileDenied { reason } => Some(Err(*reason)),
+        _ => None,
+    })
+}
+
+#[test]
+fn profiles_reach_everyone_and_late_joiners() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let mut alice = w.connect_member("alice");
+    let mut bob = w.connect_member("bob");
+    let alice_user = alice.key.user_id();
+    set_profile(&mut alice, &mut w, Some(0x00E0_6C75), None);
+    let seen = bob.wait_for(&mut w, &mut [&mut alice], |m| match m {
+        ServerMessage::ProfileUpdated { user_id, profile } if *user_id == alice_user => {
+            Some(profile.clone())
+        }
+        _ => None,
+    });
+    assert_eq!(seen.name_color, Some(0x00E0_6C75));
+    assert_eq!(seen.name_style, protocol::NameStyle::Bold);
+    assert!(matches!(
+        profile_verdict(&mut alice, &mut w, &mut [&mut bob]),
+        Ok(_)
+    ));
+
+    // A late joiner learns everyone's look with the roster.
+    let mut carol = w.connect("carol");
+    let alice_id = alice.id;
+    let at_join = carol.wait_for(&mut w, &mut [&mut alice, &mut bob], |m| match m {
+        ServerMessage::UserProfile { client_id, profile } if *client_id == alice_id => {
+            Some(profile.clone())
+        }
+        _ => None,
+    });
+    assert_eq!(at_join.name_color, Some(0x00E0_6C75));
+}
+
+#[test]
+fn the_gold_band_and_low_contrast_are_the_servers_call() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let boot = w.bootstrap_code();
+    let mut admin = w.connect_as("mpw", Auth::Invite { code: boot });
+    let mut alice = w.connect_member("alice");
+    set_profile(&mut alice, &mut w, Some(0x00FF_D700), None);
+    assert_eq!(
+        profile_verdict(&mut alice, &mut w, &mut [&mut admin]),
+        Err(protocol::ProfileDenyReason::ReservedColor)
+    );
+    set_profile(&mut alice, &mut w, Some(0x0020_2020), None);
+    assert_eq!(
+        profile_verdict(&mut alice, &mut w, &mut [&mut admin]),
+        Err(protocol::ProfileDenyReason::LowContrast)
+    );
+    // Refusals do not count against the rate limit: a good color lands.
+    set_profile(&mut alice, &mut w, Some(0x004A_9AE0), None);
+    assert!(profile_verdict(&mut alice, &mut w, &mut [&mut admin]).is_ok());
+    // Gold is an admin's to take.
+    set_profile(&mut admin, &mut w, Some(0x00FF_D700), None);
+    let gold = profile_verdict(&mut admin, &mut w, &mut [&mut alice]).expect("admin gold");
+    assert_eq!(gold.name_color, Some(0x00FF_D700));
+}
+
+#[test]
+fn profile_changes_are_rate_limited() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let mut alice = w.connect_member("alice");
+    set_profile(&mut alice, &mut w, Some(0x00E0_6C75), None);
+    assert!(profile_verdict(&mut alice, &mut w, &mut []).is_ok());
+    set_profile(&mut alice, &mut w, Some(0x004A_9AE0), None);
+    assert_eq!(
+        profile_verdict(&mut alice, &mut w, &mut []),
+        Err(protocol::ProfileDenyReason::RateLimited)
+    );
+    w.settle(&mut [&mut alice], Duration::from_secs(31));
+    set_profile(&mut alice, &mut w, Some(0x004A_9AE0), None);
+    assert!(profile_verdict(&mut alice, &mut w, &mut []).is_ok());
+}
+
+#[test]
+fn an_avatar_uploads_once_and_reaches_everyone() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let mut alice = w.connect_member("alice");
+    let mut bob = w.connect_member("bob");
+    let alice_user = alice.key.user_id();
+    let picture = png_blob(3, 8 * 1024);
+
+    // Upload, then point the profile at the hash.
+    let blob_id = alice.upload_blob(&mut w, 1, "image/png", &picture);
+    let done = alice.wait_for(&mut w, &mut [&mut bob], |m| match m {
+        ServerMessage::UploadDone {
+            upload_id: 1,
+            blob_id,
+        } => Some(*blob_id),
+        ServerMessage::UploadRejected { reason, .. } => panic!("rejected: {reason:?}"),
+        _ => None,
+    });
+    assert_eq!(done, blob_id);
+    set_profile(&mut alice, &mut w, None, Some(blob_id));
+    let seen = bob.wait_for(&mut w, &mut [&mut alice], |m| match m {
+        ServerMessage::ProfileUpdated { user_id, profile } if *user_id == alice_user => {
+            Some(profile.clone())
+        }
+        _ => None,
+    });
+    assert_eq!(seen.avatar, Some(blob_id));
+
+    // Bob fetches it and gets the very bytes back.
+    bob.send(&mut w, &ClientMessage::FetchBlob { blob_id });
+    w.settle(&mut [&mut alice, &mut bob], Duration::from_secs(2));
+    assert_eq!(
+        bob.blob_received(&blob_id).as_deref(),
+        Some(picture.as_slice())
+    );
+
+    // The same bytes again: acknowledged, never transferred.
+    alice.send(
+        &mut w,
+        &ClientMessage::UploadBegin {
+            upload_id: 2,
+            name: "again.png".into(),
+            mime: "image/png".into(),
+            size: u32::try_from(picture.len()).unwrap(),
+            sha256: blob_id,
+        },
+    );
+    let needed = alice.wait_for(&mut w, &mut [&mut bob], |m| match m {
+        ServerMessage::UploadAccept {
+            upload_id: 2,
+            needed,
+        } => Some(*needed),
+        _ => None,
+    });
+    assert!(!needed, "a known hash needs no transfer");
+
+    // Over the avatar cap: refused at the announcement.
+    let huge = png_blob(4, 300 * 1024);
+    alice.send(
+        &mut w,
+        &ClientMessage::UploadBegin {
+            upload_id: 3,
+            name: "huge.png".into(),
+            mime: "image/png".into(),
+            size: u32::try_from(huge.len()).unwrap(),
+            sha256: sha2::Sha256::digest(&huge).into(),
+        },
+    );
+    let why = alice.wait_for(&mut w, &mut [&mut bob], |m| match m {
+        ServerMessage::UploadRejected {
+            upload_id: 3,
+            reason,
+        } => Some(*reason),
+        _ => None,
+    });
+    assert_eq!(why, protocol::UploadRejectReason::TooLarge);
+
+    // A hash that does not match the bytes: refused once whole.
+    let other = png_blob(5, 4 * 1024);
+    alice.send(
+        &mut w,
+        &ClientMessage::UploadBegin {
+            upload_id: 4,
+            name: "liar.png".into(),
+            mime: "image/png".into(),
+            size: u32::try_from(other.len()).unwrap(),
+            sha256: [9u8; 32],
+        },
+    );
+    alice.wait_for(&mut w, &mut [&mut bob], |m| match m {
+        ServerMessage::UploadAccept { upload_id: 4, .. } => Some(()),
+        _ => None,
+    });
+    alice.send_blob_chunks(&mut w, 4, &other);
+    let why = alice.wait_for(&mut w, &mut [&mut bob], |m| match m {
+        ServerMessage::UploadRejected {
+            upload_id: 4,
+            reason,
+        } => Some(*reason),
+        _ => None,
+    });
+    assert_eq!(why, protocol::UploadRejectReason::HashMismatch);
+
+    // A profile pointing at a hash the server never saw.
+    w.settle(&mut [&mut alice, &mut bob], Duration::from_secs(31));
+    set_profile(&mut alice, &mut w, None, Some([9u8; 32]));
+    assert_eq!(
+        profile_verdict(&mut alice, &mut w, &mut [&mut bob]),
+        Err(protocol::ProfileDenyReason::BadAvatar)
+    );
+}
+
+#[test]
+fn an_admin_resets_and_locks_a_profile() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let boot = w.bootstrap_code();
+    let mut admin = w.connect_as("mpw", Auth::Invite { code: boot });
+    let mut alice = w.connect_member("alice");
+    let alice_user = alice.key.user_id();
+    set_profile(&mut alice, &mut w, Some(0x00E0_6C75), None);
+    assert!(profile_verdict(&mut alice, &mut w, &mut [&mut admin]).is_ok());
+
+    alice.inbox.clear();
+    admin.admin(
+        &mut w,
+        1,
+        AdminCommand::ResetProfile {
+            target: AdminTarget::User(alice_user),
+            lock: true,
+        },
+    );
+    assert_eq!(
+        admin.admin_result(&mut w, &mut [&mut alice], 1),
+        Ok(AdminOutcome::Done)
+    );
+    let cleared = alice.wait_for(&mut w, &mut [&mut admin], |m| match m {
+        ServerMessage::ProfileUpdated { user_id, profile } if *user_id == alice_user => {
+            Some(profile.clone())
+        }
+        _ => None,
+    });
+    assert_eq!(cleared, protocol::Profile::default());
+    alice.wait_for(&mut w, &mut [&mut admin], |m| {
+        matches!(
+            m,
+            ServerMessage::Restricted {
+                kind: RestrictionKind::Profile,
+                ..
+            }
+        )
+        .then_some(())
+    });
+    set_profile(&mut alice, &mut w, Some(0x004A_9AE0), None);
+    assert_eq!(
+        profile_verdict(&mut alice, &mut w, &mut [&mut admin]),
+        Err(protocol::ProfileDenyReason::Locked)
+    );
+
+    // Lifted like any restriction; the rate limit still counts from
+    // the last change that landed.
+    admin.admin(
+        &mut w,
+        2,
+        AdminCommand::Unmute {
+            target: AdminTarget::User(alice_user),
+            kind: RestrictionKind::Profile,
+        },
+    );
+    assert_eq!(
+        admin.admin_result(&mut w, &mut [&mut alice], 2),
+        Ok(AdminOutcome::Done)
+    );
+    w.settle(&mut [&mut alice, &mut admin], Duration::from_secs(31));
+    set_profile(&mut alice, &mut w, Some(0x004A_9AE0), None);
+    assert!(profile_verdict(&mut alice, &mut w, &mut [&mut admin]).is_ok());
+}
+
+#[test]
+fn a_rename_reaches_every_roster_and_keeps_names_unique() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let mut alice = w.connect_member("alice");
+    let mut bob = w.connect_member("bob");
+    let alice_id = alice.id;
+    alice.send(
+        &mut w,
+        &ClientMessage::SetNickname {
+            name: "alicia".into(),
+        },
+    );
+    let renamed = bob.wait_for(&mut w, &mut [&mut alice], |m| match m {
+        ServerMessage::UserRenamed { client_id, name } if *client_id == alice_id => {
+            Some(name.clone())
+        }
+        _ => None,
+    });
+    assert_eq!(renamed, "alicia");
+    assert_eq!(
+        w.server().policy().users[&alice.key.user_id()].name,
+        "alicia"
+    );
+
+    // Bob's name, in any case, is taken; one rename per 30 s. Earlier
+    // verdicts are cleared before each attempt (`wait_for` does not
+    // consume).
+    w.settle(&mut [&mut alice, &mut bob], Duration::from_secs(31));
+    alice
+        .inbox
+        .retain(|m| !matches!(m, ServerMessage::RenameDenied { .. }));
+    alice.send(&mut w, &ClientMessage::SetNickname { name: "BOB".into() });
+    let why = alice.wait_for(&mut w, &mut [&mut bob], |m| match m {
+        ServerMessage::RenameDenied { reason } => Some(*reason),
+        _ => None,
+    });
+    assert_eq!(why, protocol::RenameDenyReason::Taken);
+    alice.send(&mut w, &ClientMessage::SetNickname { name: "ali".into() });
+    alice.wait_for(&mut w, &mut [&mut bob], |m| match m {
+        ServerMessage::UserRenamed { client_id, name }
+            if *client_id == alice_id && name == "ali" =>
+        {
+            Some(())
+        }
+        _ => None,
+    });
+    alice
+        .inbox
+        .retain(|m| !matches!(m, ServerMessage::RenameDenied { .. }));
+    alice.send(&mut w, &ClientMessage::SetNickname { name: "al".into() });
+    let why = alice.wait_for(&mut w, &mut [&mut bob], |m| match m {
+        ServerMessage::RenameDenied { reason } => Some(*reason),
+        _ => None,
+    });
+    assert_eq!(why, protocol::RenameDenyReason::RateLimited);
+}
+
+#[test]
+fn profiles_and_avatars_survive_a_restart() {
+    let dir = temp_dir("profiles");
+    let key = Arc::new(ClientKey::generate());
+    let alice_user = key.user_id();
+    let picture = png_blob(6, 6 * 1024);
+    let blob_id: [u8; 32] = sha2::Sha256::digest(&picture).into();
+    {
+        let mut w = World::new(persistent_config(vec![open_channel("Lobby", true)], &dir));
+        let code = w.invite(ROLE_MEMBER);
+        let mut alice = w.connect_with_key("alice", Auth::Invite { code }, Arc::clone(&key));
+        let uploaded = alice.upload_blob(&mut w, 1, "image/png", &picture);
+        assert_eq!(uploaded, blob_id);
+        alice.wait_for(&mut w, &mut [], |m| match m {
+            ServerMessage::UploadDone { upload_id: 1, .. } => Some(()),
+            _ => None,
+        });
+        set_profile(&mut alice, &mut w, Some(0x00E0_6C75), Some(blob_id));
+        assert!(profile_verdict(&mut alice, &mut w, &mut []).is_ok());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while w.server().persistence().stats().queued > 0 {
+            assert!(Instant::now() < deadline, "writes never landed");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    let mut w = World::new(persistent_config(vec![open_channel("Lobby", true)], &dir));
+    let stored = &w.server().policy().users[&alice_user].profile;
+    assert_eq!(stored.name_color, Some(0x00E0_6C75));
+    assert_eq!(stored.avatar, Some(blob_id));
+    assert!(w.server().policy().blobs.contains_key(&blob_id));
+
+    // Bob is here first; alice's look arrives with her roster line,
+    // and her picture comes back from disk.
+    let mut bob = w.connect_member("bob");
+    let mut alice = w.connect_with_key("alice", Auth::Key, key);
+    let alice_id = alice.id;
+    let seen = bob.wait_for(&mut w, &mut [&mut alice], |m| match m {
+        ServerMessage::UserProfile { client_id, profile } if *client_id == alice_id => {
+            Some(profile.clone())
+        }
+        _ => None,
+    });
+    assert_eq!(seen.avatar, Some(blob_id));
+    bob.send(&mut w, &ClientMessage::FetchBlob { blob_id });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while bob.blob_received(&blob_id).is_none() {
+        assert!(Instant::now() < deadline, "blob never came back from disk");
+        std::thread::sleep(Duration::from_millis(10));
+        w.settle(&mut [&mut alice, &mut bob], Duration::from_millis(100));
+    }
+    assert_eq!(
+        bob.blob_received(&blob_id).as_deref(),
+        Some(picture.as_slice())
+    );
+    drop(w);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── Direct messages (spec §6) ────────────────────────────────────────
+
+fn dm(client: &mut TestClient, w: &mut World, to: UserId, text: &str, client_ref: u32) {
+    client.send(
+        w,
+        &ClientMessage::DirectMessage {
+            to,
+            text: text.to_string(),
+            client_ref,
+        },
+    );
+}
+
+/// The sender's verdict for `client_ref`: the message id, or why not.
+fn dm_verdict(
+    client: &mut TestClient,
+    w: &mut World,
+    others: &mut [&mut TestClient],
+    client_ref: u32,
+) -> Result<u64, protocol::DmFailReason> {
+    client.wait_for(w, others, |m| match m {
+        ServerMessage::MessageAck {
+            client_ref: r,
+            msg_id,
+        } if *r == client_ref => Some(Ok(*msg_id)),
+        ServerMessage::MessageFailed {
+            client_ref: r,
+            reason,
+        } if *r == client_ref => Some(Err(*reason)),
+        _ => None,
+    })
+}
+
+#[test]
+fn members_dm_each_other_live_and_guests_are_refused() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let mut alice = w.connect_member("alice");
+    let mut bob = w.connect_member("bob");
+    let mut carol = w.connect("carol");
+    let alice_user = alice.key.user_id();
+    let bob_user = bob.key.user_id();
+    let carol_user = carol.key.user_id();
+
+    dm(&mut alice, &mut w, bob_user, "psst", 7);
+    let got = bob.wait_for(&mut w, &mut [&mut alice, &mut carol], |m| match m {
+        ServerMessage::Direct { from, msg } if *from == alice_user => Some(msg.clone()),
+        _ => None,
+    });
+    assert_eq!(got.text, "psst");
+    assert_eq!(got.client_id, alice.id);
+    let id = dm_verdict(&mut alice, &mut w, &mut [&mut bob, &mut carol], 7).expect("acked");
+    assert_eq!(id, got.id);
+    // Nobody else saw it.
+    assert!(!carol
+        .inbox
+        .iter()
+        .any(|m| matches!(m, ServerMessage::Direct { .. })));
+
+    // Guests neither send nor receive.
+    dm(&mut carol, &mut w, alice_user, "hi?", 1);
+    assert_eq!(
+        dm_verdict(&mut carol, &mut w, &mut [&mut alice, &mut bob], 1),
+        Err(protocol::DmFailReason::NoPermission)
+    );
+    dm(&mut alice, &mut w, carol_user, "hi!", 8);
+    assert_eq!(
+        dm_verdict(&mut alice, &mut w, &mut [&mut bob, &mut carol], 8),
+        Err(protocol::DmFailReason::NoPermission)
+    );
+}
+
+#[test]
+fn a_dm_to_someone_offline_fails_without_a_store() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let mut alice = w.connect_member("alice");
+    let bob = w.connect_member("bob");
+    let bob_user = bob.key.user_id();
+    bob.leave(&mut w);
+    w.settle(&mut [&mut alice], Duration::from_secs(1));
+    dm(&mut alice, &mut w, bob_user, "anyone?", 3);
+    assert_eq!(
+        dm_verdict(&mut alice, &mut w, &mut [], 3),
+        Err(protocol::DmFailReason::Offline)
+    );
+}
+
+#[test]
+fn a_dm_restriction_refuses_the_sender() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let boot = w.bootstrap_code();
+    let mut admin = w.connect_as("mpw", Auth::Invite { code: boot });
+    let mut alice = w.connect_member("alice");
+    let mut bob = w.connect_member("bob");
+    admin.admin(
+        &mut w,
+        1,
+        AdminCommand::Restrict {
+            target: AdminTarget::User(alice.key.user_id()),
+            kind: RestrictionKind::Dm,
+            duration_secs: None,
+            reason: "no dms".to_string(),
+        },
+    );
+    assert_eq!(
+        admin.admin_result(&mut w, &mut [&mut alice, &mut bob], 1),
+        Ok(AdminOutcome::Done)
+    );
+    dm(&mut alice, &mut w, bob.key.user_id(), "still?", 2);
+    assert_eq!(
+        dm_verdict(&mut alice, &mut w, &mut [&mut admin, &mut bob], 2),
+        Err(protocol::DmFailReason::NoPermission)
+    );
+    assert!(alice.inbox.iter().any(|m| matches!(
+        m,
+        ServerMessage::Restricted {
+            kind: RestrictionKind::Dm,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn dms_are_stored_first_wait_for_the_offline_and_count_unread() {
+    let dir = temp_dir("dms");
+    let mut w = World::new(persistent_config(vec![open_channel("Lobby", true)], &dir));
+    let mut alice = w.connect_member("alice");
+    let bob_key = Arc::new(ClientKey::generate());
+    let code = w.invite(ROLE_MEMBER);
+    let mut bob = w.connect_with_key("bob", Auth::Invite { code }, Arc::clone(&bob_key));
+    let alice_user = alice.key.user_id();
+    let bob_user = bob_key.user_id();
+
+    // Online: stored, then acked and delivered in the same tick.
+    dm(&mut alice, &mut w, bob_user, "one", 1);
+    let first = dm_verdict(&mut alice, &mut w, &mut [&mut bob], 1).expect("stored");
+    bob.wait_for(&mut w, &mut [&mut alice], |m| match m {
+        ServerMessage::Direct { from, msg } if *from == alice_user && msg.id == first => Some(()),
+        _ => None,
+    });
+
+    // Offline: stored and acked; nobody to deliver to right now.
+    bob.leave(&mut w);
+    w.settle(&mut [&mut alice], Duration::from_secs(1));
+    dm(&mut alice, &mut w, bob_user, "two", 2);
+    let second = dm_verdict(&mut alice, &mut w, &mut [], 2).expect("stored while offline");
+    assert!(second > first);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while w.server().persistence().stats().queued > 0 {
+        assert!(Instant::now() < deadline, "writes never landed");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // Back: the conversation list says two unread from alice, the
+    // page has both, and a read mark clears the count.
+    let mut bob = w.connect_with_key("bob", Auth::Key, Arc::clone(&bob_key));
+    let list = bob.wait_for(&mut w, &mut [&mut alice], |m| match m {
+        ServerMessage::Conversations { dms } => Some(dms.clone()),
+        _ => None,
+    });
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].user_id, alice_user);
+    assert_eq!(list[0].name, "alice");
+    assert_eq!(list[0].unread, 2);
+    assert_eq!(list[0].last_msg_id, second);
+    bob.send(
+        &mut w,
+        &ClientMessage::FetchHistory {
+            conv: ConvRef::Dm(alice_user),
+            before: None,
+            limit: 50,
+        },
+    );
+    let page = bob.wait_for(&mut w, &mut [&mut alice], |m| match m {
+        ServerMessage::History {
+            conv: ConvRef::Dm(other),
+            messages,
+            ..
+        } if *other == alice_user => Some(messages.clone()),
+        _ => None,
+    });
+    let texts: Vec<&str> = page.iter().map(|m| m.text.as_str()).collect();
+    assert_eq!(texts, ["one", "two"]);
+    bob.send(
+        &mut w,
+        &ClientMessage::MarkRead {
+            conv: ConvRef::Dm(alice_user),
+            msg_id: second,
+        },
+    );
+    w.settle(&mut [&mut alice, &mut bob], Duration::from_millis(500));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while w.server().persistence().stats().queued > 0 {
+        assert!(Instant::now() < deadline, "writes never landed");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    bob.leave(&mut w);
+    let mut bob = w.connect_with_key("bob", Auth::Key, bob_key);
+    let list = bob.wait_for(&mut w, &mut [&mut alice], |m| match m {
+        ServerMessage::Conversations { dms } => Some(dms.clone()),
+        _ => None,
+    });
+    assert_eq!(list[0].unread, 0);
+    drop(w);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_stalled_store_fails_a_dm_within_the_deadline() {
+    let dir = temp_dir("dm-stall");
+    let mut w = World::new(persistent_config(vec![open_channel("Lobby", true)], &dir));
+    let mut alice = w.connect_member("alice");
+    let mut bob = w.connect_member("bob");
+    let stalled = w.server().persistence().stall();
+    std::thread::sleep(Duration::from_millis(50));
+    dm(&mut alice, &mut w, bob.key.user_id(), "hello?", 4);
+    assert_eq!(
+        dm_verdict(&mut alice, &mut w, &mut [&mut bob], 4),
+        Err(protocol::DmFailReason::Store)
+    );
+    // Nothing was delivered: stored first, or not at all.
+    assert!(!bob
+        .inbox
+        .iter()
+        .any(|m| matches!(m, ServerMessage::Direct { .. })));
+    drop(stalled);
+    drop(w);
+    let _ = std::fs::remove_dir_all(&dir);
 }

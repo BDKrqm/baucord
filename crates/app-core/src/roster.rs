@@ -23,6 +23,81 @@ impl Default for PeerAudio {
     }
 }
 
+/// The first letter of a name, upper-cased, for the avatar tile when
+/// there is no picture; `?` for an empty name.
+#[must_use]
+pub fn initial_of(name: &str) -> String {
+    name.trim()
+        .chars()
+        .next()
+        .map(|c| c.to_uppercase().collect())
+        .unwrap_or_else(|| "?".to_string())
+}
+
+/// A muted, deterministic tint for a name's fallback tile: the same
+/// person gets the same square everywhere, and none of the tints is
+/// loud enough to compete with a real name color. Hue from a hash of
+/// the name, fixed saturation and lightness (HSL 45% / 32%).
+#[must_use]
+pub fn tile_tint(name: &str) -> [u8; 3] {
+    let mut h: u32 = 2_166_136_261;
+    for b in name.to_lowercase().bytes() {
+        h ^= u32::from(b);
+        h = h.wrapping_mul(16_777_619);
+    }
+    let hue = f64::from(h % 360);
+    hsl_to_rgb(hue, 0.45, 0.32)
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn hsl_to_rgb(h: f64, s: f64, l: f64) -> [u8; 3] {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let hp = h / 60.0;
+    let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
+    let (r, g, b) = match hp as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c / 2.0;
+    [
+        ((r + m) * 255.0).round() as u8,
+        ((g + m) * 255.0).round() as u8,
+        ((b + m) * 255.0).round() as u8,
+    ]
+}
+
+/// The highest built-in role a user holds, as the roster marks it.
+/// The server's tables decide it (`UserDetails`); the client only
+/// draws it. `Unknown` until the details arrive, or on a server that
+/// does not send them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum Role {
+    #[default]
+    Unknown,
+    Guest,
+    Member,
+    Organizer,
+    Admin,
+}
+
+impl Role {
+    /// The value a Slint `int` field carries: 0 unknown … 4 admin.
+    #[must_use]
+    pub fn as_int(self) -> i32 {
+        match self {
+            Role::Unknown => 0,
+            Role::Guest => 1,
+            Role::Member => 2,
+            Role::Organizer => 3,
+            Role::Admin => 4,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct UserState {
     pub username: String,
@@ -33,6 +108,10 @@ pub struct UserState {
     pub is_self_deafened: bool,
     /// Voice channel this user is in (server-authoritative).
     pub channel_id: u16,
+    /// From `UserDetails`; `Role::Unknown` until it arrives.
+    pub role: Role,
+    /// From `UserDetails`; 0 until it arrives.
+    pub level: u16,
 }
 
 impl UserState {
@@ -44,13 +123,17 @@ impl UserState {
             is_self_muted: false,
             is_self_deafened: false,
             channel_id,
+            role: Role::Unknown,
+            level: 0,
         }
     }
 }
 
 /// One voice channel as the roster needs it (mirror of the wire
-/// `ChannelInfo` — this crate stays free of networking deps).
+/// `ChannelInfo` plus `ChannelDetails` — this crate stays free of
+/// networking deps).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // display facts, not a state machine
 pub struct ChannelMeta {
     pub id: u16,
     pub name: String,
@@ -58,6 +141,20 @@ pub struct ChannelMeta {
     pub locked: bool,
     /// Member cap, `None` = unlimited.
     pub user_limit: Option<u16>,
+    /// A `min_role` gate exists (members-only, staff-only).
+    pub members_only: bool,
+    /// Deleted after a while empty (a user channel without "keep").
+    pub temporary: bool,
+    /// The server's AFK channel: voice goes nowhere there.
+    pub is_afk: bool,
+    /// This session's user created it (edit/delete in its menu).
+    pub owned: bool,
+    /// Defined in the server's config file: cannot be deleted from
+    /// the client, nor renamed.
+    pub from_config: bool,
+    /// Gated above this session's rank (spec §12): the header and its
+    /// members are left out of the roster entirely.
+    pub hidden: bool,
 }
 
 /// Snapshot row for the UI, in display order.
@@ -74,10 +171,15 @@ pub struct RosterRow {
     pub self_muted: bool,
     pub self_deafened: bool,
     pub sharing: bool,
+    pub role: Role,
+    pub level: u16,
+    /// The channel they are in (the "Move to" menu greys it out).
+    pub channel_id: u16,
 }
 
 /// A channel header row for the sidebar.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // display flags, not a state machine
 pub struct ChannelRow {
     pub id: u16,
     pub name: String,
@@ -87,6 +189,11 @@ pub struct ChannelRow {
     pub user_limit: Option<u16>,
     /// This is the channel we are in (highlighted; clicking is a no-op).
     pub is_ours: bool,
+    pub members_only: bool,
+    pub temporary: bool,
+    pub is_afk: bool,
+    pub owned: bool,
+    pub from_config: bool,
 }
 
 /// One sidebar row: a channel header or a user beneath one.
@@ -101,6 +208,10 @@ pub enum RosterItem {
 /// its members sorted by username beneath it. `our_id` marks the self
 /// row; for it, `local_*` state substitutes the broadcast state (which
 /// is always stale for ourselves).
+///
+/// A `hidden` channel (gated above this session's rank) is skipped
+/// along with everyone in it — a members-only room is one guests never
+/// see, people included.
 ///
 /// Users pointing at a channel id with no metadata (a server bug, but
 /// hiding people would make it worse) are appended at the end without
@@ -135,6 +246,9 @@ pub fn grouped_rows(
             self_muted,
             self_deafened,
             sharing: sharers.contains(&id),
+            role: st.role,
+            level: st.level,
+            channel_id: st.channel_id,
         }
     };
 
@@ -144,6 +258,9 @@ pub fn grouped_rows(
 
     let mut items = Vec::with_capacity(channels.len() + users.len());
     for channel in channels {
+        if channel.hidden {
+            continue;
+        }
         let members: Vec<_> = sorted
             .iter()
             .filter(|(_, st)| st.channel_id == channel.id)
@@ -155,6 +272,11 @@ pub fn grouped_rows(
             members: members.len() as u16,
             user_limit: channel.user_limit,
             is_ours: our_channel == Some(channel.id),
+            members_only: channel.members_only,
+            temporary: channel.temporary,
+            is_afk: channel.is_afk,
+            owned: channel.owned,
+            from_config: channel.from_config,
         }));
         for (id, st) in members {
             items.push(RosterItem::User(user_row(**id, st)));
@@ -213,6 +335,12 @@ mod tests {
             name: name.to_string(),
             locked: false,
             user_limit: None,
+            members_only: false,
+            temporary: false,
+            is_afk: false,
+            owned: false,
+            from_config: true,
+            hidden: false,
         }
     }
 
@@ -266,6 +394,42 @@ mod tests {
             panic!("expected header")
         };
         assert_eq!(afk.members, 0);
+    }
+
+    #[test]
+    fn tiles_are_stable_and_muted() {
+        assert_eq!(tile_tint("Alice"), tile_tint("alice"));
+        assert_ne!(tile_tint("alice"), tile_tint("bob"));
+        for name in ["a", "bob", "carol", "zed"] {
+            let [r, g, b] = tile_tint(name);
+            let max = r.max(g).max(b);
+            assert!(max < 150, "{name}: {r},{g},{b} is louder than a tint");
+        }
+        assert_eq!(initial_of("  émile"), "É");
+        assert_eq!(initial_of(""), "?");
+    }
+
+    #[test]
+    fn hidden_channels_take_their_members_with_them() {
+        let mut staff = meta(1, "Staff");
+        staff.hidden = true;
+        let channels = [meta(0, "Lobby"), staff];
+        let mut users = HashMap::new();
+        users.insert(1, UserState::new("amy", PeerAudio::default(), 0));
+        users.insert(2, UserState::new("boss", PeerAudio::default(), 1));
+        let items = grouped_rows(
+            &channels,
+            &users,
+            Some(1),
+            &HashSet::default(),
+            false,
+            false,
+        );
+        // Lobby header + amy; no Staff header, no boss.
+        assert_eq!(items.len(), 2);
+        assert!(items
+            .iter()
+            .all(|i| !matches!(i, RosterItem::User(u) if u.name == "boss")));
     }
 
     #[test]

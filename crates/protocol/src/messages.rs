@@ -15,7 +15,11 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::lanes::Lane;
+use crate::{
+    admin::{AdminCommand, AdminError, AdminOutcome, RestrictionKind},
+    lanes::Lane,
+    permissions::RoleId,
+};
 
 /// Transport-assigned identity of a connection, valid for its lifetime.
 /// The server assigns a random non-zero id at admission and every peer
@@ -114,6 +118,9 @@ pub enum DenyReason {
     /// The stream is channel-scoped and the viewer is in a different
     /// voice channel.
     NotInChannel,
+    // ── 1.1 ─────────────────────────────────────────────────────────
+    /// The user's roles do not allow it, or a restriction removed it.
+    NotPermitted,
 }
 
 impl DenyReason {
@@ -126,6 +133,7 @@ impl DenyReason {
             DenyReason::NotSharing => "that user is not sharing their screen",
             DenyReason::InvalidDimensions => "the share dimensions were rejected",
             DenyReason::NotInChannel => "this stream is only visible in its voice channel",
+            DenyReason::NotPermitted => "you are not allowed to share here",
         }
     }
 }
@@ -173,6 +181,9 @@ pub enum ChannelDenyReason {
     WrongPassword,
     /// The channel is at its user limit.
     ChannelFull,
+    // ── 1.1 ─────────────────────────────────────────────────────────
+    /// The user's roles do not allow joining channels.
+    NotPermitted,
 }
 
 impl ChannelDenyReason {
@@ -183,20 +194,32 @@ impl ChannelDenyReason {
             ChannelDenyReason::NoSuchChannel => "that channel does not exist",
             ChannelDenyReason::WrongPassword => "wrong channel password",
             ChannelDenyReason::ChannelFull => "the channel is full",
+            ChannelDenyReason::NotPermitted => "you are not allowed to join channels",
         }
     }
 }
 
 // ── Admission ───────────────────────────────────────────────────────────
 
-/// How the client asks to be let in. Only the shared server password
-/// exists in 1.0; `Account` is reserved so that adding it later is an
-/// appended variant, not a wire break.
+/// How the client asks to be let in (spec §3.2).
+///
+/// 1.0 had only the shared room password. 1.1 admits by device key: a
+/// known key logs in with `Key`, a first visit presents an invite code
+/// with `Invite`. `Shared` stays so a 1.0 client's `Hello` still
+/// decodes — and is refused with [`RefusedReason::BadHello`], which
+/// that client already renders as "update baucord".
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Auth {
-    /// The room secret from `server.yaml` (`authentication.password`);
-    /// `None` on servers that don't require one.
+    /// The 1.0 room secret. Refused by a 1.1 server.
     Shared { password: Option<String> },
+    /// "You know this device": `Hello.client_key` is the login. Every
+    /// visit after the first.
+    Key,
+    /// A first visit: `Hello.client_key` plus an invite code. The
+    /// server creates the user, links the key and grants the code's
+    /// role. A known key sending a code is logged in as `Key` and no
+    /// use is burned.
+    Invite { code: String },
 }
 
 /// Proof that the client holds a stable Ed25519 identity key: the public
@@ -210,17 +233,51 @@ pub struct ClientKeyProof {
     pub signature: Vec<u8>,
 }
 
-/// Why admission was refused.
+/// Why a `Hello` without a valid invite needs one (spec §3.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NeedInviteReason {
+    /// The server has never seen this key.
+    UnknownKey,
+    /// This key was unlinked from its user by an admin; it cannot
+    /// found a second user. An admin has to re-link it.
+    KeyRetired,
+}
+
+/// Why an invite code was not accepted (spec §3.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InviteInvalidReason {
+    Expired,
+    Revoked,
+    /// Its use cap is reached.
+    Exhausted,
+    /// No such code.
+    Unknown,
+}
+
+/// Why admission was refused. Not `Copy`: a ban carries its reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RefusedReason {
-    /// The shared password is missing or wrong.
+    /// The shared password is missing or wrong (1.0 servers only).
     WrongPassword,
     /// `network.max_clients` reached.
     ServerFull,
     /// Too many failed admissions from this address recently.
     RateLimited,
-    /// The `Hello` was malformed or arrived too late.
+    /// The `Hello` was malformed, arrived too late, or used the 1.0
+    /// password variant against a 1.1 server.
     BadHello,
+    // ── 1.1 (feature bit `INVITES`) ─────────────────────────────────
+    /// Unknown (or retired) key and no invite code: the client shows
+    /// the invite field.
+    NeedInvite { why: NeedInviteReason },
+    /// The code did not admit: the client says which and keeps the
+    /// field.
+    InviteInvalid { why: InviteInvalidReason },
+    /// The chosen name belongs to someone else: ask for another.
+    NameInUse,
+    /// A `server` restriction on the key, user or address. `until` is
+    /// milliseconds since the Unix epoch; `None` is indefinite.
+    Banned { until: Option<u64>, reason: String },
 }
 
 impl RefusedReason {
@@ -232,6 +289,26 @@ impl RefusedReason {
             RefusedReason::ServerFull => "the server is full",
             RefusedReason::RateLimited => "too many attempts — try again in a minute",
             RefusedReason::BadHello => "the server did not understand the handshake",
+            RefusedReason::NeedInvite {
+                why: NeedInviteReason::UnknownKey,
+            } => "this server needs an invite code",
+            RefusedReason::NeedInvite {
+                why: NeedInviteReason::KeyRetired,
+            } => "this device was removed from your user; ask an admin to re-link it",
+            RefusedReason::InviteInvalid {
+                why: InviteInvalidReason::Expired,
+            } => "that invite code has expired",
+            RefusedReason::InviteInvalid {
+                why: InviteInvalidReason::Revoked,
+            } => "that invite code was revoked",
+            RefusedReason::InviteInvalid {
+                why: InviteInvalidReason::Exhausted,
+            } => "that invite code has been used up",
+            RefusedReason::InviteInvalid {
+                why: InviteInvalidReason::Unknown,
+            } => "that invite code is not valid",
+            RefusedReason::NameInUse => "that name is already in use",
+            RefusedReason::Banned { .. } => "you are banned from this server",
         }
     }
 }
@@ -370,6 +447,73 @@ pub enum TelemetryEvent {
 
 // ── Client → Server ─────────────────────────────────────────────────────
 
+/// Which conversation a history request is about (spec §6). DMs are
+/// 1.1.1; the variant exists so the shape does not change then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConvRef {
+    General,
+    Dm(UserId),
+}
+
+/// One stored message (spec §6): authored by a user who may well be
+/// offline, so it names the author rather than a session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryMessage {
+    pub id: u64,
+    /// Milliseconds since the Unix epoch.
+    pub ts: u64,
+    pub user_id: UserId,
+    /// The author's name of record at the time of sending.
+    pub name: String,
+    pub text: String,
+    pub edited: bool,
+}
+
+/// Why a channel could not be created, edited or deleted (spec §5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChannelUiDenyReason {
+    NameTaken,
+    NoPermission,
+    /// Config channels belong to the file: rename yes, delete no.
+    ConfigOwned,
+    /// The creator already owns `user_channels.max_per_user`.
+    Limit,
+    NoSuchChannel,
+    /// A malformed request: empty name, absurd limit.
+    Invalid,
+}
+
+impl ChannelUiDenyReason {
+    /// Human-readable form for UI display.
+    #[must_use]
+    pub fn describe(&self) -> &'static str {
+        match self {
+            Self::NameTaken => "a channel with that name exists",
+            Self::NoPermission => "you may not do that to this channel",
+            Self::ConfigOwned => "that channel comes from the server's config file",
+            Self::Limit => "you already own as many channels as allowed",
+            Self::NoSuchChannel => "that channel does not exist",
+            Self::Invalid => "that channel request was not valid",
+        }
+    }
+}
+
+/// A user-created channel's settings, sent whole on create and edit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelSpec {
+    pub name: String,
+    pub password: Option<String>,
+    pub user_limit: Option<u16>,
+    /// Joinable from this role's rank up; `None` = everyone.
+    pub min_role: Option<RoleId>,
+    /// Kept when empty; otherwise deleted after
+    /// `user_channels.temporary_after_min` empty.
+    pub permanent: bool,
+    /// Idle minutes before a member is moved to the AFK channel; `None`
+    /// = the server default.
+    pub afk_after_min: Option<u16>,
+}
+
 /// Messages sent from a client to the server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClientMessage {
@@ -462,6 +606,105 @@ pub enum ClientMessage {
         count: u32,
         data: Vec<u8>,
     },
+
+    // ── 1.1: invites (feature bit `INVITES`) ────────────────────────
+    /// Mint an invite code (spec §3.1). Needs `CREATE_INVITES`. A
+    /// member gets guest codes; `grants_role` other than guest needs
+    /// `MANAGE_INVITES`, and admin codes only come from the CLI.
+    /// Expiry longer than the default (24 h) also needs
+    /// `MANAGE_INVITES`; the server clamps and reports what it minted.
+    /// Answered with `InviteCreated` or `InviteDenied`.
+    CreateInvite {
+        /// `None` = guest.
+        grants_role: Option<RoleId>,
+        /// Seconds from now; `None` = the default.
+        expires_secs: Option<u64>,
+        /// `None` = unlimited.
+        max_uses: Option<u32>,
+    },
+
+    // ── 1.1: administration (feature bit `ROLES`) ───────────────────
+    /// An administrative action (spec §8), checked like any other
+    /// message and audited by the server. Answered with `AdminResult`
+    /// carrying the same `request_id`.
+    Admin {
+        request_id: u32,
+        command: AdminCommand,
+    },
+
+    // ── 1.1: history (feature bit `HISTORY`) ────────────────────────
+    /// Older messages: those with an id below `before` (`None` = the
+    /// newest), at most `limit`. Answered with `History`, or
+    /// `HistoryUnavailable` when the store cannot answer in time.
+    FetchHistory {
+        conv: ConvRef,
+        before: Option<u64>,
+        limit: u16,
+    },
+    /// Replace the text of your own message.
+    EditMessage { msg_id: u64, text: String },
+    /// Remove your own message.
+    DeleteMessage { msg_id: u64 },
+
+    // ── 1.1: channels from the UI (feature bit `CHANNELS_UI`) ───────
+    /// Create a channel (needs `CREATE_CHANNELS`; spec §5).
+    CreateChannel(ChannelSpec),
+    /// Edit a channel you own (`MANAGE_OWN_CHANNELS`) or any
+    /// (`MANAGE_CHANNELS`). A config channel accepts only a rename.
+    EditChannel { channel_id: u16, spec: ChannelSpec },
+    /// Delete a channel you own, or any with `MANAGE_CHANNELS`.
+    DeleteChannel { channel_id: u16 },
+    /// Send a member of your channel back to the default channel.
+    ChannelKick { channel_id: u16, user_id: UserId },
+
+    // ── 1.1.2: profiles (feature bit `PROFILES`, spec §7.1) ─────────
+    /// How this user's name looks; sent right after `Session` on every
+    /// connect and on every change. The server validates (contrast,
+    /// the gold band, the avatar's size) and answers by broadcasting
+    /// [`ServerMessage::ProfileUpdated`] or with
+    /// [`ServerMessage::ProfileDenied`].
+    SetProfile(Profile),
+    /// A new name while connected. Checked like the name at `Hello`;
+    /// answered by [`ServerMessage::UserRenamed`] to everyone, or
+    /// [`ServerMessage::RenameDenied`].
+    SetNickname { name: String },
+
+    // ── 1.1.2: blobs (feature bit `BLOBS`, spec §7) ─────────────────
+    /// Announce an upload. `sha256` lets a known blob be acknowledged
+    /// without transfer. Until files land, only avatar-sized images
+    /// (`avatars.max_kb`) are accepted.
+    UploadBegin {
+        upload_id: u32,
+        name: String,
+        mime: String,
+        size: u32,
+        sha256: BlobId,
+    },
+    /// One slice of the announced upload; same pacing and bounds as
+    /// [`ClientMessage::ChatImageChunk`].
+    UploadChunk {
+        upload_id: u32,
+        index: u32,
+        count: u32,
+        data: Vec<u8>,
+    },
+    /// Ask for a blob's bytes; they arrive as
+    /// [`ServerMessage::BlobChunk`] on a Media stream, or
+    /// [`ServerMessage::BlobMissing`].
+    FetchBlob { blob_id: BlobId },
+
+    // ── 1.1.1: direct messages (feature bit `DM`, spec §6) ──────────
+    /// A message to one user. `client_ref` is the sender's own handle
+    /// for the reply: [`ServerMessage::MessageAck`] once stored (and
+    /// delivered if they are online) or [`ServerMessage::MessageFailed`].
+    DirectMessage {
+        to: UserId,
+        text: String,
+        client_ref: u32,
+    },
+    /// Everything up to `msg_id` in `conv` has been seen; the unread
+    /// count in [`ServerMessage::Conversations`] starts after it.
+    MarkRead { conv: ConvRef, msg_id: u64 },
 }
 
 impl ClientMessage {
@@ -475,9 +718,10 @@ impl ClientMessage {
             | ClientMessage::UnsubscribeScreen { .. }
             | ClientMessage::JoinChannel { .. } => Lane::Signal,
             // Bulk rides its own stream per upload.
-            ClientMessage::ChatImageChunk { .. } | ClientMessage::LogUploadChunk { .. } => {
-                Lane::Media
-            }
+            ClientMessage::ChatImageChunk { .. }
+            | ClientMessage::LogUploadChunk { .. }
+            | ClientMessage::UploadChunk { .. } => Lane::Media,
+            ClientMessage::UploadBegin { .. } | ClientMessage::FetchBlob { .. } => Lane::Signal,
             _ => Lane::Control,
         }
     }
@@ -488,7 +732,9 @@ impl ClientMessage {
     pub fn is_upload_chunk(&self) -> bool {
         matches!(
             self,
-            ClientMessage::ChatImageChunk { .. } | ClientMessage::LogUploadChunk { .. }
+            ClientMessage::ChatImageChunk { .. }
+                | ClientMessage::LogUploadChunk { .. }
+                | ClientMessage::UploadChunk { .. }
         )
     }
 }
@@ -509,7 +755,9 @@ pub enum ServerMessage {
     },
 
     /// Admission refused; the server closes the connection after this.
-    Refused { reason: RefusedReason },
+    Refused {
+        reason: RefusedReason,
+    },
 
     /// Initialization payload for a newly connected client: the current
     /// user list, our authoritative client id, server name and greeting,
@@ -532,7 +780,9 @@ pub enum ServerMessage {
     },
 
     /// A client disconnected.
-    UserLeft { client_id: ClientId },
+    UserLeft {
+        client_id: ClientId,
+    },
 
     /// A chat message from a client.
     Chat(ChatMessage),
@@ -565,10 +815,14 @@ pub enum ServerMessage {
     /// streams, the stream became invisible to *you* (the sharer or you
     /// moved channels). Either way: clear the LIVE badge and close any
     /// viewer window for this stream.
-    ScreenShareStopped { client_id: ClientId },
+    ScreenShareStopped {
+        client_id: ClientId,
+    },
 
     /// The server refused our `ScreenShareStart`.
-    ShareDenied { reason: DenyReason },
+    ShareDenied {
+        reason: DenyReason,
+    },
 
     /// The server refused our `SubscribeScreen`.
     SubscribeDenied {
@@ -578,7 +832,9 @@ pub enum ServerMessage {
 
     /// A viewer needs a keyframe from us — force an IDR.
     /// Signal channel: must not queue behind chat.
-    KeyframeRequested { viewer_id: ClientId },
+    KeyframeRequested {
+        viewer_id: ClientId,
+    },
 
     /// Periodic health report for a stream we are sharing, aggregated
     /// across our viewers. Drives sender-side rate adaptation.
@@ -652,6 +908,370 @@ pub enum ServerMessage {
         /// The server's path RTT to this client, ms.
         rtt_ms: u32,
     },
+
+    // ── 1.1: sessions and invites (feature bit `INVITES`) ───────────
+    /// Who this session is, right after `Welcome` (spec §10). The
+    /// client renders what `permissions` allows; it never decides.
+    Session {
+        user_id: UserId,
+        /// Bitset from [`crate::permissions`]: this user's roles
+        /// unioned, minus active restrictions.
+        permissions: u64,
+        /// `false`: this server forgets roles, bans and invites when it
+        /// restarts (spec §1.1). The client shows a standing notice.
+        persistent: bool,
+    },
+    /// This session is over by the server's decision (spec §4.1). The
+    /// connection closes 300 ms later; the client renders a final
+    /// disconnect with the reason and does not auto-reconnect — except
+    /// after `Replaced`, which is its own newer connection winning.
+    Removed {
+        kind: RemovedKind,
+        reason: String,
+        /// Display name of who did it; `server` for automatic ones.
+        by: String,
+    },
+    /// Answer to `CreateInvite`.
+    InviteCreated {
+        code: String,
+        grants_role: RoleId,
+        /// Milliseconds since the Unix epoch; `None` = never.
+        expires_at: Option<u64>,
+        max_uses: Option<u32>,
+    },
+    /// `CreateInvite` was refused.
+    InviteDenied {
+        reason: InviteDenyReason,
+    },
+
+    // ── 1.1: roles and moderation (feature bit `ROLES`) ─────────────
+    /// Who a session is, for the roster: after each `UserJoined`, and
+    /// once per user after `Init`. Roles come from the server's tables;
+    /// no client asserts its own (spec §8).
+    UserDetails {
+        client_id: ClientId,
+        user_id: UserId,
+        roles: Vec<RoleId>,
+        /// From xp (spec §9.1), when the server tracks progress.
+        level: u16,
+    },
+    /// A restriction now applies to this session (spec §4.2): the UI
+    /// shows it instead of letting the action fail silently. `until`
+    /// in milliseconds since the Unix epoch; `None` = until lifted.
+    Restricted {
+        kind: RestrictionKind,
+        until: Option<u64>,
+        reason: String,
+    },
+    /// A restriction on this session ended (lifted, or ran out).
+    RestrictionLifted {
+        kind: RestrictionKind,
+    },
+    /// The answer to `ClientMessage::Admin`.
+    AdminResult {
+        request_id: u32,
+        result: Result<AdminOutcome, AdminError>,
+    },
+
+    // ── 1.1: history (feature bit `HISTORY`) ────────────────────────
+    /// A page of messages, oldest first. Right after `Init` the last
+    /// `history.replay` of the general chat arrive this way; `more`
+    /// says an older page exists (`FetchHistory` with `before` = the
+    /// first id here). Pages are at most 64 KiB.
+    History {
+        conv: ConvRef,
+        messages: Vec<HistoryMessage>,
+        more: bool,
+    },
+    /// The store could not answer in time (a stalled disk): the client
+    /// keeps what it has and may retry after `retry_secs`.
+    HistoryUnavailable {
+        conv: ConvRef,
+        retry_secs: u16,
+    },
+    MessageEdited {
+        msg_id: u64,
+        text: String,
+    },
+    MessageDeleted {
+        msg_id: u64,
+    },
+    /// Chat is rate limited (`limits.chat`); the message was dropped.
+    ChatRateLimited {
+        retry_ms: u32,
+    },
+
+    // ── 1.1: progress (feature bit `PROGRESS`) ──────────────────────
+    /// Your xp crossed a level (spec §9.1).
+    ProgressUpdate {
+        xp: u64,
+        level: u16,
+    },
+
+    // ── 1.1: channels from the UI (feature bit `CHANNELS_UI`) ───────
+    /// What `ChannelInfo` cannot say, one per channel after `Init` and
+    /// after every `ChannelListUpdated`. `stable_id` survives the
+    /// renumbering a list change causes (0 for config channels).
+    ChannelDetails {
+        channel_id: u16,
+        stable_id: u64,
+        owner: Option<UserId>,
+        min_role: Option<RoleId>,
+        permanent: bool,
+        afk_after_min: Option<u16>,
+        is_afk: bool,
+    },
+    /// A create/edit/delete/kick was refused.
+    ChannelDenied {
+        reason: ChannelUiDenyReason,
+    },
+    /// The server moved this session to the AFK channel after
+    /// `after_min` idle minutes (spec §5).
+    MovedIdle {
+        after_min: u16,
+    },
+
+    // ── 1.1.2: profiles (feature bit `PROFILES`, spec §7.1) ─────────
+    /// A session's profile, sent right after each `UserDetails` and as
+    /// a batch after `Init` to sessions that negotiated `PROFILES`.
+    UserProfile {
+        client_id: ClientId,
+        profile: Profile,
+    },
+    /// A profile changed (or was reset by an admin); everyone renders
+    /// from it.
+    ProfileUpdated {
+        user_id: UserId,
+        profile: Profile,
+    },
+    ProfileDenied {
+        reason: ProfileDenyReason,
+    },
+    /// A session changed its name; every roster renames it.
+    UserRenamed {
+        client_id: ClientId,
+        name: String,
+    },
+    RenameDenied {
+        reason: RenameDenyReason,
+    },
+
+    // ── 1.1.2: blobs (feature bit `BLOBS`, spec §7) ─────────────────
+    /// `needed: false` = the server already has this hash; reference
+    /// it, send nothing.
+    UploadAccept {
+        upload_id: u32,
+        needed: bool,
+    },
+    UploadDone {
+        upload_id: u32,
+        blob_id: BlobId,
+    },
+    UploadRejected {
+        upload_id: u32,
+        reason: UploadRejectReason,
+    },
+    /// One slice of a fetched blob, on a Media stream paced like an
+    /// image relay; the client verifies the hash once whole.
+    BlobChunk {
+        blob_id: BlobId,
+        index: u32,
+        count: u32,
+        data: Vec<u8>,
+    },
+    BlobMissing {
+        blob_id: BlobId,
+    },
+
+    // ── 1.1.1: direct messages (feature bit `DM`, spec §6) ──────────
+    /// A live DM from `from`; `msg.client_id` is their session.
+    Direct {
+        from: UserId,
+        msg: ChatMessage,
+    },
+    /// The sender's DM has its id: stored (with persistence) and
+    /// delivered to every session of the recipient that is online.
+    MessageAck {
+        client_ref: u32,
+        msg_id: u64,
+    },
+    MessageFailed {
+        client_ref: u32,
+        reason: DmFailReason,
+    },
+    /// The DM conversations this user has, with unread counts; sent
+    /// after the general replay on join and after a change (a DM
+    /// arrived while away, a mark moved).
+    Conversations {
+        dms: Vec<DmSummary>,
+    },
+}
+
+/// Why a DM was not sent (spec §6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DmFailReason {
+    /// No store, and the recipient is not online to take it live.
+    Offline,
+    /// A guest on either end, or a `dm` restriction on the sender.
+    NoPermission,
+    /// No such user.
+    NoSuchUser,
+    /// The store did not confirm within the deadline; nothing was
+    /// delivered.
+    Store,
+}
+
+impl DmFailReason {
+    #[must_use]
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Offline => "they are offline and this server does not keep messages",
+            Self::NoPermission => "direct messages are for members",
+            Self::NoSuchUser => "no such user",
+            Self::Store => "the server could not store the message; try again",
+        }
+    }
+}
+
+/// One DM conversation as the list shows it (spec §6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DmSummary {
+    pub user_id: UserId,
+    /// Their name of record.
+    pub name: String,
+    pub unread: u32,
+    /// The newest message's `ts`, milliseconds since the Unix epoch.
+    pub last_ts: u64,
+    /// The newest message's id (the client's paging cursor).
+    pub last_msg_id: u64,
+}
+
+/// The SHA-256 of a blob's bytes: its identity everywhere (spec §7).
+pub type BlobId = [u8; 32];
+
+/// How a name is drawn (spec §7.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum NameStyle {
+    #[default]
+    Normal,
+    Bold,
+    Italic,
+}
+
+/// How a user's name looks, and their picture (spec §7.1). Kept on
+/// the user row, so it follows the key across visits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct Profile {
+    /// `0xRRGGBB`; `None` = the client's default name color.
+    pub name_color: Option<u32>,
+    pub name_style: NameStyle,
+    /// A 128×128 PNG/JPEG/WebP blob the client uploaded.
+    pub avatar: Option<BlobId>,
+}
+
+/// Why `SetProfile` was refused (spec §7.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProfileDenyReason {
+    /// The gold band (hue 38°–65°, saturation ≥ 0.35) without `ADMIN`.
+    ReservedColor,
+    /// Under 3:1 against the chat background.
+    LowContrast,
+    /// One change per 30 s.
+    RateLimited,
+    /// An admin reset it with `lock`; a `profile` restriction stands.
+    Locked,
+    /// The avatar is not a blob the server holds, or not an image of
+    /// the allowed size.
+    BadAvatar,
+}
+
+impl ProfileDenyReason {
+    #[must_use]
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::ReservedColor => "gold is reserved for admins",
+            Self::LowContrast => "that color does not read on the chat background",
+            Self::RateLimited => "one profile change every 30 seconds",
+            Self::Locked => "an admin locked your profile",
+            Self::BadAvatar => "the server does not have that picture",
+        }
+    }
+}
+
+/// Why `SetNickname` was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RenameDenyReason {
+    /// Someone online has it, or a guest asked for an offline
+    /// member's name.
+    Taken,
+    /// Empty after sanitizing.
+    Invalid,
+    /// One rename per 30 s.
+    RateLimited,
+}
+
+impl RenameDenyReason {
+    #[must_use]
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Taken => "that name is in use",
+            Self::Invalid => "that name is empty",
+            Self::RateLimited => "one rename every 30 seconds",
+        }
+    }
+}
+
+/// Why `UploadBegin` or the finished upload was refused (spec §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UploadRejectReason {
+    TooLarge,
+    /// Not PNG/JPEG/WebP (declared or sniffed).
+    BadType,
+    /// The bytes do not hash to what `UploadBegin` said.
+    HashMismatch,
+    /// A second upload before the first finished, or chunks for an
+    /// upload never announced.
+    NotAnnounced,
+    /// The server is not storing blobs at the moment (its blob store
+    /// is full, or the upload kind is not enabled yet).
+    Refused,
+}
+
+impl UploadRejectReason {
+    #[must_use]
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::TooLarge => "the file is larger than this server allows",
+            Self::BadType => "only PNG, JPEG and WebP images are accepted",
+            Self::HashMismatch => "the upload did not match its announced hash",
+            Self::NotAnnounced => "the upload was not announced first",
+            Self::Refused => "the server refused the upload",
+        }
+    }
+}
+
+/// Why a session was ended (spec §4.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RemovedKind {
+    /// Access unchanged; rejoining is one click.
+    Disconnected,
+    /// Access revoked until an admin lifts it.
+    Kicked,
+    /// Access revoked and the key and address blocked; `until` in
+    /// milliseconds since the Unix epoch, `None` = indefinite.
+    Banned { until: Option<u64> },
+    /// The same user signed in from a newer connection (auto-reconnect
+    /// after a blackout); this older session yields.
+    Replaced,
+}
+
+/// Why `CreateInvite` was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InviteDenyReason {
+    /// No `CREATE_INVITES`, or no `MANAGE_INVITES` for that role.
+    NoPermission,
+    /// No such role, or a role that codes may not grant (admin).
+    RoleNotAllowed,
 }
 
 impl ServerMessage {
@@ -662,7 +1282,11 @@ impl ServerMessage {
             ServerMessage::KeyframeRequested { .. } | ServerMessage::StreamHealth { .. } => {
                 Lane::Signal
             }
-            ServerMessage::ChatImageChunk { .. } => Lane::Media,
+            ServerMessage::ChatImageChunk { .. } | ServerMessage::BlobChunk { .. } => Lane::Media,
+            ServerMessage::UploadAccept { .. }
+            | ServerMessage::UploadDone { .. }
+            | ServerMessage::UploadRejected { .. }
+            | ServerMessage::BlobMissing { .. } => Lane::Signal,
             _ => Lane::Control,
         }
     }
@@ -671,7 +1295,10 @@ impl ServerMessage {
     /// stream that the relay opens and finishes per image).
     #[must_use]
     pub fn is_upload_chunk(&self) -> bool {
-        matches!(self, ServerMessage::ChatImageChunk { .. })
+        matches!(
+            self,
+            ServerMessage::ChatImageChunk { .. } | ServerMessage::BlobChunk { .. }
+        )
     }
 }
 
@@ -746,6 +1373,37 @@ pub fn decode_server_message(bytes: &[u8]) -> Option<ServerMessage> {
     }
     let msg: ServerMessage = postcard::from_bytes(bytes).ok()?;
     server_message_len_ok(&msg, bytes.len()).then_some(msg)
+}
+
+// ── Telemetry at rest ───────────────────────────────────────────────
+//
+// The server keeps each sample and event as an opaque blob next to the
+// columns worth querying (spec §9). Same codec as the wire so the
+// `server telemetry` CLI and a future viewer decode them with this
+// crate and nothing else.
+
+/// Serialize a telemetry sample for storage.
+#[must_use]
+pub fn encode_telemetry_sample(sample: &TelemetrySample) -> Option<Vec<u8>> {
+    postcard::to_allocvec(sample).ok()
+}
+
+/// Deserialize a stored telemetry sample.
+#[must_use]
+pub fn decode_telemetry_sample(bytes: &[u8]) -> Option<TelemetrySample> {
+    postcard::from_bytes(bytes).ok()
+}
+
+/// Serialize a telemetry event for storage.
+#[must_use]
+pub fn encode_telemetry_event(event: &TelemetryEvent) -> Option<Vec<u8>> {
+    postcard::to_allocvec(event).ok()
+}
+
+/// Deserialize a stored telemetry event.
+#[must_use]
+pub fn decode_telemetry_event(bytes: &[u8]) -> Option<TelemetryEvent> {
+    postcard::from_bytes(bytes).ok()
 }
 
 #[cfg(test)]
@@ -1093,6 +1751,248 @@ mod tests {
                 lost: 10,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn key_and_invite_auth_roundtrip_in_hello() {
+        for auth in [
+            Auth::Key,
+            Auth::Invite {
+                code: "K7FQ2MX9ABCD".to_string(),
+            },
+        ] {
+            let msg = ClientMessage::Hello {
+                username: "alice".to_string(),
+                auth: auth.clone(),
+                client_key: None,
+                features: features_for_test(),
+                client_version: CLIENT_VERSION.to_string(),
+            };
+            let bytes = encode_client_message(&msg).unwrap();
+            let Some(ClientMessage::Hello { auth: back, .. }) = decode_client_message(&bytes)
+            else {
+                panic!("not a Hello");
+            };
+            match (auth, back) {
+                (Auth::Key, Auth::Key) => {}
+                (Auth::Invite { code: a }, Auth::Invite { code: b }) => assert_eq!(a, b),
+                (a, b) => panic!("auth changed on the wire: {a:?} → {b:?}"),
+            }
+        }
+    }
+
+    fn features_for_test() -> u64 {
+        crate::features::CLIENT_1_0 | crate::features::INVITES
+    }
+
+    #[test]
+    fn banned_refusal_carries_until_and_reason() {
+        let bytes = encode_server_message(&ServerMessage::Refused {
+            reason: RefusedReason::Banned {
+                until: Some(1_800_000_000_000),
+                reason: "spam".to_string(),
+            },
+        })
+        .unwrap();
+        let Some(ServerMessage::Refused { reason }) = decode_server_message(&bytes) else {
+            panic!("not a Refused");
+        };
+        assert_eq!(
+            reason,
+            RefusedReason::Banned {
+                until: Some(1_800_000_000_000),
+                reason: "spam".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn need_invite_reasons_describe_themselves_distinctly() {
+        let unknown = RefusedReason::NeedInvite {
+            why: NeedInviteReason::UnknownKey,
+        };
+        let retired = RefusedReason::NeedInvite {
+            why: NeedInviteReason::KeyRetired,
+        };
+        assert_ne!(unknown.describe(), retired.describe());
+    }
+
+    #[test]
+    fn telemetry_sample_survives_storage_codec() {
+        let sample = TelemetrySample {
+            path: PathSample {
+                rtt_ms: 42,
+                ..PathSample::default()
+            },
+            ..TelemetrySample::default()
+        };
+        let bytes = encode_telemetry_sample(&sample).unwrap();
+        assert_eq!(decode_telemetry_sample(&bytes).unwrap().path.rtt_ms, 42);
+        let event = TelemetryEvent::ShareStopped;
+        let bytes = encode_telemetry_event(&event).unwrap();
+        assert!(matches!(
+            decode_telemetry_event(&bytes).unwrap(),
+            TelemetryEvent::ShareStopped
+        ));
+    }
+
+    #[test]
+    fn session_and_removed_roundtrip_on_control() {
+        let session = ServerMessage::Session {
+            user_id: [9u8; 32],
+            permissions: crate::permissions::MEMBER_PERMISSIONS,
+            persistent: false,
+        };
+        assert_eq!(session.lane(), Lane::Control);
+        let bytes = encode_server_message(&session).unwrap();
+        let Some(ServerMessage::Session {
+            user_id,
+            permissions,
+            persistent,
+        }) = decode_server_message(&bytes)
+        else {
+            panic!("not a Session");
+        };
+        assert_eq!(user_id, [9u8; 32]);
+        assert_eq!(permissions, crate::permissions::MEMBER_PERMISSIONS);
+        assert!(!persistent);
+
+        let removed = ServerMessage::Removed {
+            kind: RemovedKind::Banned { until: Some(42) },
+            reason: "spam".to_string(),
+            by: "mpw".to_string(),
+        };
+        assert_eq!(removed.lane(), Lane::Control);
+        let bytes = encode_server_message(&removed).unwrap();
+        assert!(matches!(
+            decode_server_message(&bytes),
+            Some(ServerMessage::Removed {
+                kind: RemovedKind::Banned { until: Some(42) },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn invite_messages_roundtrip() {
+        let create = ClientMessage::CreateInvite {
+            grants_role: Some(crate::permissions::ROLE_MEMBER),
+            expires_secs: Some(3600),
+            max_uses: None,
+        };
+        assert_eq!(create.lane(), Lane::Control);
+        let bytes = encode_client_message(&create).unwrap();
+        assert!(matches!(
+            decode_client_message(&bytes),
+            Some(ClientMessage::CreateInvite {
+                grants_role: Some(2),
+                expires_secs: Some(3600),
+                max_uses: None,
+            })
+        ));
+
+        let created = ServerMessage::InviteCreated {
+            code: "K7FQ2MX9ABCD".to_string(),
+            grants_role: crate::permissions::ROLE_GUEST,
+            expires_at: Some(1_800_000_000_000),
+            max_uses: Some(1),
+        };
+        let bytes = encode_server_message(&created).unwrap();
+        let Some(ServerMessage::InviteCreated { code, max_uses, .. }) =
+            decode_server_message(&bytes)
+        else {
+            panic!("not InviteCreated");
+        };
+        assert_eq!(code, "K7FQ2MX9ABCD");
+        assert_eq!(max_uses, Some(1));
+
+        let bytes = encode_server_message(&ServerMessage::InviteDenied {
+            reason: InviteDenyReason::RoleNotAllowed,
+        })
+        .unwrap();
+        assert!(matches!(
+            decode_server_message(&bytes),
+            Some(ServerMessage::InviteDenied {
+                reason: InviteDenyReason::RoleNotAllowed
+            })
+        ));
+    }
+
+    #[test]
+    fn admin_messages_roundtrip() {
+        use crate::admin::{AdminTarget, KeySummary, UserSummary};
+        // The message enums carry floats and skip `PartialEq`; a round
+        // trip that re-encodes to the same bytes is the equality here.
+        let client_roundtrips = |msg: &ClientMessage| {
+            let bytes = encode_client_message(msg).unwrap();
+            let again = decode_client_message(&bytes).expect("decodes");
+            encode_client_message(&again).unwrap() == bytes
+        };
+        let server_roundtrips = |msg: &ServerMessage| {
+            let bytes = encode_server_message(msg).unwrap();
+            let again = decode_server_message(&bytes).expect("decodes");
+            encode_server_message(&again).unwrap() == bytes
+        };
+
+        let cmd = ClientMessage::Admin {
+            request_id: 7,
+            command: AdminCommand::Restrict {
+                target: AdminTarget::User([1u8; 32]),
+                kind: RestrictionKind::Voice,
+                duration_secs: Some(1800),
+                reason: "spam".to_string(),
+            },
+        };
+        assert_eq!(cmd.lane(), Lane::Control);
+        assert!(client_roundtrips(&cmd));
+
+        assert!(server_roundtrips(&ServerMessage::AdminResult {
+            request_id: 7,
+            result: Ok(AdminOutcome::Users(vec![UserSummary {
+                user_id: [1u8; 32],
+                name: "alice".to_string(),
+                roles: vec![crate::permissions::ROLE_MEMBER],
+                client_id: Some(9),
+                last_seen: 5,
+                keys: vec![KeySummary {
+                    key_hash: [1u8; 32],
+                    retired: false,
+                    last_seen: 5,
+                }],
+            }])),
+        }));
+        let bytes = encode_server_message(&ServerMessage::AdminResult {
+            request_id: 8,
+            result: Err(AdminError::Outranked),
+        })
+        .unwrap();
+        assert!(matches!(
+            decode_server_message(&bytes),
+            Some(ServerMessage::AdminResult {
+                request_id: 8,
+                result: Err(AdminError::Outranked)
+            })
+        ));
+        assert!(server_roundtrips(&ServerMessage::UserDetails {
+            client_id: 9,
+            user_id: [1u8; 32],
+            roles: vec![1, 2],
+            level: 3,
+        }));
+        let bytes = encode_server_message(&ServerMessage::Restricted {
+            kind: RestrictionKind::GeneralText,
+            until: None,
+            reason: "be nice".to_string(),
+        })
+        .unwrap();
+        assert!(matches!(
+            decode_server_message(&bytes),
+            Some(ServerMessage::Restricted {
+                kind: RestrictionKind::GeneralText,
+                until: None,
+                ..
+            })
         ));
     }
 

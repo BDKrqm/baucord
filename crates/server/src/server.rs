@@ -10,6 +10,12 @@
 //! The server is sans-IO: [`ChatServer::update`] takes `now` and works
 //! on the embedded [`Driver`]; the binary's loop and the test harness
 //! move datagrams in and out around it.
+//!
+//! The tick never touches disk: everything that persists goes through
+//! [`Persist`] (spec §0, rule 1) — fire-and-forget writes that drop and
+//! count under backpressure, and reads polled per tick against a
+//! deadline. Wall time comes from a [`Clock`] anchored to the tick's
+//! `Instant`, so the simulator's fake clock advances it too.
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -20,20 +26,38 @@ use std::{
 
 use log::{debug, info, warn};
 use protocol::{
-    features, Auth, ChannelDenyReason, ChannelInfo, ChatMessage, ClientId, ClientKeyProof,
-    ClientMessage, DenyReason, Lane, RefusedReason, ServerMessage, ShareScope, TelemetryEvent,
-    TelemetrySample,
+    features,
+    permissions::{self, RoleId, RANK_ADMIN, RANK_GUEST, ROLE_ADMIN},
+    Auth, ChannelDenyReason, ChannelInfo, ChatMessage, ClientId, ClientKeyProof, ClientMessage,
+    DenyReason, InviteDenyReason, InviteInvalidReason, Lane, NeedInviteReason, RefusedReason,
+    RemovedKind, RestrictionKind, ServerMessage, ShareScope, TelemetryEvent, TelemetrySample,
+    UserId,
 };
 use sha2::{Digest, Sha256};
-use subtle::ConstantTimeEq;
 use transport::{
     identity::{verify_ed25519, CLIENT_AUTH_EXPORTER_BYTES, CLIENT_AUTH_EXPORTER_LABEL},
     Budget, DisconnectReason, Driver, DriverHost, Event, Fingerprint, LinkStats, ServerIdentity,
 };
 
+mod channels;
+mod dms;
+mod history;
+mod moderation;
+mod profiles;
+
 use crate::{
-    config::{validate_channel_list, ChannelSettings, Config},
+    clock::{Clock, WallMs},
+    config::{channel_infos_of, validate_channel_list, ChannelSettings, Config},
+    persistence::{
+        AskId, AuditRow, Command, MessageRow, Notice, Persist, ProgressDelta, TelemetryEventRow,
+        TelemetryRow, GENERAL_CONV,
+    },
+    policy::{
+        self, InviteRecord, KeyHash, KeyLookup, Policy, Restriction, BOOTSTRAP_INVITE_TTL_MS,
+        DEFAULT_INVITE_TTL_MS,
+    },
     relay::{ShareInfo, VideoRelay, VoiceRelay},
+    server::{dms::PendingDm, profiles::AnnouncedUpload},
 };
 
 /// Announced share dimensions must fall in this range (per-chunk
@@ -66,17 +90,21 @@ const HELLO_DEADLINE: Duration = Duration::from_secs(10);
 /// Failed admissions per source address in [`ADMISSION_FAILURE_WINDOW`]
 /// before further attempts are refused outright.
 const ADMISSION_FAILURE_LIMIT: usize = 5;
-const ADMISSION_FAILURE_WINDOW: Duration = Duration::from_secs(60);
+const ADMISSION_FAILURE_WINDOW: Duration = Duration::from_mins(1);
 
 /// Time given for a `Refused` message to reach the peer before the
 /// connection is closed under it.
 const REFUSED_CLOSE_DELAY: Duration = Duration::from_millis(300);
 
 /// Uploads whose sender stalled this long are forgotten.
-const UPLOAD_STALL: Duration = Duration::from_secs(120);
+const UPLOAD_STALL: Duration = Duration::from_mins(2);
 
 /// One log upload per client per this interval (spec §9.1).
-const LOG_UPLOAD_MIN_INTERVAL: Duration = Duration::from_secs(600);
+const LOG_UPLOAD_MIN_INTERVAL: Duration = Duration::from_mins(10);
+
+/// Telemetry samples are coalesced per user on the tick and handed to
+/// the persistence thread in one batch this often (spec §9).
+const TELEMETRY_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 
 const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
 
@@ -116,6 +144,24 @@ pub struct ChatServer {
     /// The clock of the current tick; every timestamp in this file
     /// comes from here so the simulation harness controls it.
     now: Instant,
+    /// Wall time, derived from `now` (spec §10).
+    clock: Clock,
+    /// The persistence thread's handle (spec §1). Never blocks.
+    persist: Persist,
+    /// Users, keys, roles, invites, restrictions — what admission and
+    /// every permission check consult (spec §0 rule 4).
+    policy: Policy,
+    /// The one-shot admin code printed at startup when nobody is admin
+    /// yet (spec §1.1).
+    bootstrap_invite: Option<String>,
+    /// The user each admitted session is logged in as.
+    user_of: HashMap<ClientId, UserId>,
+    /// The device key each admitted session came in with.
+    key_of: HashMap<ClientId, KeyHash>,
+    /// Telemetry samples waiting for the next flush, one per user — a
+    /// newer sample replaces an older one (last wins, never a backlog).
+    pending_telemetry: HashMap<UserId, TelemetryRow>,
+    last_telemetry_flush: Instant,
     pending: HashMap<ClientId, PendingPeer>,
     /// Recent failed admissions per source address.
     admission_failures: HashMap<IpAddr, VecDeque<Instant>>,
@@ -126,6 +172,35 @@ pub struct ChatServer {
     audio_states: HashMap<ClientId, (bool, bool)>,
     /// Clients currently deafened (voice relay skips them).
     deafened: HashSet<ClientId>,
+    /// Sessions the relay drops voice from (spec §4.2): a `voice`
+    /// restriction, or a role set without `SPEAK`. Recomputed from the
+    /// policy whenever it changes and once a second for expiries.
+    muted: HashSet<ClientId>,
+    /// Last expiry sweep of the restrictions.
+    last_restriction_sweep: Instant,
+    /// The newest general-chat messages (spec §6): replayed on join,
+    /// and the set an author may still edit or delete. Primed from the
+    /// database at startup.
+    recent: VecDeque<MessageRow>,
+    /// Chat rate limit (`limits.chat`): tokens left and when they were
+    /// last topped up, per session.
+    chat_tokens: HashMap<ClientId, (f64, Instant)>,
+    /// History reads in flight: who asked, for what, how much.
+    pending_history: HashMap<AskId, (ClientId, protocol::ConvRef, u16)>,
+    /// Progress accrued this minute (spec §9.1), flushed once a minute.
+    progress: HashMap<UserId, ProgressDelta>,
+    /// Sessions that spoke since the last progress minute.
+    spoke: HashSet<ClientId>,
+    last_progress_minute: Instant,
+    /// Last activity per session (chat, speaking, joining, sharing),
+    /// for auto-AFK (spec §5).
+    last_activity: HashMap<ClientId, Instant>,
+    last_channel_sweep: Instant,
+    /// The last telemetry line per user, for the admin tooltip.
+    last_telemetry: HashMap<UserId, (WallMs, String)>,
+    /// The channel list clients see: config channels, then UI-created
+    /// ones. `channel_infos` is its wire form.
+    channel_list: Vec<ChannelSettings>,
     /// Voice-channel membership: client → channel id (index into
     /// `channel_infos`). Every admitted client has an entry.
     channel_of: HashMap<ClientId, u16>,
@@ -146,6 +221,20 @@ pub struct ChatServer {
     /// In-progress image uploads, at most one per client — a chunk
     /// with a fresh `upload_id` abandons the old partial.
     uploads: HashMap<ClientId, IncomingUpload>,
+    /// Blob uploads in flight (spec §7), announced first.
+    blob_uploads: HashMap<ClientId, IncomingUpload>,
+    announced_uploads: HashMap<ClientId, AnnouncedUpload>,
+    /// Blob bytes by hash: the only copy without persistence, a cache
+    /// of the disk with it.
+    blob_bytes: HashMap<protocol::BlobId, std::sync::Arc<Vec<u8>>>,
+    /// Disk reads in flight: who asked for which blob.
+    pending_blobs: HashMap<protocol::BlobId, (AskId, Vec<ClientId>)>,
+    /// Profile and rename rate limits (spec §7.1).
+    profile_changed_at: HashMap<UserId, Instant>,
+    renamed_at: HashMap<ClientId, Instant>,
+    /// DMs waiting for the store, and conversation-list reads (spec §6).
+    pending_dms: HashMap<AskId, PendingDm>,
+    pending_convs: HashMap<AskId, ClientId>,
     /// In-progress log uploads, same shape.
     log_uploads: HashMap<ClientId, IncomingUpload>,
     /// When each client last completed a log upload.
@@ -181,15 +270,36 @@ impl ChatServer {
     /// [`DriverHost::driver`] around [`Self::update`].
     ///
     /// # Errors
-    /// Invalid channel or authentication configuration, or a TLS setup
+    /// Invalid channel, authentication or policy configuration, a
+    /// database that cannot be opened or migrated, or a TLS setup
     /// failure.
     pub fn new(
         config: Config,
         identity: &ServerIdentity,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         config
-            .validate_authentication()
+            .validate_policy()
             .map_err(|e| format!("invalid server.yaml: {e}"))?;
+        if config.authentication.secure || config.authentication.password.is_some() {
+            warn!(
+                "server.yaml has an `authentication:` section; since 1.1 it is ignored — \
+                 invites are the only door (see the bootstrap invite below)"
+            );
+        }
+
+        // ── Persistence and policy ──────────────────────────────────
+        // Opened (and migrated) here, before the socket binds: a broken
+        // database fails startup, never a running server.
+        let (persist, startup) = Persist::spawn(&config.persistence)?;
+        let mut policy = startup.policy;
+        let now = Instant::now();
+        let clock = Clock::system(now);
+        let bootstrap_invite = mint_bootstrap_invite(
+            &mut policy,
+            clock.wall_ms(now),
+            &config.public_endpoint(),
+            &identity.fingerprint(),
+        );
 
         // ── Voice channels ──────────────────────────────────────────
         let default_channel = config
@@ -207,19 +317,11 @@ impl ChatServer {
         );
 
         // ── Admission ───────────────────────────────────────────────
-        if config.authentication.secure {
-            info!("Secure mode: clients must present the shared password in Hello");
-        } else {
-            warn!("╔══════════════════════════════════════════════════════════════╗");
-            warn!("║ AUTHENTICATION DISABLED — running in open mode.              ║");
-            warn!("║ Anyone who can reach this UDP port can join with any name.   ║");
-            warn!("║ Set `authentication.secure: true` and a password for real    ║");
-            warn!("║ deployments. (Connections are still encrypted and pinned.)   ║");
-            warn!("╚══════════════════════════════════════════════════════════════╝");
-            if config.authentication.password.is_some() {
-                warn!("authentication.password is set but ignored while secure is false");
-            }
-        }
+        info!(
+            "Admission: device keys log in, invites are the door; {} known users, {} invites",
+            policy.users.len(),
+            policy.invites.len()
+        );
 
         // ── Transport ───────────────────────────────────────────────
         let mut budget = Budget::server();
@@ -227,18 +329,38 @@ impl ChatServer {
         budget.socket_buffer_bytes = send_buffer_target(config.network.max_clients);
         let driver = Driver::new_server(identity, config.network.max_clients, budget)?;
 
-        let now = Instant::now();
-        Ok(Self {
+        let config_channels_for_list = config.channels.clone();
+        let mut server = Self {
             config,
             driver,
             fingerprint: identity.fingerprint(),
             now,
+            clock,
+            persist,
+            policy,
+            bootstrap_invite,
+            user_of: HashMap::new(),
+            key_of: HashMap::new(),
+            pending_telemetry: HashMap::new(),
+            last_telemetry_flush: now,
             pending: HashMap::new(),
             admission_failures: HashMap::new(),
             usernames: HashMap::new(),
             features_of: HashMap::new(),
             audio_states: HashMap::new(),
             deafened: HashSet::new(),
+            muted: HashSet::new(),
+            last_restriction_sweep: now,
+            recent: startup.recent.into_iter().collect(),
+            chat_tokens: HashMap::new(),
+            pending_history: HashMap::new(),
+            progress: HashMap::new(),
+            spoke: HashSet::new(),
+            last_progress_minute: now,
+            last_activity: HashMap::new(),
+            last_channel_sweep: now,
+            last_telemetry: HashMap::new(),
+            channel_list: config_channels_for_list,
             channel_of: HashMap::new(),
             channel_infos,
             default_channel,
@@ -247,10 +369,18 @@ impl ChatServer {
             last_config_check: now,
             image_bytes: HashMap::new(),
             uploads: HashMap::new(),
+            blob_uploads: HashMap::new(),
+            announced_uploads: HashMap::new(),
+            blob_bytes: HashMap::new(),
+            pending_blobs: HashMap::new(),
+            profile_changed_at: HashMap::new(),
+            renamed_at: HashMap::new(),
+            pending_dms: HashMap::new(),
+            pending_convs: HashMap::new(),
             log_uploads: HashMap::new(),
             last_log_upload: HashMap::new(),
             image_bytes_global: Vec::new(),
-            next_message_id: 1,
+            next_message_id: startup.next_message_id,
             link_baseline: HashMap::new(),
             last_stats: now,
             last_health: now,
@@ -260,7 +390,27 @@ impl ChatServer {
             stats: ServerStats::default(),
             voice: VoiceRelay::new(),
             video: VideoRelay::new(),
-        })
+        };
+        if let Some(code) = server.bootstrap_invite.clone()
+            && let Some(invite) = server.policy.invites.get(&code).cloned()
+        {
+            server.persist.send(Command::InsertInvite { code, invite });
+        }
+        // UI-created channels from the store join the list.
+        server.rebuild_channel_list()?;
+        if !server.policy.channels.is_empty() {
+            info!(
+                "UI channels: {}",
+                server
+                    .policy
+                    .channels
+                    .iter()
+                    .map(|c| c.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        Ok(server)
     }
 
     /// The identity clients pin.
@@ -276,6 +426,268 @@ impl ChatServer {
         self.driver.budget()
     }
 
+    /// The persistence handle — for the stats line and for tests that
+    /// stage a stalled disk.
+    #[must_use]
+    pub fn persistence(&self) -> &Persist {
+        &self.persist
+    }
+
+    /// The in-memory policy (users, keys, roles, invites, restrictions).
+    #[must_use]
+    pub fn policy(&self) -> &Policy {
+        &self.policy
+    }
+
+    /// The one-shot admin code printed at startup, while it exists.
+    #[must_use]
+    pub fn bootstrap_invite(&self) -> Option<&str> {
+        self.bootstrap_invite.as_deref()
+    }
+
+    /// The user a session is logged in as.
+    #[must_use]
+    pub fn user_of(&self, client: ClientId) -> Option<UserId> {
+        self.user_of.get(&client).copied()
+    }
+
+    /// The voice channel a session is in.
+    #[must_use]
+    pub fn channel_of(&self, client: ClientId) -> Option<u16> {
+        self.channel_of.get(&client).copied()
+    }
+
+    /// How many sessions are sharing their screen right now.
+    #[must_use]
+    pub fn video_sharer_count(&self) -> usize {
+        self.video.sharer_count()
+    }
+
+    /// Mint an invite (spec §3.1). One implementation behind the
+    /// bootstrap code, `ClientMessage::CreateInvite`, and the tests.
+    /// The caller has already decided the actor may grant `role`.
+    ///
+    /// # Errors
+    /// `role` does not exist, or is the admin role (admin codes come
+    /// from the CLI only).
+    pub fn mint_invite(
+        &mut self,
+        created_by: Option<UserId>,
+        role: RoleId,
+        ttl_ms: Option<u64>,
+        max_uses: Option<u32>,
+    ) -> Result<(String, InviteRecord), InviteDenyReason> {
+        let rank = self
+            .policy
+            .roles
+            .get(&role)
+            .map(|r| r.rank)
+            .ok_or(InviteDenyReason::RoleNotAllowed)?;
+        if rank >= RANK_ADMIN {
+            return Err(InviteDenyReason::RoleNotAllowed);
+        }
+        let now = self.wall_now();
+        let code = policy::generate_invite_code();
+        let invite = InviteRecord {
+            created_by,
+            created_at: now,
+            expires_at: ttl_ms.map(|ttl| now.saturating_add(ttl)),
+            max_uses,
+            uses: 0,
+            grants_role: role,
+            revoked_at: None,
+        };
+        self.policy.add_invite(code.clone(), invite.clone());
+        self.persist.send(Command::InsertInvite {
+            code: code.clone(),
+            invite: invite.clone(),
+        });
+        self.audit(
+            created_by,
+            "invite.create",
+            Some(code.clone()),
+            Some(format!(
+                "role {role}, max_uses {max_uses:?}, ttl_ms {ttl_ms:?}"
+            )),
+        );
+        Ok((code, invite))
+    }
+
+    /// Add a restriction (the ban family, spec §4.1–§4.2): in memory
+    /// first, then the row. A `server` restriction on a live session
+    /// removes it at once. Returns the stored restriction (with id).
+    pub fn restrict(&mut self, restriction: Restriction, by_name: &str) -> Restriction {
+        let stored = self.policy.add_restriction(restriction);
+        self.persist
+            .send(Command::InsertRestriction(stored.clone()));
+        self.audit(
+            stored.by,
+            "restrict",
+            stored
+                .user_id
+                .map(|u| hex(&u[..8]))
+                .or_else(|| stored.key_hash.map(|k| hex(&k[..8]))),
+            Some(format!(
+                "{:?} until {:?}: {}",
+                stored.kind, stored.until, stored.reason
+            )),
+        );
+        if stored.kind == RestrictionKind::Server {
+            // An address or key match can reach people the actor never
+            // named: never the actor, never anyone at or above their
+            // rank (the rank rule, spec §8, applied to the fallout).
+            let actor_rank = stored.by.map(|a| self.policy.rank_of(&a));
+            let hit: Vec<ClientId> = self
+                .user_of
+                .iter()
+                .filter(|(client, user)| {
+                    if stored.by.as_ref() == Some(*user) {
+                        return false;
+                    }
+                    if actor_rank.is_some_and(|rank| self.policy.rank_of(user) >= rank) {
+                        return false;
+                    }
+                    let key = self.key_of.get(*client);
+                    let ip = self.driver.remote_address(**client).map(|a| a.ip());
+                    stored.user_id.as_ref() == Some(*user)
+                        || (key.is_some() && stored.key_hash.as_ref() == key)
+                        || (ip.is_some() && stored.ip == ip)
+                })
+                .map(|(client, _)| *client)
+                .collect();
+            // A `server` restriction is a ban (a kick is not a
+            // restriction at all; it forgets the keys instead).
+            let kind = RemovedKind::Banned {
+                until: stored.until,
+            };
+            for client in hit {
+                self.remove_session(client, kind.clone(), &stored.reason, by_name);
+            }
+        } else if let Some(user) = stored.user_id {
+            let msg = ServerMessage::Restricted {
+                kind: stored.kind,
+                until: stored.until,
+                reason: stored.reason.clone(),
+            };
+            for client in self.sessions_of(&user) {
+                self.send_if_roles(client, &msg);
+            }
+        }
+        self.refresh_enforcement();
+        stored
+    }
+
+    /// Stop a code from admitting anyone else (spec §3.1). Nobody who
+    /// already used it is affected.
+    pub fn revoke_invite(&mut self, code: &str, by: Option<UserId>) -> bool {
+        let now = self.wall_now();
+        if !self.policy.revoke_invite(code, now) {
+            return false;
+        }
+        self.persist.send(Command::RevokeInvite {
+            code: code.to_string(),
+            ts: now,
+        });
+        self.audit(by, "invite.revoke", Some(code.to_string()), None);
+        true
+    }
+
+    /// Unlink a device key from its user (spec §2.1). The hash stays
+    /// taken: that device is refused with `KeyRetired` until re-linked.
+    /// A session on that key is disconnected.
+    pub fn unlink_key(&mut self, key_hash: &KeyHash) -> bool {
+        let now = self.wall_now();
+        let Some(key) = self.policy.keys.get_mut(key_hash) else {
+            return false;
+        };
+        if key.retired_at.is_some() {
+            return false;
+        }
+        key.retired_at = Some(now);
+        self.persist_key(key_hash);
+        self.audit(None, "key.unlink", Some(hex(&key_hash[..8])), None);
+        let live: Vec<ClientId> = self
+            .key_of
+            .iter()
+            .filter(|(_, k)| *k == key_hash)
+            .map(|(c, _)| *c)
+            .collect();
+        for client in live {
+            self.remove_session(
+                client,
+                RemovedKind::Disconnected,
+                "this device was unlinked from your user",
+                "server",
+            );
+        }
+        true
+    }
+
+    /// Lift a restriction by id. A live session it applied to is told.
+    pub fn lift_restriction(&mut self, id: u64, by: Option<UserId>) -> bool {
+        let Some(gone) = self
+            .policy
+            .restrictions
+            .iter()
+            .find(|r| r.id == id)
+            .cloned()
+        else {
+            return false;
+        };
+        self.policy.remove_restriction(id);
+        self.persist.send(Command::DeleteRestriction { id });
+        self.audit(by, "restriction.lift", Some(id.to_string()), None);
+        if let Some(user) = gone.user_id
+            && gone.kind != RestrictionKind::Server
+        {
+            let msg = ServerMessage::RestrictionLifted { kind: gone.kind };
+            for client in self.sessions_of(&user) {
+                self.send_if_roles(client, &msg);
+            }
+        }
+        self.refresh_enforcement();
+        true
+    }
+
+    /// Wall time of the current tick.
+    fn wall_now(&self) -> WallMs {
+        self.clock.wall_ms(self.now)
+    }
+
+    fn audit(
+        &mut self,
+        actor: Option<UserId>,
+        action: &str,
+        target: Option<String>,
+        detail: Option<String>,
+    ) {
+        self.persist.send(Command::Audit(AuditRow {
+            ts: self.wall_now(),
+            actor,
+            action: action.to_string(),
+            target,
+            detail,
+        }));
+    }
+
+    /// Mutable access to the persistence handle (the CLI bridge in a
+    /// later step; tests).
+    pub fn persistence_mut(&mut self) -> &mut Persist {
+        &mut self.persist
+    }
+
+    /// Replace the wall clock. Tests pin it so timestamps, invite
+    /// expiry and restrictions are deterministic on the fake clock.
+    pub fn set_clock(&mut self, clock: Clock) {
+        self.clock = clock;
+    }
+
+    /// The wall clock in force.
+    #[must_use]
+    pub fn clock(&self) -> Clock {
+        self.clock
+    }
+
     /// Drive one tick: transport timers, admission, control messages,
     /// media relay, periodic reports.
     pub fn update(&mut self, now: Instant) {
@@ -285,14 +697,30 @@ impl ChatServer {
         self.process_events();
         self.process_control_messages();
         self.expire_pending();
+        self.poll_persistence();
+        if now.duration_since(self.last_restriction_sweep) >= Duration::from_secs(1) {
+            self.last_restriction_sweep = now;
+            self.sweep_restrictions();
+        }
+        if now.duration_since(self.last_progress_minute) >= Duration::from_secs(60) {
+            self.last_progress_minute = now;
+            self.flush_progress();
+        }
+        if now.duration_since(self.last_channel_sweep) >= Duration::from_secs(30) {
+            self.last_channel_sweep = now;
+            self.sweep_channels();
+        }
 
         let clients = self.clients();
         let media_before = self.media_packet_count();
+        let afk = self.afk_channel();
         self.voice.process(
             &mut self.driver,
             now,
             &clients,
             &self.deafened,
+            &self.muted,
+            afk,
             &self.channel_of,
         );
         self.video.process(&mut self.driver, now, &clients);
@@ -310,6 +738,11 @@ impl ChatServer {
         if now.duration_since(self.last_voice_report) >= VOICE_REPORT_INTERVAL {
             self.send_voice_reports();
             self.last_voice_report = now;
+        }
+
+        if now.duration_since(self.last_telemetry_flush) >= TELEMETRY_FLUSH_INTERVAL {
+            self.flush_telemetry();
+            self.last_telemetry_flush = now;
         }
 
         if now.duration_since(self.last_config_check) >= CONFIG_CHECK_INTERVAL {
@@ -364,10 +797,13 @@ impl ChatServer {
         for peer in self.driver.peers() {
             self.driver.close(now, peer, reason);
         }
+        self.flush_telemetry();
+        self.persist.shutdown();
     }
 
     /// Admitted clients, in no particular order.
-    fn clients(&self) -> Vec<ClientId> {
+    #[must_use]
+    pub fn clients(&self) -> Vec<ClientId> {
         self.usernames.keys().copied().collect()
     }
 
@@ -429,12 +865,20 @@ impl ChatServer {
 
     // ── Admission ───────────────────────────────────────────────────
 
-    /// Handle the first Control frame of a pending connection.
+    /// Handle the first Control frame of a pending connection: the
+    /// admission decision (spec §3.2–§3.3). In order: the failure rate
+    /// limit; the 1.0 password variant (refused as `BadHello`, which a
+    /// 1.0 client renders as "update baucord"); a valid key proof;
+    /// bans; who the key is (a known key logs in, a first visit needs
+    /// a code); the name rules; the room cap; then the user's own older
+    /// session, if any, yields to this one.
+    #[allow(clippy::too_many_lines)]
     fn handle_hello(&mut self, peer: ClientId, raw: &[u8]) {
         let Some(pending) = self.pending.remove(&peer) else {
             return;
         };
-        let ip = pending.remote.ip();
+        let remote = pending.remote;
+        let ip = remote.ip();
         self.stats.bytes_received += raw.len() as u64;
 
         let Some(ClientMessage::Hello {
@@ -445,10 +889,7 @@ impl ChatServer {
             client_version,
         }) = protocol::decode_client_message(raw)
         else {
-            warn!(
-                "connection {peer:#x} from {}: first message was not Hello",
-                pending.remote
-            );
+            warn!("connection {peer:#x} from {remote}: first message was not Hello");
             self.refuse(peer, ip, RefusedReason::BadHello, false);
             return;
         };
@@ -459,31 +900,51 @@ impl ChatServer {
             return;
         }
 
-        if self.config.authentication.secure {
-            let expected = self
-                .config
-                .authentication
-                .password
-                .as_deref()
-                .unwrap_or_default();
-            let Auth::Shared { password } = &auth;
-            let ok = password.as_deref().is_some_and(|given| {
-                given.len() == expected.len()
-                    && bool::from(given.as_bytes().ct_eq(expected.as_bytes()))
-            });
-            if !ok {
-                warn!(
-                    "connection {peer:#x} from {}: wrong password",
-                    pending.remote
+        let invite_code = match auth {
+            Auth::Shared { .. } => {
+                info!(
+                    "connection {peer:#x} from {remote}: 1.0 client ({client_version}) sent the \
+                     password variant; refused — it will show \"update baucord\""
                 );
-                self.refuse(peer, ip, RefusedReason::WrongPassword, true);
+                self.refuse(peer, ip, RefusedReason::BadHello, false);
                 return;
             }
-        }
+            Auth::Key => None,
+            Auth::Invite { code } => Some(code),
+        };
 
-        if self.usernames.len() >= self.config.network.max_clients {
-            info!("connection {peer:#x} from {}: server full", pending.remote);
-            self.refuse(peer, ip, RefusedReason::ServerFull, false);
+        // The device key is the identity (spec §3): no proof, no admission.
+        let Some(key_hash) = client_key
+            .as_ref()
+            .and_then(|proof| self.verify_client_key(peer, proof))
+        else {
+            warn!("connection {peer:#x} from {remote}: no valid client key proof");
+            self.refuse(peer, ip, RefusedReason::BadHello, false);
+            return;
+        };
+
+        let now = self.wall_now();
+        let lookup = self.policy.resolve_key(&key_hash);
+        let known_user = match lookup {
+            KeyLookup::User(user) => Some(user),
+            KeyLookup::Unknown | KeyLookup::Retired => None,
+        };
+
+        // Bans before anything else (spec §3.2): by user, key or address.
+        if let Some(ban) = self
+            .policy
+            .server_ban(known_user.as_ref(), &key_hash, ip, now)
+        {
+            let reason = RefusedReason::Banned {
+                until: ban.until,
+                reason: ban.reason.clone(),
+            };
+            info!(
+                "connection {peer:#x} from {remote}: banned ({}), key {}",
+                ban.reason,
+                hex(&key_hash[..8])
+            );
+            self.refuse(peer, ip, reason, false);
             return;
         }
 
@@ -492,49 +953,247 @@ impl ChatServer {
             username = format!("User{peer:x}");
         }
 
-        if let Some(proof) = client_key {
-            self.note_client_key(peer, &username, &proof);
+        // Who is this? A known key is the login — a code it sends anyway
+        // is ignored and no use is burned. A first visit needs a code.
+        let (user_id, admitted_with) = match lookup {
+            KeyLookup::User(user_id) => (user_id, None),
+            KeyLookup::Retired => {
+                info!(
+                    "connection {peer:#x} from {remote}: retired key {}; needs a re-link",
+                    hex(&key_hash[..8])
+                );
+                self.refuse(
+                    peer,
+                    ip,
+                    RefusedReason::NeedInvite {
+                        why: NeedInviteReason::KeyRetired,
+                    },
+                    false,
+                );
+                return;
+            }
+            KeyLookup::Unknown => {
+                let Some(raw_code) = invite_code else {
+                    info!(
+                        "connection {peer:#x} from {remote}: unknown key {} and no invite",
+                        hex(&key_hash[..8])
+                    );
+                    self.refuse(
+                        peer,
+                        ip,
+                        RefusedReason::NeedInvite {
+                            why: NeedInviteReason::UnknownKey,
+                        },
+                        false,
+                    );
+                    return;
+                };
+                let checked = policy::normalize_invite_code(&raw_code)
+                    .ok_or(InviteInvalidReason::Unknown)
+                    .and_then(|code| self.policy.check_invite(&code, now).map(|_| code));
+                match checked {
+                    Ok(code) => (key_hash, Some(code)),
+                    Err(why) => {
+                        warn!("connection {peer:#x} from {remote}: invite refused ({why:?})");
+                        self.refuse(peer, ip, RefusedReason::InviteInvalid { why }, true);
+                        return;
+                    }
+                }
+            }
+        };
+
+        // This user's own live sessions (auto-reconnect after a blackout
+        // makes this routine): they never count against the name or the
+        // room cap, and they yield below.
+        let own_sessions: Vec<ClientId> = self
+            .user_of
+            .iter()
+            .filter(|(_, user)| **user == user_id)
+            .map(|(client, _)| *client)
+            .collect();
+
+        // Names (spec §10): unique among the users online; and a guest
+        // cannot take a member's name while that member is offline.
+        let arriving_rank = match &admitted_with {
+            Some(code) => self
+                .policy
+                .invites
+                .get(code)
+                .and_then(|i| self.policy.roles.get(&i.grants_role))
+                .map_or(RANK_GUEST, |r| r.rank),
+            None => self.policy.rank_of(&user_id),
+        };
+        let taken_online = self.usernames.iter().any(|(client, name)| {
+            !own_sessions.contains(client) && name.eq_ignore_ascii_case(&username)
+        });
+        if taken_online
+            || (arriving_rank == RANK_GUEST && self.policy.name_held_by_member(&username, &user_id))
+        {
+            info!("connection {peer:#x} from {remote}: name '{username}' is in use");
+            self.refuse(peer, ip, RefusedReason::NameInUse, false);
+            return;
         }
 
-        let negotiated = features::negotiate(features::SERVER_1_0, client_features);
+        if self.usernames.len().saturating_sub(own_sessions.len())
+            >= self.config.network.max_clients
+        {
+            info!("connection {peer:#x} from {remote}: server full");
+            self.refuse(peer, ip, RefusedReason::ServerFull, false);
+            return;
+        }
+
+        for old in own_sessions {
+            info!("{username} ({old:#x}) replaced by a newer connection ({peer:#x})");
+            self.remove_session(
+                old,
+                RemovedKind::Replaced,
+                "signed in from a newer connection",
+                "server",
+            );
+        }
+
+        // Create the user on a first visit; refresh the name of record
+        // and last-seen otherwise. In memory first, then the rows.
+        if let Some(code) = &admitted_with {
+            let role = self
+                .policy
+                .invites
+                .get(code)
+                .map_or(policy::default_invite_role(), |i| i.grants_role);
+            self.policy
+                .create_user(user_id, &username, now, Some(code.clone()));
+            self.policy.link_key(key_hash, user_id, now);
+            self.policy.grant_role(&user_id, role);
+            self.policy.use_invite(code);
+            self.persist_user(&user_id);
+            self.persist_key(&key_hash);
+            self.persist.send(Command::GrantRole {
+                user_id,
+                role_id: role,
+                granted_by: self.policy.invites.get(code).and_then(|i| i.created_by),
+                ts: now,
+            });
+            self.persist.send(Command::UseInvite { code: code.clone() });
+            self.audit(
+                Some(user_id),
+                "user.join",
+                Some(hex(&user_id[..8])),
+                Some(format!("invite {code}, role {role}")),
+            );
+            let role_name = self
+                .policy
+                .roles
+                .get(&role)
+                .map_or("?", |r| r.name.as_str());
+            if self.bootstrap_invite.as_deref() == Some(code.as_str()) {
+                self.bootstrap_invite = None;
+                warn!("Bootstrap invite redeemed: {username} is now admin");
+            }
+            info!(
+                "{username} ({peer:#x}) joined with invite {code} as {role_name}; user id {}",
+                hex(&user_id[..8])
+            );
+        } else {
+            self.policy.touch(&user_id, &key_hash, &username, now);
+            self.persist_user(&user_id);
+            self.persist_key(&key_hash);
+        }
+
+        let negotiated = features::negotiate(features::SERVER_1_1, client_features);
         self.features_of.insert(peer, negotiated);
+        self.user_of.insert(peer, user_id);
+        self.key_of.insert(peer, key_hash);
         self.stats.admitted += 1;
         info!(
-            "{username} ({peer:#x}) admitted from {} (client {client_version}, features {negotiated:#x})",
-            pending.remote
+            "{username} ({peer:#x}) admitted from {remote} (client {client_version}, features \
+             {negotiated:#x}, user id {})",
+            hex(&user_id[..8])
         );
 
         self.send_msg(
             peer,
             &ServerMessage::Welcome {
                 client_id: peer,
-                user_id: None,
-                features: features::SERVER_1_0,
+                user_id: Some(user_id),
+                features: features::SERVER_1_1,
             },
         );
+        if negotiated & features::INVITES != 0 {
+            self.send_msg(
+                peer,
+                &ServerMessage::Session {
+                    user_id,
+                    permissions: self.effective_permissions(&user_id),
+                    persistent: self.persist.is_persistent(),
+                },
+            );
+        }
         self.handle_client_connected(peer, username);
     }
 
-    /// Verify a client identity proof and log the derived user id. A
-    /// 1.0 server only logs; nothing is stored or honored yet.
-    fn note_client_key(&self, peer: ClientId, username: &str, proof: &ClientKeyProof) {
+    /// Verify a client identity proof against this connection's TLS
+    /// exporter and return the key hash (spec §2.1).
+    fn verify_client_key(&self, peer: ClientId, proof: &ClientKeyProof) -> Option<KeyHash> {
         let mut exported = [0u8; CLIENT_AUTH_EXPORTER_BYTES];
-        if self
-            .driver
-            .export_keying_material(peer, CLIENT_AUTH_EXPORTER_LABEL, b"", &mut exported)
-            .is_none()
-        {
+        self.driver
+            .export_keying_material(peer, CLIENT_AUTH_EXPORTER_LABEL, b"", &mut exported)?;
+        if verify_ed25519(&proof.public_key, &exported, &proof.signature) {
+            Some(Sha256::digest(proof.public_key).into())
+        } else {
+            warn!("connection {peer:#x} sent a client key proof that does not verify");
+            None
+        }
+    }
+
+    /// Queue the current user row for the store.
+    fn persist_user(&mut self, user_id: &UserId) {
+        if let Some(user) = self.policy.users.get(user_id).cloned() {
+            self.persist.send(Command::UpsertUser {
+                user_id: *user_id,
+                user,
+            });
+        }
+    }
+
+    /// Queue the current key row for the store.
+    fn persist_key(&mut self, key_hash: &KeyHash) {
+        if let Some(key) = self.policy.keys.get(key_hash).cloned() {
+            self.persist.send(Command::UpsertKey {
+                key_hash: *key_hash,
+                key,
+            });
+        }
+    }
+
+    /// End a session by the server's decision (spec §4.1): tell the
+    /// client why, close 300 ms later so the message lands, and take
+    /// the session out of the rosters now. The transport's later
+    /// `Disconnected` event finds nothing left to do.
+    fn remove_session(&mut self, client: ClientId, kind: RemovedKind, reason: &str, by: &str) {
+        if !self.usernames.contains_key(&client) {
             return;
         }
-        if verify_ed25519(&proof.public_key, &exported, &proof.signature) {
-            let user_id: [u8; 32] = Sha256::digest(proof.public_key).into();
-            info!(
-                "{username} ({peer:#x}) proved client key; user id {}",
-                hex(&user_id[..8])
+        info!(
+            "{} ({client:#x}) removed ({kind:?}) by {by}: {reason}",
+            self.get_username(client)
+        );
+        if self
+            .features_of
+            .get(&client)
+            .is_some_and(|f| f & features::INVITES != 0)
+        {
+            self.send_msg(
+                client,
+                &ServerMessage::Removed {
+                    kind,
+                    reason: reason.to_string(),
+                    by: by.to_string(),
+                },
             );
-        } else {
-            warn!("{username} ({peer:#x}) sent a client key proof that does not verify");
         }
+        self.driver
+            .close_after(self.now, client, REFUSED_CLOSE_DELAY);
+        self.handle_client_disconnected(client, &DisconnectReason::LocallyClosed);
     }
 
     fn recent_failures(&mut self, ip: IpAddr) -> usize {
@@ -598,14 +1257,61 @@ impl ChatServer {
     }
 
     /// The next server-assigned chat message id and its wall-clock
-    /// timestamp (ms since the Unix epoch).
+    /// timestamp (ms since the Unix epoch). The id counter is rebased
+    /// on the database's watermark at startup, so ids stay unique
+    /// across restarts with persistence on.
     fn stamp(&mut self) -> (u64, u64) {
         let id = self.next_message_id;
         self.next_message_id += 1;
-        let ts = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
-        (id, ts)
+        (id, self.clock.wall_ms(self.now))
+    }
+
+    // ── Persistence ─────────────────────────────────────────────────
+
+    /// Collect answers and notices from the persistence thread. Reads
+    /// that outlived their deadline resolve here as timed out.
+    fn poll_persistence(&mut self) {
+        let polled = self.persist.poll(self.now);
+        for (id, outcome) in polled.answers {
+            if self.is_blob_ask(id) {
+                self.resolve_blob_answer(id, outcome);
+            } else if self.is_dm_ask(id) {
+                self.resolve_dm_answer(id, outcome);
+            } else if self.is_conversations_ask(id) {
+                self.resolve_conversations_answer(id, outcome);
+            } else {
+                self.resolve_history_answer(id, outcome);
+            }
+        }
+        for notice in polled.notices {
+            match notice {
+                Notice::Policy(policy) => {
+                    info!(
+                        "Policy reloaded from disk: {} users, {} invites, {} restrictions",
+                        policy.users.len(),
+                        policy.invites.len(),
+                        policy.restrictions.len()
+                    );
+                    self.policy = *policy;
+                    self.apply_reloaded_policy();
+                }
+            }
+        }
+    }
+
+    /// Hand the coalesced telemetry samples to the persistence thread.
+    /// A full queue gives them back; they stay pending and a newer
+    /// sample for the same user replaces them — last wins.
+    fn flush_telemetry(&mut self) {
+        if self.pending_telemetry.is_empty() {
+            return;
+        }
+        let rows: Vec<TelemetryRow> = self.pending_telemetry.drain().map(|(_, r)| r).collect();
+        if let Err(returned) = self.persist.send_telemetry(rows) {
+            for row in returned {
+                self.pending_telemetry.entry(row.user_id).or_insert(row);
+            }
+        }
     }
 
     // ── Uploads ─────────────────────────────────────────────────────
@@ -739,7 +1445,7 @@ impl ChatServer {
             return false;
         }
         let now = self.now;
-        let window = Duration::from_secs(60);
+        let window = Duration::from_mins(1);
 
         let entries = self.image_bytes.entry(client_id).or_default();
         entries.retain(|(t, _)| now.duration_since(*t) < window);
@@ -915,6 +1621,33 @@ impl ChatServer {
             );
         }
 
+        self.last_activity.insert(client_id, self.now);
+        self.send_channel_details(client_id);
+        self.replay_history(client_id);
+        self.send_conversations(client_id);
+
+        // Who everyone is, for clients that render roles (spec §8):
+        // the whole roster to the newcomer, the newcomer to everyone.
+        let details: Vec<ServerMessage> = self
+            .user_of
+            .iter()
+            .filter(|(c, _)| **c != client_id)
+            .map(|(c, u)| self.user_details(*c, u))
+            .collect();
+        for msg in details {
+            self.send_if_roles(client_id, &msg);
+        }
+        // Everyone's look, ours included (the server's copy is the
+        // one that follows the key), for sessions that render it.
+        let profiles: Vec<ServerMessage> = self
+            .user_of
+            .iter()
+            .map(|(c, u)| self.user_profile(*c, u))
+            .collect();
+        for msg in profiles {
+            self.send_if_profiles(client_id, &msg);
+        }
+
         self.broadcast_msg_except(
             client_id,
             &ServerMessage::UserJoined {
@@ -923,6 +1656,17 @@ impl ChatServer {
                 channel_id: self.default_channel,
             },
         );
+        if let Some(user_id) = self.user_of.get(&client_id).copied() {
+            let msg = self.user_details(client_id, &user_id);
+            for peer in self.clients() {
+                self.send_if_roles(peer, &msg);
+            }
+            let msg = self.user_profile(client_id, &user_id);
+            for peer in self.clients() {
+                self.send_if_profiles(peer, &msg);
+            }
+        }
+        self.refresh_enforcement();
     }
 
     fn handle_client_disconnected(&mut self, client_id: ClientId, reason: &DisconnectReason) {
@@ -931,6 +1675,26 @@ impl ChatServer {
             .remove(&client_id)
             .unwrap_or_else(|| format!("User{client_id:x}"));
         self.features_of.remove(&client_id);
+        self.chat_tokens.remove(&client_id);
+        self.last_activity.remove(&client_id);
+        self.spoke.remove(&client_id);
+        self.blob_uploads.remove(&client_id);
+        self.announced_uploads.remove(&client_id);
+        self.renamed_at.remove(&client_id);
+        if let Some(user_id) = self.user_of.remove(&client_id) {
+            let key_hash = self.key_of.remove(&client_id);
+            let now = self.wall_now();
+            if let Some(u) = self.policy.users.get_mut(&user_id) {
+                u.last_seen = now;
+            }
+            if let Some(k) = key_hash.and_then(|k| self.policy.keys.get_mut(&k)) {
+                k.last_seen = now;
+            }
+            self.persist_user(&user_id);
+            if let Some(key_hash) = key_hash {
+                self.persist_key(&key_hash);
+            }
+        }
         self.audio_states.remove(&client_id);
         self.deafened.remove(&client_id);
         self.channel_of.remove(&client_id);
@@ -1003,18 +1767,92 @@ impl ChatServer {
                 debug!("{client_id:#x} sent a second Hello; ignored");
             }
             ClientMessage::Chat(text) => {
+                if !self.allowed(
+                    client_id,
+                    permissions::TEXT_GENERAL,
+                    RestrictionKind::GeneralText,
+                ) {
+                    return;
+                }
+                if !self.chat_allowed_by_rate(client_id) {
+                    return;
+                }
                 let text =
                     protocol::truncate_on_char_boundary(&text, self.config.limits.max_chat_bytes);
                 let username = self.get_username(client_id);
                 info!("[{username}]: {text}");
                 self.stats.messages_count += 1;
+                self.note_activity(client_id);
                 let (id, ts) = self.stamp();
                 self.broadcast_msg(&ServerMessage::Chat(ChatMessage {
                     id,
                     ts,
                     client_id,
-                    text,
+                    text: text.clone(),
                 }));
+                // Delivery never waits for the disk: broadcast first,
+                // then enqueue the insert. Under backpressure this is a
+                // hole in history, never a lost message.
+                if let Some(user_id) = self.user_of.get(&client_id).copied() {
+                    let row = MessageRow {
+                        msg_id: id,
+                        conv_id: GENERAL_CONV,
+                        ts,
+                        user_id,
+                        body: text,
+                        name: username,
+                        edited: false,
+                    };
+                    self.remember_message(&row);
+                    self.persist.send(Command::InsertMessage(row));
+                    self.progress.entry(user_id).or_default().messages += 1;
+                }
+            }
+            ClientMessage::FetchHistory {
+                conv,
+                before,
+                limit,
+            } => self.handle_fetch_history(client_id, conv, before, limit),
+            ClientMessage::EditMessage { msg_id, text } => {
+                self.handle_edit_message(client_id, msg_id, text);
+            }
+            ClientMessage::DeleteMessage { msg_id } => {
+                self.handle_delete_message(client_id, msg_id, false);
+            }
+            ClientMessage::CreateChannel(spec) => self.handle_create_channel(client_id, spec),
+            ClientMessage::EditChannel { channel_id, spec } => {
+                self.handle_edit_channel(client_id, channel_id, spec);
+            }
+            ClientMessage::DeleteChannel { channel_id } => {
+                self.handle_delete_channel(client_id, channel_id);
+            }
+            ClientMessage::ChannelKick {
+                channel_id,
+                user_id,
+            } => self.handle_channel_kick(client_id, channel_id, user_id),
+            ClientMessage::SetProfile(profile) => self.handle_set_profile(client_id, profile),
+            ClientMessage::SetNickname { name } => self.handle_set_nickname(client_id, &name),
+            ClientMessage::UploadBegin {
+                upload_id,
+                name,
+                mime,
+                size,
+                sha256,
+            } => self.handle_upload_begin(client_id, upload_id, name, mime, size, sha256),
+            ClientMessage::UploadChunk {
+                upload_id,
+                index,
+                count,
+                data,
+            } => self.handle_upload_chunk(client_id, upload_id, index, count, data),
+            ClientMessage::FetchBlob { blob_id } => self.handle_fetch_blob(client_id, blob_id),
+            ClientMessage::DirectMessage {
+                to,
+                text,
+                client_ref,
+            } => self.handle_direct_message(client_id, to, text, client_ref),
+            ClientMessage::MarkRead { conv, msg_id } => {
+                self.handle_mark_read(client_id, conv, msg_id);
             }
             ClientMessage::ChatImageChunk {
                 upload_id,
@@ -1022,9 +1860,32 @@ impl ChatServer {
                 count,
                 data,
             } => {
+                // An image is a chat message too: a text mute silences
+                // it and it spends a rate-limit token, on top of needing
+                // `UPLOAD`. Told once per upload (on its first chunk),
+                // then the rest of it is dropped quietly.
+                let permitted = if index == 0 {
+                    self.allowed(client_id, permissions::UPLOAD, RestrictionKind::Upload)
+                        && self.allowed(
+                            client_id,
+                            permissions::TEXT_GENERAL,
+                            RestrictionKind::GeneralText,
+                        )
+                        && self.chat_allowed_by_rate(client_id)
+                } else {
+                    self.has_permission(client_id, permissions::UPLOAD)
+                        && self.has_permission(client_id, permissions::TEXT_GENERAL)
+                };
+                if !permitted {
+                    return;
+                }
                 self.handle_image_chunk(client_id, upload_id, index, count, data);
             }
             ClientMessage::Speaking(is_speaking) => {
+                if is_speaking {
+                    self.note_activity(client_id);
+                    self.spoke.insert(client_id);
+                }
                 // Broadcast to everyone including the sender: the UI
                 // treats the echo as authoritative for its own tile.
                 self.broadcast_msg(&ServerMessage::Speaking {
@@ -1055,6 +1916,7 @@ impl ChatServer {
                 height,
                 scope,
             } => {
+                self.note_activity(client_id);
                 self.handle_share_start(client_id, width, height, scope);
             }
             ClientMessage::ScreenShareStop => {
@@ -1065,6 +1927,7 @@ impl ChatServer {
                 self.broadcast_msg(&ServerMessage::ScreenShareStopped { client_id });
             }
             ClientMessage::SubscribeScreen { target_id } => {
+                self.note_activity(client_id);
                 self.handle_subscribe(client_id, target_id);
             }
             ClientMessage::UnsubscribeScreen { target_id } => {
@@ -1088,26 +1951,124 @@ impl ChatServer {
                 channel_id,
                 password,
             } => {
+                self.note_activity(client_id);
                 self.handle_join_channel(client_id, channel_id, password.as_deref());
+            }
+
+            // ── Invites (spec §3.1) ─────────────────────────────────
+            ClientMessage::CreateInvite {
+                grants_role,
+                expires_secs,
+                max_uses,
+            } => {
+                let Some(user_id) = self.user_of.get(&client_id).copied() else {
+                    return;
+                };
+                let perms = self.effective_permissions(&user_id);
+                let role = grants_role.unwrap_or(policy::default_invite_role());
+                let manage = permissions::has(perms, permissions::MANAGE_INVITES);
+                if !permissions::has(perms, permissions::CREATE_INVITES)
+                    || (role != policy::default_invite_role() && !manage)
+                {
+                    self.send_msg(
+                        client_id,
+                        &ServerMessage::InviteDenied {
+                            reason: InviteDenyReason::NoPermission,
+                        },
+                    );
+                    return;
+                }
+                // Members get the default expiry at most; admins choose.
+                let ttl = expires_secs
+                    .filter(|s| *s > 0)
+                    .map_or(DEFAULT_INVITE_TTL_MS, |s| s.saturating_mul(1000));
+                let ttl = if manage {
+                    ttl
+                } else {
+                    ttl.min(DEFAULT_INVITE_TTL_MS)
+                };
+                let answer = match self.mint_invite(Some(user_id), role, Some(ttl), max_uses) {
+                    Ok((code, invite)) => {
+                        info!(
+                            "{} ({client_id:#x}) created invite {code} (role {role})",
+                            self.get_username(client_id)
+                        );
+                        ServerMessage::InviteCreated {
+                            code,
+                            grants_role: role,
+                            expires_at: invite.expires_at,
+                            max_uses,
+                        }
+                    }
+                    Err(reason) => ServerMessage::InviteDenied { reason },
+                };
+                self.send_msg(client_id, &answer);
+            }
+
+            // ── Administration (spec §8) ────────────────────────────
+            ClientMessage::Admin {
+                request_id,
+                command,
+            } => {
+                let result = self.handle_admin(client_id, command);
+                self.send_msg(
+                    client_id,
+                    &ServerMessage::AdminResult { request_id, result },
+                );
             }
 
             // ── Telemetry ───────────────────────────────────────────
             ClientMessage::Telemetry(sample) => {
-                if self.accepts_telemetry(client_id) && self.config.logging.telemetry {
+                if !self.accepts_telemetry(client_id) {
+                    return;
+                }
+                if self.config.logging.telemetry {
                     info!(
                         "telemetry: {} ({client_id:#x}): {}",
                         self.get_username(client_id),
                         summarize_telemetry(&sample)
                     );
                 }
+                if let Some(user_id) = self.user_of.get(&client_id).copied() {
+                    let line = summarize_telemetry(&sample);
+                    self.last_telemetry
+                        .insert(user_id, (self.clock.wall_ms(self.now), line));
+                }
+                if self.persist.is_persistent()
+                    && let Some(user_id) = self.user_of.get(&client_id).copied()
+                    && let Some(key_hash) = self.key_of.get(&client_id).copied()
+                    && let Some(row) = TelemetryRow::from_sample(
+                        self.clock.wall_ms(self.now),
+                        user_id,
+                        key_hash,
+                        &sample,
+                    )
+                {
+                    self.pending_telemetry.insert(user_id, row);
+                }
             }
             ClientMessage::TelemetryEvent(event) => {
-                if self.accepts_telemetry(client_id) {
-                    info!(
-                        "telemetry event: {} ({client_id:#x}): {}",
-                        self.get_username(client_id),
-                        describe_event(&event)
-                    );
+                if !self.accepts_telemetry(client_id) {
+                    return;
+                }
+                info!(
+                    "telemetry event: {} ({client_id:#x}): {}",
+                    self.get_username(client_id),
+                    describe_event(&event)
+                );
+                if self.persist.is_persistent()
+                    && let Some(user_id) = self.user_of.get(&client_id).copied()
+                    && let Some(key_hash) = self.key_of.get(&client_id).copied()
+                    && let Some(encoded) = protocol::encode_telemetry_event(&event)
+                {
+                    self.persist
+                        .send(Command::TelemetryEvent(TelemetryEventRow {
+                            ts: self.clock.wall_ms(self.now),
+                            user_id,
+                            key_hash,
+                            kind: event_kind(&event).to_string(),
+                            event: encoded,
+                        }));
                 }
             }
             ClientMessage::LogUploadChunk {
@@ -1147,10 +2108,22 @@ impl ChatServer {
             return;
         }
 
+        if !self.allowed(client_id, permissions::SHARE, RestrictionKind::Share) {
+            self.send_msg(
+                client_id,
+                &ServerMessage::ShareDenied {
+                    reason: DenyReason::NotPermitted,
+                },
+            );
+            return;
+        }
+
         // Admission control: cap concurrent shares. Re-announcing an
-        // existing share (e.g. quality change) is always allowed.
+        // existing share (e.g. quality change) is always allowed;
+        // `BYPASS_LIMITS` ignores the cap.
         if !self.video.is_sharing(client_id)
             && self.video.sharer_count() >= self.config.limits.max_sharers
+            && !self.has_permission(client_id, permissions::BYPASS_LIMITS)
         {
             info!(
                 "Share denied for {client_id:#x}: {} of {} share slots in use",
@@ -1287,6 +2260,21 @@ impl ChatServer {
     /// # Errors
     /// The list failed validation; nothing was changed.
     pub fn apply_channel_config(&mut self, channels: Vec<ChannelSettings>) -> Result<(), String> {
+        validate_channel_list(&channels)?;
+        let previous = std::mem::replace(&mut self.config.channels, channels);
+        if let Err(e) = self.rebuild_channel_list() {
+            self.config.channels = previous;
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// The renumbering itself, for the full list (config channels then
+    /// UI ones); see `apply_channel_config` for the semantics.
+    pub(crate) fn apply_channel_list(
+        &mut self,
+        channels: Vec<ChannelSettings>,
+    ) -> Result<(), String> {
         let new_default = validate_channel_list(&channels)?;
 
         #[allow(clippy::cast_possible_truncation)] // validated ≤ MAX_CHANNELS
@@ -1322,8 +2310,8 @@ impl ChatServer {
             })
             .collect();
 
-        self.config.channels = channels;
-        self.channel_infos = self.config.channel_infos();
+        self.channel_list = channels;
+        self.channel_infos = channel_infos_of(&self.channel_list);
         self.default_channel = new_default;
         self.channel_of = new_channel_of;
 
@@ -1400,13 +2388,19 @@ impl ChatServer {
         channel_id: u16,
         password: Option<&str>,
     ) {
-        let Some(target) = self.config.channels.get(usize::from(channel_id)) else {
+        let Some(target) = self.channel_list.get(usize::from(channel_id)).cloned() else {
             self.deny_join(client_id, channel_id, ChannelDenyReason::NoSuchChannel);
             return;
         };
         let old_channel = self.channel_of.get(&client_id).copied();
         if old_channel == Some(channel_id) {
             return; // already there — nothing to do
+        }
+        if !self.has_permission(client_id, permissions::JOIN_CHANNELS)
+            || !self.join_gate_allows(client_id, channel_id)
+        {
+            self.deny_join(client_id, channel_id, ChannelDenyReason::NotPermitted);
+            return;
         }
         if let Some(expected) = target.password.as_deref()
             && password != Some(expected)
@@ -1426,10 +2420,22 @@ impl ChatServer {
             return;
         }
 
+        self.place_in_channel(client_id, channel_id);
+    }
+
+    /// Move a session to `channel_id` with no checks: the join path
+    /// has done them, an admin `MoveUser` bypasses them.
+    pub(crate) fn place_in_channel(&mut self, client_id: ClientId, channel_id: u16) {
+        let old_channel = self.channel_of.get(&client_id).copied();
+        if old_channel == Some(channel_id) {
+            return;
+        }
         info!(
             "{} moved to channel '{}'",
             self.get_username(client_id),
-            target.name,
+            self.channel_infos
+                .get(usize::from(channel_id))
+                .map_or("?", |c| c.name.as_str()),
         );
         self.channel_of.insert(client_id, channel_id);
         self.broadcast_msg(&ServerMessage::UserMovedChannel {
@@ -1592,6 +2598,7 @@ impl ChatServer {
         // that actually protects the uplink.
         if !self.video.is_subscribed(client_id, target_id)
             && self.video.viewer_count(target_id) >= self.config.limits.max_viewers_per_stream
+            && !self.has_permission(client_id, permissions::BYPASS_LIMITS)
         {
             info!(
                 "Subscribe denied for {client_id:#x} → {target_id:#x}: viewer limit {} reached",
@@ -1752,6 +2759,7 @@ impl ChatServer {
             self.driver.refused_count(),
         );
         info!("Text messages: {}", self.stats.messages_count);
+        info!("{}", self.persist.stats());
 
         self.voice.print_stats();
         self.video.print_stats();
@@ -1919,6 +2927,20 @@ fn summarize_telemetry(s: &TelemetrySample) -> String {
     out
 }
 
+/// Short stable name of an event, for the `kind` column.
+fn event_kind(e: &TelemetryEvent) -> &'static str {
+    match e {
+        TelemetryEvent::RateRungChanged { .. } => "rate_rung_changed",
+        TelemetryEvent::IdentityPromptShown => "identity_prompt_shown",
+        TelemetryEvent::DeviceChanged { .. } => "device_changed",
+        TelemetryEvent::InputDiscontinuityBurst { .. } => "input_discontinuity_burst",
+        TelemetryEvent::SendBufferPressure => "send_buffer_pressure",
+        TelemetryEvent::ShareStarted { .. } => "share_started",
+        TelemetryEvent::ShareStopped => "share_stopped",
+        TelemetryEvent::Disconnected { .. } => "disconnected",
+    }
+}
+
 fn describe_event(e: &TelemetryEvent) -> String {
     match e {
         TelemetryEvent::RateRungChanged {
@@ -1942,6 +2964,39 @@ fn describe_event(e: &TelemetryEvent) -> String {
         TelemetryEvent::ShareStopped => "share stopped".to_string(),
         TelemetryEvent::Disconnected { reason } => format!("disconnected: {reason}"),
     }
+}
+
+/// Nobody is admin — always with persistence off, only on an empty
+/// database with it on — so mint a one-shot admin code and print it
+/// (spec §1.1). Whoever runs the server has the log; nobody else does.
+fn mint_bootstrap_invite(
+    policy: &mut Policy,
+    now: WallMs,
+    endpoint: &str,
+    fingerprint: &Fingerprint,
+) -> Option<String> {
+    if policy.has_admin() {
+        return None;
+    }
+    let code = policy::generate_invite_code();
+    policy.add_invite(
+        code.clone(),
+        InviteRecord {
+            created_by: None,
+            created_at: now,
+            expires_at: Some(now + BOOTSTRAP_INVITE_TTL_MS),
+            max_uses: Some(1),
+            uses: 0,
+            grants_role: ROLE_ADMIN,
+            revoked_at: None,
+        },
+    );
+    warn!(
+        "No admin yet. Bootstrap invite (admin, 1 use, 1 h): code {} for {endpoint} \
+         (identity {fingerprint})",
+        protocol::invite::display_code(&code)
+    );
+    Some(code)
 }
 
 fn hex(bytes: &[u8]) -> String {

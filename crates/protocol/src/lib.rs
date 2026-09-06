@@ -16,10 +16,14 @@
 //!   the TLS handshake instead of misbehaving mid-session. Additive
 //!   changes ride on [`features`] bits (new messages, never new fields).
 
+pub mod admin;
 pub mod features;
 pub mod frame;
+pub mod invite;
 pub mod lanes;
 pub mod messages;
+pub mod permissions;
+pub mod progress;
 pub mod relayed;
 pub mod system_audio;
 pub mod username;
@@ -27,20 +31,28 @@ pub mod video;
 pub mod voice;
 
 // Explicit re-exports: everything a consumer needs, nothing more.
+pub use admin::{
+    AdminCommand, AdminError, AdminOutcome, AdminTarget, RestrictionKind, TelemetrySummary,
+};
 pub use bytes::Bytes;
 pub use lanes::{
     Carrier, Lane, ALPN, DATAGRAM_PAYLOAD_LIMIT, OUTDATED_MESSAGE, SYSTEM_AUDIO_DATAGRAM_BUDGET,
     VIDEO_FRAME_BUDGET, VOICE_DATAGRAM_BUDGET,
 };
 pub use messages::{
-    decode_client_message, decode_server_message, encode_client_message, encode_server_message,
-    AudioSample, Auth, ChannelDenyReason, ChannelInfo, ChatMessage, ClientId, ClientInfo,
-    ClientKeyProof, ClientMessage, DenyReason, PathSample, RefusedReason, ServerMessage,
-    ShareScope, SharingSample, TelemetryEvent, TelemetrySample, UserId, ViewingSample,
-    CLIENT_VERSION, IMAGE_CHUNK_BYTES, MAX_CHAT_IMAGE_BYTES, MAX_CONTROL_MESSAGE_BYTES,
-    MAX_IMAGE_CHUNKS, MAX_IMAGE_MESSAGE_BYTES, MAX_LOG_UPLOAD_BYTES, MAX_LOG_UPLOAD_CHUNKS,
-    MEDIA_UPLOAD_PACE,
+    decode_client_message, decode_server_message, decode_telemetry_event, decode_telemetry_sample,
+    encode_client_message, encode_server_message, encode_telemetry_event, encode_telemetry_sample,
+    AudioSample, Auth, BlobId, ChannelDenyReason, ChannelInfo, ChannelSpec, ChannelUiDenyReason,
+    ChatMessage, ClientId, ClientInfo, ClientKeyProof, ClientMessage, ConvRef, DenyReason,
+    DmFailReason, DmSummary, HistoryMessage, InviteDenyReason, InviteInvalidReason, NameStyle,
+    NeedInviteReason, PathSample, Profile, ProfileDenyReason, RefusedReason, RemovedKind,
+    RenameDenyReason, ServerMessage, ShareScope, SharingSample, TelemetryEvent, TelemetrySample,
+    UploadRejectReason, UserId, ViewingSample, CLIENT_VERSION, IMAGE_CHUNK_BYTES,
+    MAX_CHAT_IMAGE_BYTES, MAX_CONTROL_MESSAGE_BYTES, MAX_IMAGE_CHUNKS, MAX_IMAGE_MESSAGE_BYTES,
+    MAX_LOG_UPLOAD_BYTES, MAX_LOG_UPLOAD_CHUNKS, MEDIA_UPLOAD_PACE,
 };
+pub use permissions::{Rank, RoleId};
+pub use progress::level_for_xp;
 pub use relayed::{split_sender, wrap_sender, RELAY_SENDER_BYTES};
 pub use system_audio::{
     pack_system_audio, parse_system_audio, SystemAudioHeader, SYSTEM_AUDIO_HEADER_SIZE,

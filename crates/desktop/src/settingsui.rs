@@ -13,10 +13,65 @@ use ui::{KeybindRow, ServerRow, SettingsLogic, SettingsState, SettingsWindow};
 
 use crate::app::{self, AppState};
 
-/// Nav index of the Servers tab (Audio 0, General 1, Keyboard 2,
-/// Servers 3, Credits 4, About 5) — the connect view's pencil jumps
+/// Nav index of the Servers tab (Profile 0, General 1, Audio 2,
+/// Keyboard 3, Servers 4, About 5) — the connect view's pencil jumps
 /// here.
-pub const TAB_SERVERS: i32 = 3;
+pub const TAB_SERVERS: i32 = 4;
+
+/// The name-color palette (spec §7.1): sixteen colors that all pass
+/// 3:1 on the chat background (#1A1D21, measured 4.9–15.5) and none
+/// in the gold band (hue 38°–65°, saturation ≥ 0.35), which the server
+/// reserves for admins.
+pub const NAME_COLORS: [u32; 16] = [
+    0x00E0_6C75, // red
+    0x00FF_8A3D, // orange
+    0x00F4_845F, // coral
+    0x00C3_E88D, // lime
+    0x007E_D321, // green
+    0x002B_AC76, // emerald
+    0x004E_CDC4, // teal
+    0x0056_CCF2, // sky
+    0x004A_9AE0, // blue
+    0x0079_86CB, // indigo
+    0x00B3_88FF, // violet
+    0x00E0_7BE0, // orchid
+    0x00FF_80AB, // pink
+    0x00A3_B18A, // sage
+    0x00B0_BEC5, // silver
+    0x00F5_F5F5, // white
+];
+
+/// The theme's gold: on the palette only for admins, since the server
+/// refuses the band to anyone else (spec §7.1).
+pub const GOLD: u32 = 0x00E5_C158;
+
+/// The palette this session may pick from.
+fn palette(app: &AppState) -> Vec<u32> {
+    let mut colors = NAME_COLORS.to_vec();
+    if app.our_role_and_level().0 == app_core::roster::Role::Admin {
+        colors.push(GOLD);
+    }
+    colors
+}
+
+/// The "Images you send" choices: label and budget in KB; the last
+/// entry is the wire cap.
+pub const IMAGE_SIZES: [(&str, u32); 5] = [
+    ("512 KB", 512),
+    ("1 MB", 1024),
+    ("2 MB", 2048),
+    ("5 MB", 5120),
+    ("image-size-max", 10 * 1024),
+];
+
+/// The "Text size" choices: label key and the multiplier on every
+/// font token.
+pub const TEXT_SIZES: [(&str, f32); 4] = [
+    ("text-size-small", 0.9),
+    ("text-size-default", 1.0),
+    ("text-size-large", 1.15),
+    ("text-size-larger", 1.3),
+];
 
 /// `"ip:port"` → (ip, port). Splits on the *last* colon so
 /// `[::1]:5000` keeps its bracketed v6 host; no colon → all ip.
@@ -68,6 +123,77 @@ fn push_server_rows(app: &AppState) {
         .set_servers(ModelRc::new(VecModel::from(rows)));
 }
 
+/// One line under the identity buttons: what just happened.
+fn set_identity_status(app: &AppState, text: &str) {
+    if let Some(win) = &app.settings_win {
+        win.global::<SettingsState>()
+            .set_identity_status(text.into());
+    }
+}
+
+/// Load `avatar.png` into the preview, or clear it.
+pub fn refresh_avatar(app: &mut AppState) {
+    // One decode, shared by the settings preview and the rows.
+    app.reload_own_avatar();
+    app.update_user_list();
+    let Some(win) = &app.settings_win else { return };
+    let s = win.global::<SettingsState>();
+    s.set_has_avatar(app.own_avatar.is_some());
+    s.set_avatar(app.own_avatar.clone().unwrap_or_default());
+}
+
+/// "On <server>: Member · Level 3", from what the session knows.
+pub fn refresh_role_line(app: &AppState) {
+    let Some(win) = &app.settings_win else { return };
+    let s = win.global::<SettingsState>();
+    s.set_connected(app.connected);
+    let line = if app.connected {
+        let (role, level) = app.our_role_and_level();
+        let role = match role {
+            app_core::roster::Role::Guest => t!("role-guest"),
+            app_core::roster::Role::Member => t!("role-member"),
+            app_core::roster::Role::Organizer => t!("role-organizer"),
+            app_core::roster::Role::Admin => t!("role-admin"),
+            app_core::roster::Role::Unknown => "…".to_string(),
+        };
+        if level > 0 {
+            t!(
+                "profile-role-line",
+                "server" => app.server_name.as_str(),
+                "role" => role.as_str(),
+                "level" => u32::from(level)
+            )
+        } else {
+            t!(
+                "profile-role-line-no-level",
+                "server" => app.server_name.as_str(),
+                "role" => role.as_str()
+            )
+        }
+    } else {
+        t!("profile-not-connected")
+    };
+    s.set_role_line(line.into());
+}
+
+/// The identity line: this device's user id (its key's hash) and
+/// where the key file lives.
+pub fn refresh_identity(app: &AppState) {
+    let Some(win) = &app.settings_win else { return };
+    let s = win.global::<SettingsState>();
+    let id = app.client_key.as_ref().map_or_else(
+        || t!("identity-missing"),
+        |key| app::short_id(&key.user_id()),
+    );
+    s.set_identity_id(id.into());
+    s.set_identity_path(
+        client::config::client_key_path()
+            .display()
+            .to_string()
+            .into(),
+    );
+}
+
 /// Fill the editor fields from the selected entry.
 fn fill_server_editor(app: &AppState) {
     let Some(win) = &app.settings_win else { return };
@@ -77,9 +203,9 @@ fn fill_server_editor(app: &AppState) {
     s.set_server_name(entry.map_or("", |e| e.name.as_str()).into());
     s.set_server_ip(ip.into());
     s.set_server_port(port.into());
-    s.set_server_password(
+    s.set_server_invite_code(
         entry
-            .and_then(|e| e.password.as_deref())
+            .and_then(|e| e.invite_code.as_deref())
             .unwrap_or("")
             .into(),
     );
@@ -92,7 +218,7 @@ fn fill_server_editor(app: &AppState) {
 }
 
 /// Refresh the Servers tab (rows + editor) after an external change —
-/// the connect view's dropdown pick or 403 password save. No-op while
+/// the connect view's dropdown pick or an invite code used. No-op while
 /// the settings window was never created.
 pub fn refresh_servers(app: &AppState) {
     if app.settings_win.is_some() {
@@ -140,6 +266,8 @@ pub fn open(app: &mut AppState) {
             }
         };
         wire(&win);
+        win.global::<ui::Theme>()
+            .set_scale(app.settings.ui.text_scale);
         let weak = win.as_weak();
         // Never armed: this window gains focus on every (re)open, so
         // the Focused trigger suffices.
@@ -177,6 +305,93 @@ pub fn populate(app: &mut AppState) {
         .map_or(0, |i| i + 1);
     s.set_languages(ModelRc::new(VecModel::from(langs)));
     s.set_language_index(i32::try_from(lang_index).unwrap_or(0));
+    s.set_identity_status("".into());
+    s.set_identity_regenerate_armed(false);
+    refresh_identity(app);
+
+    // General: text size, sounds, where the files are.
+    let sizes: Vec<slint::SharedString> = TEXT_SIZES.iter().map(|(k, _)| t!(k).into()).collect();
+    s.set_text_sizes(ModelRc::new(VecModel::from(sizes)));
+    let size_index = TEXT_SIZES
+        .iter()
+        .position(|(_, scale)| (scale - settings.ui.text_scale).abs() < 0.01)
+        .unwrap_or(1);
+    s.set_text_size_index(i32::try_from(size_index).unwrap_or(1));
+    s.set_config_path(
+        client::config::settings_file_path()
+            .display()
+            .to_string()
+            .into(),
+    );
+    // Startup / sounds / chat.
+    s.set_auto_connect(settings.startup.auto_connect);
+    s.set_start_minimized(settings.startup.start_minimized);
+    s.set_tray_available(cfg!(feature = "tray"));
+    s.set_check_updates(settings.startup.check_updates);
+    s.set_sounds_enabled(settings.sounds.enabled);
+    s.set_join_leave_sounds(settings.sounds.join_leave);
+    s.set_mention_sound(settings.sounds.mention);
+    s.set_dm_sound(settings.sounds.direct_message);
+    s.set_show_timestamps(settings.ui.show_timestamps);
+    s.set_compact_rows(settings.ui.compact_rows);
+    let sizes: Vec<slint::SharedString> = IMAGE_SIZES
+        .iter()
+        .map(|(label, _)| {
+            if label.starts_with("image-size") {
+                t!(label).into()
+            } else {
+                (*label).into()
+            }
+        })
+        .collect();
+    s.set_image_sizes(ModelRc::new(VecModel::from(sizes)));
+    let size_index = IMAGE_SIZES
+        .iter()
+        .position(|(_, kb)| *kb >= settings.ui.image_max_kb)
+        .unwrap_or(IMAGE_SIZES.len() - 1);
+    s.set_image_size_index(i32::try_from(size_index).unwrap_or(0));
+    // Audio: transmission mode and the PTT key as bound.
+    let modes: Vec<slint::SharedString> = vec![t!("audio-vad").into(), t!("audio-ptt").into()];
+    s.set_transmission_modes(ModelRc::new(VecModel::from(modes)));
+    s.set_transmission_index(i32::from(settings.audio.push_to_talk));
+    s.set_ptt_bind(settings.bind_for(BindableAction::PushToTalk).into());
+
+    // Profile (spec §7.1): what this device keeps.
+    s.set_nickname(settings.user.nickname.as_str().into());
+    s.set_initial(app_core::roster::initial_of(&settings.user.nickname).into());
+    let palette = palette(app);
+    s.set_is_admin(palette.len() > NAME_COLORS.len());
+    let colors: Vec<slint::Color> = palette
+        .iter()
+        .map(|rgb| {
+            let [_, r, g, b] = rgb.to_be_bytes();
+            slint::Color::from_rgb_u8(r, g, b)
+        })
+        .collect();
+    s.set_name_colors(ModelRc::new(VecModel::from(colors)));
+    s.set_name_color_index(
+        settings
+            .profile
+            .name_color
+            .and_then(|c| palette.iter().position(|p| *p == c))
+            .and_then(|i| i32::try_from(i).ok())
+            .unwrap_or(-1),
+    );
+    let styles: Vec<slint::SharedString> =
+        ["name-style-normal", "name-style-bold", "name-style-italic"]
+            .iter()
+            .map(|k| t!(k).into())
+            .collect();
+    s.set_name_styles(ModelRc::new(VecModel::from(styles)));
+    s.set_name_style_index(match settings.profile.name_style {
+        client::config::NameStyle::Normal => 0,
+        client::config::NameStyle::Bold => 1,
+        client::config::NameStyle::Italic => 2,
+    });
+    // The picture was decoded at startup (and on every change).
+    s.set_has_avatar(app.own_avatar.is_some());
+    s.set_avatar(app.own_avatar.clone().unwrap_or_default());
+    refresh_role_line(app);
 
     // Servers tab: rows + editor, selection starting on the default.
     let default_pos = app
@@ -264,6 +479,144 @@ fn wire(win: &SettingsWindow) {
         });
     });
 
+    // ── Profile (spec §7.1) ──────────────────────────────────────
+    logic.on_nickname_edited(|text| {
+        app::with_current(move |app| {
+            app.settings.user.nickname = text.to_string();
+            if let Some(win) = &app.settings_win {
+                win.global::<SettingsState>()
+                    .set_initial(app_core::roster::initial_of(&text).into());
+            }
+            // The connect screen shows the same name.
+            app.main
+                .global::<ui::State>()
+                .set_nickname(text.as_str().into());
+        });
+    });
+    // Look edits apply locally at once and reach the server together
+    // on Save & close (one `SetProfile`, not one per click: the
+    // server allows one change per 30 s).
+    logic.on_name_color_selected(|index| {
+        app::with_current(move |app| {
+            let palette = palette(app);
+            app.settings.profile.name_color = usize::try_from(index)
+                .ok()
+                .and_then(|i| palette.get(i).copied());
+            app.profile_dirty = true;
+            app.update_user_list();
+        });
+    });
+    logic.on_name_style_selected(|index| {
+        app::with_current(move |app| {
+            app.settings.profile.name_style = match index {
+                1 => client::config::NameStyle::Bold,
+                2 => client::config::NameStyle::Italic,
+                _ => client::config::NameStyle::Normal,
+            };
+            app.profile_dirty = true;
+            app.update_user_list();
+        });
+    });
+    logic.on_avatar_pick(|| {
+        std::thread::spawn(|| {
+            let picked = pollster::block_on(
+                rfd::AsyncFileDialog::new()
+                    .add_filter("Images", &["png", "jpg", "jpeg", "webp"])
+                    .pick_file(),
+            );
+            let Some(handle) = picked else { return };
+            let path = handle.path().to_path_buf();
+            // Decode, crop and scale off the UI thread; only the
+            // verdict crosses back.
+            let result = std::fs::read(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| app_core::images::avatar_png(&bytes).map_err(|e| e.to_string()))
+                .and_then(|png| {
+                    std::fs::write(client::config::avatar_path(), png).map_err(|e| e.to_string())
+                });
+            let _ = slint::invoke_from_event_loop(move || {
+                app::with_current(move |app| match result {
+                    Ok(()) => {
+                        app.settings.profile.avatar = true;
+                        refresh_avatar(app);
+                        // A new picture is a new hash: uploaded on
+                        // Save & close, then the profile points at it.
+                        app.forget_avatar_blob();
+                        app.profile_dirty = true;
+                    }
+                    Err(e) => app.show_error(&t!("profile-avatar-error", "error" => e.as_str())),
+                });
+            });
+        });
+    });
+    logic.on_avatar_clear(|| {
+        app::with_current(|app| {
+            app.settings.profile.avatar = false;
+            let _ = std::fs::remove_file(client::config::avatar_path());
+            refresh_avatar(app);
+            app.forget_avatar_blob();
+            app.profile_dirty = true;
+        });
+    });
+
+    // ── General ──────────────────────────────────────────────────
+    logic.on_text_size_selected(|index| {
+        app::with_current(move |app| {
+            let scale = usize::try_from(index)
+                .ok()
+                .and_then(|i| TEXT_SIZES.get(i))
+                .map_or(1.0, |(_, scale)| *scale);
+            app.settings.ui.text_scale = scale;
+            app.apply_text_scale();
+        });
+    });
+    logic.on_sounds_enabled_changed(|on| {
+        app::with_current(move |app| app.settings.sounds.enabled = on);
+    });
+    logic.on_join_leave_sounds_changed(|on| {
+        app::with_current(move |app| app.settings.sounds.join_leave = on);
+    });
+    logic.on_mention_sound_changed(|on| {
+        app::with_current(move |app| app.settings.sounds.mention = on);
+    });
+    logic.on_dm_sound_changed(|on| {
+        app::with_current(move |app| app.settings.sounds.direct_message = on);
+    });
+    logic.on_auto_connect_changed(|on| {
+        app::with_current(move |app| app.settings.startup.auto_connect = on);
+    });
+    logic.on_start_minimized_changed(|on| {
+        app::with_current(move |app| app.settings.startup.start_minimized = on);
+    });
+    logic.on_check_updates_changed(|on| {
+        app::with_current(move |app| app.settings.startup.check_updates = on);
+    });
+    logic.on_show_timestamps_changed(|on| {
+        app::with_current(move |app| {
+            app.settings.ui.show_timestamps = on;
+            app.push_ui_prefs();
+        });
+    });
+    logic.on_compact_rows_changed(|on| {
+        app::with_current(move |app| {
+            app.settings.ui.compact_rows = on;
+            app.push_ui_prefs();
+        });
+    });
+    logic.on_image_size_selected(|index| {
+        app::with_current(move |app| {
+            if let Some((_, kb)) = usize::try_from(index).ok().and_then(|i| IMAGE_SIZES.get(i)) {
+                app.settings.ui.image_max_kb = *kb;
+            }
+        });
+    });
+    logic.on_transmission_selected(|index| {
+        app::with_current(move |app| {
+            app.settings.audio.push_to_talk = index == 1;
+            app.apply_push_to_talk();
+        });
+    });
+
     // ── Servers tab ─────────────────────────────────────────────
     logic.on_server_selected(|_index| {
         // The row click already wrote SettingsState.server-index.
@@ -299,6 +652,7 @@ fn wire(win: &SettingsWindow) {
                 name,
                 address: String::new(),
                 password: None,
+                invite_code: None,
                 fingerprint: None,
                 channel_passwords: std::collections::HashMap::new(),
             });
@@ -387,13 +741,80 @@ fn wire(win: &SettingsWindow) {
             app.settings.servers[index].fingerprint = valid.then(|| pin.to_string());
         });
     });
-    logic.on_server_password_edited(|text| {
+    logic.on_server_invite_edited(|text| {
         app::with_current(move |app| {
             let Some(index) = selected_server(app) else {
                 return;
             };
-            let trimmed = text.trim().to_string();
-            app.settings.servers[index].password = (!trimmed.is_empty()).then_some(trimmed);
+            // A code or a whole link; anything else leaves the stored
+            // code alone until the field reads as one.
+            app.settings.servers[index].set_invite_input(&text);
+        });
+    });
+
+    // ── Identity (spec §3.3) ────────────────────────────────────────
+    logic.on_identity_export(|| {
+        std::thread::spawn(|| {
+            let picked = pollster::block_on(
+                rfd::AsyncFileDialog::new()
+                    .set_file_name("baucord-identity.key")
+                    .save_file(),
+            );
+            if let Some(handle) = picked {
+                let path = handle.path().to_path_buf();
+                let _ = slint::invoke_from_event_loop(move || {
+                    app::with_current(move |app| match client::config::export_client_key(&path) {
+                        Ok(()) => set_identity_status(app, &t!("identity-exported")),
+                        Err(e) => app.show_error(&e),
+                    });
+                });
+            }
+        });
+    });
+    logic.on_identity_import(|| {
+        std::thread::spawn(|| {
+            let picked = pollster::block_on(rfd::AsyncFileDialog::new().pick_file());
+            if let Some(handle) = picked {
+                let path = handle.path().to_path_buf();
+                let _ = slint::invoke_from_event_loop(move || {
+                    app::with_current(move |app| match client::config::import_client_key(&path) {
+                        Ok(key) => {
+                            app.client_key = Some(key);
+                            set_identity_status(app, &t!("identity-imported"));
+                            refresh_identity(app);
+                        }
+                        Err(e) => app.show_error(&e),
+                    });
+                });
+            }
+        });
+    });
+    logic.on_identity_regenerate(|| {
+        app::with_current(|app| {
+            let Some(win) = &app.settings_win else { return };
+            let s = win.global::<SettingsState>();
+            // First click arms, second acts: a new key is a new user.
+            if !s.get_identity_regenerate_armed() {
+                s.set_identity_regenerate_armed(true);
+                return;
+            }
+            s.set_identity_regenerate_armed(false);
+            match client::config::regenerate_client_key() {
+                Ok(key) => {
+                    app.client_key = Some(key);
+                    set_identity_status(app, &t!("identity-regenerated"));
+                    refresh_identity(app);
+                }
+                Err(e) => app.show_error(&e),
+            }
+        });
+    });
+    logic.on_identity_regenerate_disarm(|| {
+        app::with_current(|app| {
+            if let Some(win) = &app.settings_win {
+                win.global::<SettingsState>()
+                    .set_identity_regenerate_armed(false);
+            }
         });
     });
 
@@ -680,8 +1101,12 @@ fn populate_binds_only(app: &mut AppState) {
             recording: false,
         })
         .collect();
-    win.global::<SettingsState>()
-        .set_keybinds(ModelRc::new(VecModel::from(rows)));
+    let s = win.global::<SettingsState>();
+    s.set_keybinds(ModelRc::new(VecModel::from(rows)));
+    // The Audio tab quotes the push-to-talk key, and so does the mic
+    // button's tooltip.
+    s.set_ptt_bind(app.settings.bind_for(BindableAction::PushToTalk).into());
+    app.apply_push_to_talk();
 }
 
 /// 8 Hz meter loop while the window is open (the FLTK build's
@@ -721,6 +1146,17 @@ fn close(app: &mut AppState) {
     app.settings.normalize_servers();
     app.settings.save();
     app.push_connect_servers();
+    // A new nickname while connected goes to the server, which renames
+    // us for everyone or says why not (spec §7.1); the look goes out
+    // as one change.
+    let wanted = app.settings.user.nickname.trim().to_string();
+    if !wanted.is_empty() && app.session_name().is_some_and(|current| current != wanted) {
+        app.request_rename(wanted);
+    }
+    if app.profile_dirty {
+        app.profile_dirty = false;
+        app.send_own_profile();
+    }
     if let Some(win) = &app.settings_win {
         let _ = win.hide();
     }

@@ -34,10 +34,12 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use log::{info, warn};
 use protocol::{
     features, pack_system_audio, pack_video_frame, pack_voice_with_flags, parse_system_audio,
-    parse_voice, split_sender, AudioSample, Auth, ChannelDenyReason, ChannelInfo, ClientId,
-    ClientInfo, ClientKeyProof, ClientMessage, DenyReason, Lane, PathSample, RefusedReason,
-    ServerMessage, ShareScope, SharingSample, TelemetryEvent, TelemetrySample, VideoReassembler,
-    ViewingSample, VOICE_FLAG_RED,
+    parse_voice, split_sender, AdminCommand, AdminError, AdminOutcome, AudioSample, Auth,
+    ChannelDenyReason, ChannelInfo, ChannelSpec, ChannelUiDenyReason, ClientId, ClientInfo,
+    ClientKeyProof, ClientMessage, ConvRef, DenyReason, HistoryMessage, InviteDenyReason,
+    InviteInvalidReason, Lane, NeedInviteReason, PathSample, RefusedReason, RemovedKind,
+    RestrictionKind, RoleId, ServerMessage, ShareScope, SharingSample, TelemetryEvent,
+    TelemetrySample, UserId, VideoReassembler, ViewingSample, VOICE_FLAG_RED,
 };
 use sha2::{Digest, Sha256};
 use transport::{
@@ -100,13 +102,21 @@ const LOG_UPLOAD_MIN_INTERVAL: Duration = Duration::from_secs(600);
 
 /// Why a session ended for good. The UI maps each to a sentence a
 /// person can act on; nothing here is meant to be displayed raw.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Not `Copy`: a 1.1 refusal (`Banned`) carries its reason text.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DisconnectKind {
     /// The user clicked Disconnect.
     UserRequested,
-    /// The server refused admission (wrong password is reported
-    /// separately as `AccessDenied` because it has its own prompt).
+    /// The server refused admission. The verdicts with their own
+    /// prompt (`NeedInvite`, `InviteInvalid`, `NameInUse`) are reported
+    /// as their own messages instead.
     Refused(RefusedReason),
+    /// The server ended an admitted session on purpose (spec §4.1).
+    Removed {
+        kind: RemovedKind,
+        reason: String,
+        by: String,
+    },
     /// This client is too old (or too new) for the server.
     Outdated,
     /// Could not even start: socket, TLS setup, bad address.
@@ -135,6 +145,15 @@ pub enum LossKind {
 /// The close reason the server sends when it is shutting down for a
 /// restart. Wire contract with the server binary; do not reword.
 const SERVER_RESTART_REASON: &str = "server restarting";
+
+/// The first bytes of an id, for log lines.
+fn hex_short(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    bytes.iter().take(8).fold(String::new(), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
 
 #[derive(Debug, Clone)]
 pub enum NetworkMessage {
@@ -178,10 +197,105 @@ pub enum NetworkMessage {
         kind: LossKind,
         detail: String,
     },
-    /// The server refused our `Hello` for a wrong or missing room
-    /// password. The UI prompts for it and offers to save it on the
-    /// server entry.
-    AccessDenied,
+    /// This device's key is unknown to the server (or was unlinked):
+    /// the UI shows the invite-code field. `KeyRetired` needs an admin
+    /// to re-link the key; a code will not help.
+    NeedInvite {
+        why: NeedInviteReason,
+    },
+    /// The code we sent did not admit: the UI says which and keeps the
+    /// field.
+    InviteInvalid {
+        why: InviteInvalidReason,
+    },
+    /// Someone online already has that nickname (or a member holds it
+    /// and we are a guest): pick another.
+    NameInUse,
+    /// Who we are on this server, right after `Welcome` (spec §10).
+    Session {
+        user_id: UserId,
+        /// Bitset from `protocol::permissions`.
+        permissions: u64,
+        /// `false`: the server forgets roles, bans and invites when it
+        /// restarts; the UI shows a standing notice.
+        persistent: bool,
+    },
+    /// Answer to `NetworkControl::CreateInvite`.
+    InviteCreated {
+        code: String,
+        grants_role: RoleId,
+        /// Milliseconds since the Unix epoch; `None` = never.
+        expires_at: Option<u64>,
+        max_uses: Option<u32>,
+    },
+    InviteDenied {
+        reason: InviteDenyReason,
+    },
+    /// Who a session is, for the roster (spec §8): after each
+    /// `UserJoined` and once per user after `Init`.
+    UserDetails {
+        client_id: ClientId,
+        user_id: UserId,
+        roles: Vec<RoleId>,
+        level: u16,
+    },
+    /// A restriction now applies to us (spec §4.2).
+    Restricted {
+        kind: RestrictionKind,
+        until: Option<u64>,
+        reason: String,
+    },
+    /// A restriction on us ended.
+    RestrictionLifted {
+        kind: RestrictionKind,
+    },
+    /// The answer to `NetworkControl::Admin`.
+    AdminResult {
+        request_id: u32,
+        result: Result<AdminOutcome, AdminError>,
+    },
+    /// A page of stored messages, oldest first (spec §6).
+    History {
+        conv: ConvRef,
+        messages: Vec<HistoryMessage>,
+        more: bool,
+    },
+    HistoryUnavailable {
+        conv: ConvRef,
+        retry_secs: u16,
+    },
+    MessageEdited {
+        msg_id: u64,
+        text: String,
+    },
+    MessageDeleted {
+        msg_id: u64,
+    },
+    ChatRateLimited {
+        retry_ms: u32,
+    },
+    /// Our xp crossed a level (spec §9.1).
+    ProgressUpdate {
+        xp: u64,
+        level: u16,
+    },
+    /// Per-channel facts `ChannelInfo` cannot carry (spec §5).
+    ChannelDetails {
+        channel_id: u16,
+        stable_id: u64,
+        owner: Option<UserId>,
+        min_role: Option<RoleId>,
+        permanent: bool,
+        afk_after_min: Option<u16>,
+        is_afk: bool,
+    },
+    ChannelDenied {
+        reason: ChannelUiDenyReason,
+    },
+    /// The server moved us to the AFK channel.
+    MovedIdle {
+        after_min: u16,
+    },
     InitClient {
         users: HashMap<ClientId, String>,
         client_id: u64,
@@ -217,13 +331,24 @@ pub enum NetworkMessage {
         client_id: ClientId,
         username: String,
     },
+    /// A general-chat message. `id` is the server's message id — the
+    /// handle for edit/delete and for matching `MessageEdited` /
+    /// `MessageDeleted` to a row; `ts` is the server wall clock in
+    /// milliseconds since the Unix epoch.
     TextMessage {
+        client_id: ClientId,
+        id: u64,
+        ts: u64,
         username: String,
         text: String,
     },
     /// A chat image from a user (encoded PNG/JPEG/GIF bytes, ≤
-    /// `protocol::MAX_CHAT_IMAGE_BYTES`, content hash verified).
+    /// `protocol::MAX_CHAT_IMAGE_BYTES`, content hash verified). Same
+    /// `id` / `ts` stamping as a text message.
     ImageMessage {
+        client_id: ClientId,
+        id: u64,
+        ts: u64,
         username: String,
         data: Vec<u8>,
     },
@@ -328,6 +453,70 @@ pub enum NetworkMessage {
         worst_rtt_ms: f32,
         viewers: u16,
     },
+
+    // ── 1.1.2: profiles and blobs (spec §7, §7.1) ────────────────────
+    /// A session's look, with the roster (after its `UserDetails`).
+    UserProfile {
+        client_id: ClientId,
+        profile: protocol::Profile,
+    },
+    /// A profile changed (ours included, as the server's echo).
+    ProfileUpdated {
+        user_id: UserId,
+        profile: protocol::Profile,
+    },
+    ProfileDenied {
+        reason: protocol::ProfileDenyReason,
+    },
+    UserRenamed {
+        client_id: ClientId,
+        name: String,
+    },
+    RenameDenied {
+        reason: protocol::RenameDenyReason,
+    },
+    /// The server has the announced bytes already, or took them:
+    /// either way the hash is usable now.
+    UploadDone {
+        upload_id: u32,
+        blob_id: protocol::BlobId,
+    },
+    UploadRejected {
+        upload_id: u32,
+        reason: protocol::UploadRejectReason,
+    },
+    /// A fetched blob, whole and hash-verified.
+    Blob {
+        blob_id: protocol::BlobId,
+        data: Vec<u8>,
+    },
+    BlobMissing {
+        blob_id: protocol::BlobId,
+    },
+
+    // ── 1.1.1: direct messages (spec §6) ─────────────────────────────
+    /// A live DM; `username` is the sender's session name.
+    Direct {
+        from: UserId,
+        username: String,
+        id: u64,
+        ts: u64,
+        text: String,
+    },
+    /// Our DM `client_ref` has its id.
+    MessageAck {
+        client_ref: u32,
+        msg_id: u64,
+    },
+    MessageFailed {
+        client_ref: u32,
+        reason: protocol::DmFailReason,
+    },
+    /// Our DM conversations with unread counts (after the general
+    /// replay on join).
+    Conversations {
+        dms: Vec<protocol::DmSummary>,
+    },
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -344,11 +533,20 @@ struct IncomingImage {
     started: Instant,
 }
 
+/// An announced blob upload waiting for the server's `UploadAccept`.
+struct PendingBlob {
+    upload_id: u32,
+    blob_id: [u8; 32],
+    data: Vec<u8>,
+}
+
 /// What we say once the transport is up.
 struct PendingHello {
     username: String,
-    password: Option<String>,
-    client_key: Option<Arc<ClientKey>>,
+    /// Presented on a first visit (spec §3.1); a known key ignores it.
+    invite_code: Option<String>,
+    /// The device key: the login (spec §3).
+    client_key: Arc<ClientKey>,
 }
 
 /// Where the session is.
@@ -396,6 +594,10 @@ pub(crate) struct NetworkClient {
     upload_last_pct: u8,
     /// Reassembly of relayed images, keyed by (sender, upload id).
     incoming_images: HashMap<(u64, u32), IncomingImage>,
+    /// Blobs being fetched, keyed by hash (spec §7).
+    incoming_blobs: HashMap<[u8; 32], IncomingImage>,
+    /// The blob we announced and may still have to send.
+    pending_blob: Option<PendingBlob>,
     last_stats_check: Instant,
     /// Transport counters at the last stats sample.
     stats_baseline: Option<LinkStats>,
@@ -435,9 +637,9 @@ impl NetworkClient {
     pub fn connect(
         server_addr: SocketAddr,
         username: &str,
-        password: Option<&str>,
+        invite_code: Option<&str>,
         fingerprint: Option<Fingerprint>,
-        client_key: Option<Arc<ClientKey>>,
+        client_key: Arc<ClientKey>,
         portable: bool,
     ) -> Result<Self, String> {
         let budget = Budget::client();
@@ -473,7 +675,7 @@ impl NetworkClient {
             phase: Phase::Connecting,
             hello: Some(PendingHello {
                 username: username.to_string(),
-                password: password.map(str::to_string),
+                invite_code: invite_code.map(str::to_string),
                 client_key,
             }),
             identity: None,
@@ -490,6 +692,8 @@ impl NetworkClient {
             upload: None,
             upload_last_pct: 255,
             incoming_images: HashMap::new(),
+            incoming_blobs: HashMap::new(),
+            pending_blob: None,
             last_stats_check: now,
             stats_baseline: None,
             telemetry_baseline: None,
@@ -633,7 +837,10 @@ impl NetworkClient {
                 if !self.message_queue.iter().any(|m| {
                     matches!(
                         m,
-                        NetworkMessage::AccessDenied | NetworkMessage::Disconnected { .. }
+                        NetworkMessage::NeedInvite { .. }
+                            | NetworkMessage::InviteInvalid { .. }
+                            | NetworkMessage::NameInUse
+                            | NetworkMessage::Disconnected { .. }
                     )
                 }) {
                     self.message_queue.push(NetworkMessage::Disconnected {
@@ -664,22 +871,26 @@ impl NetworkClient {
         let Some(hello) = self.hello.take() else {
             return;
         };
-        let client_key = hello.client_key.as_ref().and_then(|key| {
-            let mut exported = [0u8; CLIENT_AUTH_EXPORTER_BYTES];
-            self.driver
-                .export_keying_material(self.server, CLIENT_AUTH_EXPORTER_LABEL, b"", &mut exported)
-                .map(|()| ClientKeyProof {
-                    public_key: key.public_key(),
-                    signature: key.sign(&exported),
-                })
-        });
+        let mut exported = [0u8; CLIENT_AUTH_EXPORTER_BYTES];
+        let client_key = self
+            .driver
+            .export_keying_material(self.server, CLIENT_AUTH_EXPORTER_LABEL, b"", &mut exported)
+            .map(|()| ClientKeyProof {
+                public_key: hello.client_key.public_key(),
+                signature: hello.client_key.sign(&exported),
+            });
+        if client_key.is_none() {
+            warn!("No TLS exporter after the handshake; the server will refuse the Hello");
+        }
+        let auth = match hello.invite_code {
+            Some(code) => Auth::Invite { code },
+            None => Auth::Key,
+        };
         let msg = ClientMessage::Hello {
             username: hello.username,
-            auth: Auth::Shared {
-                password: hello.password,
-            },
+            auth,
             client_key,
-            features: features::CLIENT_1_0,
+            features: features::CLIENT_1_1,
             client_version: protocol::CLIENT_VERSION.to_string(),
         };
         self.send_control(now, &msg);
@@ -907,15 +1118,25 @@ impl NetworkClient {
             ServerMessage::Refused { reason } => {
                 warn!("Server refused us: {}", reason.describe());
                 self.phase = Phase::Closed;
-                match reason {
-                    RefusedReason::WrongPassword => {
-                        self.message_queue.push(NetworkMessage::AccessDenied);
+                let verdict = match reason {
+                    RefusedReason::NeedInvite { why } => NetworkMessage::NeedInvite { why },
+                    RefusedReason::InviteInvalid { why } => NetworkMessage::InviteInvalid { why },
+                    RefusedReason::NameInUse => NetworkMessage::NameInUse,
+                    // A 1.0 server wanted its room password: this client
+                    // no longer has that door — the server is the old one.
+                    RefusedReason::WrongPassword => NetworkMessage::Disconnected {
+                        kind: DisconnectKind::Outdated,
+                        detail: "1.0 server (password admission)".to_string(),
+                    },
+                    other => {
+                        let detail = other.describe().to_string();
+                        NetworkMessage::Disconnected {
+                            kind: DisconnectKind::Refused(other),
+                            detail,
+                        }
                     }
-                    other => self.message_queue.push(NetworkMessage::Disconnected {
-                        kind: DisconnectKind::Refused(other),
-                        detail: other.describe().to_string(),
-                    }),
-                }
+                };
+                self.message_queue.push(verdict);
                 self.driver.close(now, self.server, "refused");
             }
             ServerMessage::Init {
@@ -987,6 +1208,9 @@ impl NetworkClient {
             ServerMessage::Chat(msg) => {
                 let username = self.username_of(msg.client_id);
                 self.message_queue.push(NetworkMessage::TextMessage {
+                    client_id: msg.client_id,
+                    id: msg.id,
+                    ts: msg.ts,
                     username,
                     text: msg.text,
                 });
@@ -996,15 +1220,21 @@ impl NetworkClient {
                 upload_id,
                 index,
                 count,
+                id,
+                ts,
                 hash,
                 data,
-                ..
             } => {
+                // `id` / `ts` repeat on every chunk of one upload; the
+                // last one to land is as good as any.
                 if let Some(image) =
                     self.accept_image_chunk(now, client_id, upload_id, index, count, hash, data)
                 {
                     let username = self.username_of(client_id);
                     self.message_queue.push(NetworkMessage::ImageMessage {
+                        client_id,
+                        id,
+                        ts,
                         username,
                         data: image,
                     });
@@ -1105,6 +1335,225 @@ impl NetworkClient {
                         rtt_ms,
                         exercised,
                     });
+            }
+            // ── 1.1: session, removal, invites ───────────────────────
+            ServerMessage::Session {
+                user_id,
+                permissions,
+                persistent,
+            } => {
+                info!(
+                    "Session: user {}, permissions {permissions:#x}, persistent {persistent}",
+                    hex_short(&user_id)
+                );
+                self.message_queue.push(NetworkMessage::Session {
+                    user_id,
+                    permissions,
+                    persistent,
+                });
+            }
+            ServerMessage::Removed { kind, reason, by } => {
+                // The verdict is the message; the server closes 300 ms
+                // later, but there is nothing to wait for.
+                warn!("Removed from the server ({kind:?}) by {by}: {reason}");
+                self.phase = Phase::Closed;
+                let detail = format!("{kind:?} by {by}: {reason}");
+                self.message_queue.push(NetworkMessage::Disconnected {
+                    kind: DisconnectKind::Removed { kind, reason, by },
+                    detail,
+                });
+                self.driver.close(now, self.server, "removed");
+            }
+            ServerMessage::InviteCreated {
+                code,
+                grants_role,
+                expires_at,
+                max_uses,
+            } => {
+                info!("Invite created: {code} (role {grants_role})");
+                self.message_queue.push(NetworkMessage::InviteCreated {
+                    code,
+                    grants_role,
+                    expires_at,
+                    max_uses,
+                });
+            }
+            ServerMessage::InviteDenied { reason } => {
+                warn!("Invite refused: {reason:?}");
+                self.message_queue
+                    .push(NetworkMessage::InviteDenied { reason });
+            }
+            ServerMessage::UserDetails {
+                client_id,
+                user_id,
+                roles,
+                level,
+            } => {
+                self.message_queue.push(NetworkMessage::UserDetails {
+                    client_id,
+                    user_id,
+                    roles,
+                    level,
+                });
+            }
+            ServerMessage::Restricted {
+                kind,
+                until,
+                reason,
+            } => {
+                warn!("Restricted ({}) until {until:?}: {reason}", kind.name());
+                self.message_queue.push(NetworkMessage::Restricted {
+                    kind,
+                    until,
+                    reason,
+                });
+            }
+            ServerMessage::RestrictionLifted { kind } => {
+                info!("Restriction lifted: {}", kind.name());
+                self.message_queue
+                    .push(NetworkMessage::RestrictionLifted { kind });
+            }
+            ServerMessage::AdminResult { request_id, result } => {
+                self.message_queue
+                    .push(NetworkMessage::AdminResult { request_id, result });
+            }
+            ServerMessage::History {
+                conv,
+                messages,
+                more,
+            } => {
+                self.message_queue.push(NetworkMessage::History {
+                    conv,
+                    messages,
+                    more,
+                });
+            }
+            ServerMessage::HistoryUnavailable { conv, retry_secs } => {
+                warn!("History unavailable; retry in {retry_secs} s");
+                self.message_queue
+                    .push(NetworkMessage::HistoryUnavailable { conv, retry_secs });
+            }
+            ServerMessage::MessageEdited { msg_id, text } => {
+                self.message_queue
+                    .push(NetworkMessage::MessageEdited { msg_id, text });
+            }
+            ServerMessage::MessageDeleted { msg_id } => {
+                self.message_queue
+                    .push(NetworkMessage::MessageDeleted { msg_id });
+            }
+            ServerMessage::ChatRateLimited { retry_ms } => {
+                warn!("Chat rate limited; retry in {retry_ms} ms");
+                self.message_queue
+                    .push(NetworkMessage::ChatRateLimited { retry_ms });
+            }
+            ServerMessage::ProgressUpdate { xp, level } => {
+                info!("Progress: {xp} xp, level {level}");
+                self.message_queue
+                    .push(NetworkMessage::ProgressUpdate { xp, level });
+            }
+            ServerMessage::ChannelDetails {
+                channel_id,
+                stable_id,
+                owner,
+                min_role,
+                permanent,
+                afk_after_min,
+                is_afk,
+            } => {
+                self.message_queue.push(NetworkMessage::ChannelDetails {
+                    channel_id,
+                    stable_id,
+                    owner,
+                    min_role,
+                    permanent,
+                    afk_after_min,
+                    is_afk,
+                });
+            }
+            ServerMessage::ChannelDenied { reason } => {
+                warn!("Channel request refused: {}", reason.describe());
+                self.message_queue
+                    .push(NetworkMessage::ChannelDenied { reason });
+            }
+            ServerMessage::MovedIdle { after_min } => {
+                info!("Moved to the AFK channel after {after_min} idle minutes");
+                self.message_queue
+                    .push(NetworkMessage::MovedIdle { after_min });
+            }
+            ServerMessage::UserProfile { client_id, profile } => {
+                self.message_queue
+                    .push(NetworkMessage::UserProfile { client_id, profile });
+            }
+            ServerMessage::ProfileUpdated { user_id, profile } => {
+                self.message_queue
+                    .push(NetworkMessage::ProfileUpdated { user_id, profile });
+            }
+            ServerMessage::ProfileDenied { reason } => {
+                info!("Profile refused: {}", reason.describe());
+                self.message_queue
+                    .push(NetworkMessage::ProfileDenied { reason });
+            }
+            ServerMessage::UserRenamed { client_id, name } => {
+                self.usernames.insert(client_id, name.clone());
+                self.message_queue
+                    .push(NetworkMessage::UserRenamed { client_id, name });
+            }
+            ServerMessage::RenameDenied { reason } => {
+                info!("Rename refused: {}", reason.describe());
+                self.message_queue
+                    .push(NetworkMessage::RenameDenied { reason });
+            }
+            ServerMessage::UploadAccept { upload_id, needed } => {
+                self.continue_blob_upload(now, upload_id, needed);
+            }
+            ServerMessage::UploadDone { upload_id, blob_id } => {
+                self.message_queue
+                    .push(NetworkMessage::UploadDone { upload_id, blob_id });
+            }
+            ServerMessage::UploadRejected { upload_id, reason } => {
+                info!("Upload {upload_id} rejected: {}", reason.describe());
+                self.pending_blob.take_if(|p| p.upload_id == upload_id);
+                self.message_queue
+                    .push(NetworkMessage::UploadRejected { upload_id, reason });
+            }
+            ServerMessage::BlobChunk {
+                blob_id,
+                index,
+                count,
+                data,
+            } => {
+                if let Some(data) = self.accept_blob_chunk(now, blob_id, index, count, data) {
+                    self.message_queue
+                        .push(NetworkMessage::Blob { blob_id, data });
+                }
+            }
+            ServerMessage::BlobMissing { blob_id } => {
+                self.incoming_blobs.remove(&blob_id);
+                self.message_queue
+                    .push(NetworkMessage::BlobMissing { blob_id });
+            }
+            ServerMessage::Direct { from, msg } => {
+                let username = self.username_of(msg.client_id);
+                self.message_queue.push(NetworkMessage::Direct {
+                    from,
+                    username,
+                    id: msg.id,
+                    ts: msg.ts,
+                    text: msg.text,
+                });
+            }
+            ServerMessage::MessageAck { client_ref, msg_id } => {
+                self.message_queue
+                    .push(NetworkMessage::MessageAck { client_ref, msg_id });
+            }
+            ServerMessage::MessageFailed { client_ref, reason } => {
+                info!("DM {client_ref} failed: {}", reason.describe());
+                self.message_queue
+                    .push(NetworkMessage::MessageFailed { client_ref, reason });
+            }
+            ServerMessage::Conversations { dms } => {
+                self.message_queue
+                    .push(NetworkMessage::Conversations { dms });
             } // No catch-all: the match is exhaustive on purpose, so a
               // new ServerMessage variant is a compile error here (a
               // reminder to handle it) instead of a silent log line.
@@ -1212,6 +1661,24 @@ impl NetworkClient {
 
     pub fn send_message(&mut self, now: Instant, text: String) {
         self.send_control(now, &ClientMessage::Chat(text));
+    }
+
+    /// Ask the server for an invite code (spec §3.1).
+    pub fn send_create_invite(
+        &mut self,
+        now: Instant,
+        grants_role: Option<RoleId>,
+        expires_secs: Option<u64>,
+        max_uses: Option<u32>,
+    ) {
+        self.send_control(
+            now,
+            &ClientMessage::CreateInvite {
+                grants_role,
+                expires_secs,
+                max_uses,
+            },
+        );
     }
 
     /// Queue a chat image for a *paced* upload: split into
@@ -1363,6 +1830,122 @@ impl NetworkClient {
             return None;
         }
         Some(image)
+    }
+
+    /// Fold one fetched chunk into its blob; `Some(bytes)` when whole
+    /// and the hash checks out. Same bounds as images; the hash is the
+    /// blob's id, so nothing else is trusted.
+    fn accept_blob_chunk(
+        &mut self,
+        now: Instant,
+        blob_id: [u8; 32],
+        index: u32,
+        count: u32,
+        data: Vec<u8>,
+    ) -> Option<Vec<u8>> {
+        if count == 0 || count > protocol::MAX_IMAGE_CHUNKS || index >= count {
+            return None;
+        }
+        self.incoming_blobs
+            .retain(|_, blob| now.duration_since(blob.started) < IMAGE_PARTIAL_TTL);
+        let entry = self
+            .incoming_blobs
+            .entry(blob_id)
+            .or_insert_with(|| IncomingImage {
+                count,
+                received: 0,
+                bytes: 0,
+                hash: blob_id,
+                chunks: vec![None; count as usize],
+                started: now,
+            });
+        if entry.count != count || entry.chunks[index as usize].is_some() {
+            return None;
+        }
+        entry.bytes += data.len();
+        if entry.bytes > protocol::MAX_CHAT_IMAGE_BYTES {
+            self.incoming_blobs.remove(&blob_id);
+            return None;
+        }
+        entry.chunks[index as usize] = Some(data);
+        entry.received += 1;
+        if entry.received < entry.count {
+            return None;
+        }
+        let entry = self.incoming_blobs.remove(&blob_id)?;
+        let mut bytes = Vec::with_capacity(entry.bytes);
+        for chunk in entry.chunks {
+            bytes.extend_from_slice(&chunk?);
+        }
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        if digest != blob_id {
+            warn!("Fetched blob failed its hash; dropped");
+            return None;
+        }
+        Some(bytes)
+    }
+
+    /// Announce a blob (spec §7): the server answers whether it needs
+    /// the bytes, and `continue_blob_upload` sends them on one paced
+    /// Media stream.
+    fn begin_blob_upload(
+        &mut self,
+        now: Instant,
+        upload_id: u32,
+        name: String,
+        mime: String,
+        data: Vec<u8>,
+    ) {
+        let blob_id: [u8; 32] = Sha256::digest(&data).into();
+        let Ok(size) = u32::try_from(data.len()) else {
+            return;
+        };
+        self.send_control(
+            now,
+            &ClientMessage::UploadBegin {
+                upload_id,
+                name,
+                mime,
+                size,
+                sha256: blob_id,
+            },
+        );
+        self.pending_blob = Some(PendingBlob {
+            upload_id,
+            blob_id,
+            data,
+        });
+    }
+
+    fn continue_blob_upload(&mut self, now: Instant, upload_id: u32, needed: bool) {
+        let Some(pending) = self.pending_blob.take_if(|p| p.upload_id == upload_id) else {
+            return;
+        };
+        if !needed {
+            // Known hash: the server's `UploadDone` will not come; the
+            // announcement was the whole exchange.
+            self.message_queue.push(NetworkMessage::UploadDone {
+                upload_id,
+                blob_id: pending.blob_id,
+            });
+            return;
+        }
+        let frames = chunk_upload(
+            &pending.data,
+            upload_id,
+            |upload_id, index, count, chunk| ClientMessage::UploadChunk {
+                upload_id,
+                index,
+                count,
+                data: chunk,
+            },
+        );
+        let Some(frames) = frames else {
+            return;
+        };
+        if let Err(e) = self.driver.send_media(now, self.server, frames) {
+            warn!("Blob upload could not start: {e}");
+        }
     }
 
     pub fn send_speaking_status(&mut self, now: Instant, is_speaking: bool) {
@@ -1590,15 +2173,79 @@ pub enum NetworkControl {
     Connect {
         addr: SocketAddr,
         nickname: String,
-        /// The room password, for servers running `secure: true`.
-        password: Option<String>,
+        /// The invite code for a first visit, if we have one.
+        invite_code: Option<String>,
         /// The pinned server identity (`SHA256:…`); `None` = trust on
         /// first use. An unparsable value is treated as `None`.
         fingerprint: Option<String>,
-        /// Our own identity key, if the app could load one.
-        client_key: Option<Arc<ClientKey>>,
+        /// Our own identity key: the login.
+        client_key: Arc<ClientKey>,
         /// Settings live next to the executable (telemetry).
         portable: bool,
+    },
+    /// Mint an invite (spec §3.1); answered by `InviteCreated` or
+    /// `InviteDenied`.
+    CreateInvite {
+        /// `None` = guest.
+        grants_role: Option<RoleId>,
+        expires_secs: Option<u64>,
+        max_uses: Option<u32>,
+    },
+    /// An administrative action (spec §8); answered by `AdminResult`
+    /// with the same `request_id`.
+    Admin {
+        request_id: u32,
+        command: AdminCommand,
+    },
+    /// Older messages (spec §6); answered by `History`.
+    FetchHistory {
+        conv: ConvRef,
+        before: Option<u64>,
+        limit: u16,
+    },
+    EditMessage {
+        msg_id: u64,
+        text: String,
+    },
+    DeleteMessage {
+        msg_id: u64,
+    },
+    /// Channels from the UI (spec §5).
+    CreateChannel(ChannelSpec),
+    EditChannel {
+        channel_id: u16,
+        spec: ChannelSpec,
+    },
+    DeleteChannel {
+        channel_id: u16,
+    },
+    ChannelKick {
+        channel_id: u16,
+        user_id: UserId,
+    },
+    // ── 1.1.2: profiles and blobs ────────────────────────────────────
+    SetProfile(protocol::Profile),
+    SetNickname(String),
+    /// Announce and, if the server wants it, send a blob. Ends in
+    /// `NetworkMessage::UploadDone` / `UploadRejected`.
+    UploadBlob {
+        upload_id: u32,
+        name: String,
+        mime: String,
+        data: Vec<u8>,
+    },
+    FetchBlob {
+        blob_id: protocol::BlobId,
+    },
+    // ── 1.1.1: direct messages ───────────────────────────────────────
+    SendDm {
+        to: UserId,
+        text: String,
+        client_ref: u32,
+    },
+    MarkRead {
+        conv: protocol::ConvRef,
+        msg_id: u64,
     },
     Disconnect,
     SendMessage(String),
@@ -1750,7 +2397,7 @@ fn handle_control(
         NetworkControl::Connect {
             addr,
             nickname,
-            password,
+            invite_code,
             fingerprint,
             client_key,
             portable,
@@ -1769,7 +2416,7 @@ fn handle_control(
             match NetworkClient::connect(
                 addr,
                 &nickname,
-                password.as_deref(),
+                invite_code.as_deref(),
                 pin,
                 client_key,
                 portable,
@@ -1804,9 +2451,133 @@ fn handle_control(
                 c.send_message(now, text);
             }
         }
+        NetworkControl::CreateInvite {
+            grants_role,
+            expires_secs,
+            max_uses,
+        } => {
+            if let Some(c) = client {
+                c.send_create_invite(now, grants_role, expires_secs, max_uses);
+            }
+        }
+        NetworkControl::Admin {
+            request_id,
+            command,
+        } => {
+            if let Some(c) = client {
+                c.send_control(
+                    now,
+                    &ClientMessage::Admin {
+                        request_id,
+                        command,
+                    },
+                );
+            }
+        }
+        NetworkControl::FetchHistory {
+            conv,
+            before,
+            limit,
+        } => {
+            if let Some(c) = client {
+                c.send_control(
+                    now,
+                    &ClientMessage::FetchHistory {
+                        conv,
+                        before,
+                        limit,
+                    },
+                );
+            }
+        }
+        NetworkControl::EditMessage { msg_id, text } => {
+            if let Some(c) = client {
+                c.send_control(now, &ClientMessage::EditMessage { msg_id, text });
+            }
+        }
+        NetworkControl::DeleteMessage { msg_id } => {
+            if let Some(c) = client {
+                c.send_control(now, &ClientMessage::DeleteMessage { msg_id });
+            }
+        }
+        NetworkControl::CreateChannel(spec) => {
+            if let Some(c) = client {
+                c.send_control(now, &ClientMessage::CreateChannel(spec));
+            }
+        }
+        NetworkControl::EditChannel { channel_id, spec } => {
+            if let Some(c) = client {
+                c.send_control(now, &ClientMessage::EditChannel { channel_id, spec });
+            }
+        }
+        NetworkControl::DeleteChannel { channel_id } => {
+            if let Some(c) = client {
+                c.send_control(now, &ClientMessage::DeleteChannel { channel_id });
+            }
+        }
+        NetworkControl::ChannelKick {
+            channel_id,
+            user_id,
+        } => {
+            if let Some(c) = client {
+                c.send_control(
+                    now,
+                    &ClientMessage::ChannelKick {
+                        channel_id,
+                        user_id,
+                    },
+                );
+            }
+        }
         NetworkControl::SendImage(data) => {
             if let Some(c) = client {
                 c.send_image(now, &data);
+            }
+        }
+        NetworkControl::SetProfile(profile) => {
+            if let Some(c) = client {
+                c.send_control(now, &ClientMessage::SetProfile(profile));
+            }
+        }
+        NetworkControl::SetNickname(name) => {
+            if let Some(c) = client {
+                c.send_control(now, &ClientMessage::SetNickname { name });
+            }
+        }
+        NetworkControl::UploadBlob {
+            upload_id,
+            name,
+            mime,
+            data,
+        } => {
+            if let Some(c) = client {
+                c.begin_blob_upload(now, upload_id, name, mime, data);
+            }
+        }
+        NetworkControl::FetchBlob { blob_id } => {
+            if let Some(c) = client {
+                c.send_control(now, &ClientMessage::FetchBlob { blob_id });
+            }
+        }
+        NetworkControl::SendDm {
+            to,
+            text,
+            client_ref,
+        } => {
+            if let Some(c) = client {
+                c.send_control(
+                    now,
+                    &ClientMessage::DirectMessage {
+                        to,
+                        text,
+                        client_ref,
+                    },
+                );
+            }
+        }
+        NetworkControl::MarkRead { conv, msg_id } => {
+            if let Some(c) = client {
+                c.send_control(now, &ClientMessage::MarkRead { conv, msg_id });
             }
         }
         NetworkControl::SendLog(data) => {
