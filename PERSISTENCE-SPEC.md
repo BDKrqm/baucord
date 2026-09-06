@@ -837,6 +837,24 @@ replays 50 with images as references", "persistence thread stalled for
 
 ## 12. Decisions taken
 
+- **Profile is its own variant (1.1.2, in use).** §10's
+  `UserDetails { …, profile }` predates 1.1.0 shipping `UserDetails`
+  with four positional fields, and the protocol crate forbids a
+  fifth. The look travels as `UserProfile { client_id, profile }`
+  right after each `UserDetails` (batch after `Init`), changes as
+  `ProfileUpdated { user_id, profile }`, refusals as `ProfileDenied {
+  ReservedColor | LowContrast | RateLimited | Locked | BadAvatar }`;
+  all behind `PROFILES`. A live rename is `SetNickname { name }` →
+  `UserRenamed { client_id, name }` / `RenameDenied { Taken |
+  Invalid | RateLimited }` under the same bit, checked with the
+  `Hello` name rules. The avatar rides §7's blob messages
+  (`UploadBegin/Accept/Chunk/Done/Rejected`, `FetchBlob`,
+  `BlobChunk`, `BlobMissing`, bit `BLOBS`), which for now admit only
+  avatar-sized images (`avatars.max_kb`); files as cards, daily
+  quotas and eviction land on the same messages later. The lock is
+  the `profile` restriction; `profile_locked` on the user row stays
+  unused. Chat rows carry names only, by choice — the tile lives in
+  the roster and the hover card.
 - **Kick forgets, ban blocks (1.1, in use).** A kick is not a
   restriction: it closes the session and deletes the person's device
   keys and roles, so they need a new invite and come back as whatever
