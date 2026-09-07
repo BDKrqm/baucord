@@ -37,6 +37,7 @@ use std::{
 
 use app_core::{
     chat::{ChatHistory, Meta},
+    menu,
     roster::{self, ChannelMeta, PeerAudio, Role, UserState},
 };
 use audio::{PeerAudioSettings, SoundType};
@@ -51,8 +52,8 @@ use i18n::t;
 use log::{info, warn};
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use ui::{
-    ChannelOption, ChatRow, DmRow, Logic, MainWindow, ModAction, Phase, State, ToastKind, Tr,
-    UserRow,
+    ChannelOption, ChatRow, DmRow, Logic, MainWindow, MenuAction, ModAction, Phase, State,
+    ToastKind, Tr, UserRow,
 };
 
 use crate::{
@@ -140,6 +141,9 @@ pub struct AppState {
     telemetry_notes: HashMap<u64, TelemetryNote>,
     /// The moderation dialog's subject while it is open.
     moderation: Option<Moderation>,
+    /// What the open context menu is about: its entries were built
+    /// for this target, and a pick resolves against it.
+    menu_target: Option<MenuTarget>,
     /// The "Move to" submenu's model, rebuilt with the channel list.
     channel_options: Rc<VecModel<ChannelOption>>,
     /// A server voice mute stands (spec §4.2): the mute button is
@@ -215,6 +219,10 @@ pub struct AppState {
 
     /// Active screen sharers: `client_id` → (width, height).
     active_sharers: HashMap<u64, (u32, u32)>,
+    /// How many were watching our stream at the last stats tick: a
+    /// rise plays the viewer-joined sound (`StreamHealth` is the only
+    /// word the sharer gets, and it goes to the screen thread).
+    stream_viewers_seen: u32,
     /// Sharer display order for the roster projection.
     sharer_ids: HashSet<u64>,
 
@@ -434,6 +442,7 @@ pub fn run() {
         next_request_id: 1,
         telemetry_notes: HashMap::new(),
         moderation: None,
+        menu_target: None,
         channel_options,
         server_muted: None,
         text_muted: None,
@@ -469,6 +478,7 @@ pub fn run() {
         is_testing_mic: false,
         is_testing_mic_shared,
         active_sharers: HashMap::new(),
+        stream_viewers_seen: 0,
         sharer_ids: HashSet::new(),
         history: ChatHistory::new(),
         chat_model,
@@ -657,58 +667,7 @@ fn wire_logic(state: &Rc<RefCell<AppState>>) {
     let w = Rc::downgrade(state);
     logic.on_disconnect(move || with_app(&w, AppState::handle_disconnect));
 
-    let w = Rc::downgrade(state);
-    logic.on_user_menu(move |index| {
-        with_app(&w, |app| app.open_user_popup(index));
-    });
-    let w = Rc::downgrade(state);
-    logic.on_popup_set_volume(move |index, volume| {
-        with_app(&w, |app| {
-            if let Some(id) = app.user_id_at(index) {
-                let username = app.username_of(id);
-                app.handle_set_user_volume(id, &username, volume);
-                app.main.global::<State>().set_user_popup_open(false);
-            }
-        });
-    });
-    let w = Rc::downgrade(state);
-    logic.on_popup_toggle_mute(move |index| {
-        with_app(&w, |app| {
-            if let Some(id) = app.user_id_at(index) {
-                let username = app.username_of(id);
-                let muted = app.users.get(&id).is_some_and(|u| u.audio.is_muted);
-                app.handle_mute_user(id, &username, !muted);
-                app.main.global::<State>().set_user_popup_open(false);
-            }
-        });
-    });
-    let w = Rc::downgrade(state);
-    logic.on_popup_reset_audio(move |index| {
-        with_app(&w, |app| {
-            if let Some(id) = app.user_id_at(index) {
-                let username = app.username_of(id);
-                app.handle_reset_peer_audio(id, &username);
-                app.main.global::<State>().set_user_popup_open(false);
-            }
-        });
-    });
-    let w = Rc::downgrade(state);
-    logic.on_popup_watch(move |index| {
-        with_app(&w, |app| {
-            if let Some(id) = app.user_id_at(index) {
-                app.handle_watch_peer(id);
-                app.main.global::<State>().set_user_popup_open(false);
-            }
-        });
-    });
-    let w = Rc::downgrade(state);
-    logic.on_popup_closed(move || {
-        with_app(&w, |app| {
-            app.main.global::<State>().set_user_popup_open(false);
-        });
-    });
-
-    // ── Roster moderation (spec §4.1, §8) ────────────────────────
+    // ── Roster hover (the profile card) ──────────────────────────
     let w = Rc::downgrade(state);
     logic.on_user_hovered(move |index, hovering| {
         if hovering {
@@ -719,42 +678,37 @@ fn wire_logic(state: &Rc<RefCell<AppState>>) {
     logic.on_author_hovered(move |name, hovering| {
         with_app(&w, |app| app.author_hovered(name.as_str(), hovering));
     });
+
+    // ── Context menus (app-core `menu` builds, the overlay draws) ──
     let w = Rc::downgrade(state);
-    logic.on_user_moderate(move |index, action| {
-        with_app(&w, |app| app.moderate(index, action));
+    logic.on_user_context(move |index, x, y| {
+        with_app(&w, |app| app.open_user_menu(index, x, y));
     });
     let w = Rc::downgrade(state);
-    logic.on_user_move(move |index, channel_id| {
+    logic.on_row_context(move |row, selecting, x, y| {
+        with_app(&w, |app| app.open_row_menu(&row, selecting, x, y));
+    });
+    let w = Rc::downgrade(state);
+    logic.on_composer_context(move |x, y| {
         with_app(&w, |app| {
-            if let (Some(target), Ok(channel_id)) =
-                (app.admin_target_at(index), u16::try_from(channel_id))
-            {
-                app.send_admin(
-                    AdminCommand::MoveUser { target, channel_id },
-                    PendingAdmin::Show,
-                );
-            }
+            app.show_menu(menu::composer_menu(), MenuTarget::Composer, x, y);
         });
     });
     let w = Rc::downgrade(state);
-    logic.on_user_set_role(move |index, role| {
-        with_app(&w, |app| {
-            if let (Some(target), Ok(role)) = (app.admin_target_at(index), u32::try_from(role)) {
-                // The built-ins nest, so one role is the whole set.
-                app.send_admin(
-                    AdminCommand::SetRoles {
-                        target,
-                        roles: vec![role],
-                    },
-                    PendingAdmin::Show,
-                );
-            }
-        });
+    logic.on_menu_activated(move |action, arg| {
+        with_app(&w, |app| app.menu_activated(action, arg));
     });
     let w = Rc::downgrade(state);
-    logic.on_user_dm(move |index| {
-        with_app(&w, |app| app.dm_from_roster(index));
+    logic.on_menu_volume_changed(move |volume| {
+        with_app(&w, |app| app.menu_volume(volume, false));
     });
+    let w = Rc::downgrade(state);
+    logic.on_menu_volume_released(move |volume| {
+        with_app(&w, |app| app.menu_volume(volume, true));
+    });
+    let w = Rc::downgrade(state);
+    logic.on_menu_closed(move || with_app(&w, AppState::close_menu));
+
     let w = Rc::downgrade(state);
     logic.on_dm_clicked(move |index| {
         with_app(&w, |app| {
@@ -771,6 +725,8 @@ fn wire_logic(state: &Rc<RefCell<AppState>>) {
         with_app(&w, |app| app.switch_conversation(None));
     });
     let w = Rc::downgrade(state);
+    logic.on_messages_toggle(move || with_app(&w, AppState::toggle_messages));
+    let w = Rc::downgrade(state);
     logic.on_dm_closed(move |index| {
         with_app(&w, |app| {
             if let Some(user) = usize::try_from(index)
@@ -779,26 +735,6 @@ fn wire_logic(state: &Rc<RefCell<AppState>>) {
             {
                 app.close_dm(user);
             }
-        });
-    });
-    let w = Rc::downgrade(state);
-    logic.on_user_channel_kick(move |index| {
-        with_app(&w, |app| {
-            let Some(client_id) = app.user_id_at(index) else {
-                return;
-            };
-            let (Some((user_id, _)), Some(user)) =
-                (app.details.get(&client_id), app.users.get(&client_id))
-            else {
-                return;
-            };
-            app.network
-                .tx
-                .send(NetworkControl::ChannelKick {
-                    channel_id: user.channel_id,
-                    user_id: *user_id,
-                })
-                .ok();
         });
     });
     let w = Rc::downgrade(state);
@@ -911,13 +847,6 @@ fn wire_logic(state: &Rc<RefCell<AppState>>) {
             warn!("Failed to open link: {e}");
         }
     });
-    logic.on_copy_text(|text| {
-        crate::clipboard::set_clipboard_text(text.as_str());
-    });
-    let w = Rc::downgrade(state);
-    logic.on_row_save_image(move |row_id| {
-        with_app(&w, |app| media::save_image_dialog(app, row_id));
-    });
     let w = Rc::downgrade(state);
     logic.on_row_open_image(move |row_id| {
         with_app(&w, |app| crate::viewers::open_gallery(app, row_id));
@@ -941,14 +870,6 @@ fn wire_logic(state: &Rc<RefCell<AppState>>) {
     let w = Rc::downgrade(state);
     logic.on_gif_hover(move |row_id, entering| {
         with_app(&w, |app| app.gif_hover(row_id, entering));
-    });
-    let w = Rc::downgrade(state);
-    logic.on_row_edit(move |lo, hi| {
-        with_app(&w, |app| app.row_edit(roster::join_id(lo, hi)));
-    });
-    let w = Rc::downgrade(state);
-    logic.on_row_delete(move |lo, hi| {
-        with_app(&w, |app| app.row_delete(roster::join_id(lo, hi)));
     });
     let w = Rc::downgrade(state);
     logic.on_edit_cancel(move || with_app(&w, AppState::edit_cancel));
@@ -993,7 +914,7 @@ fn wire_logic(state: &Rc<RefCell<AppState>>) {
                 }
             }
             app.preview_gif = None;
-            app.main.global::<State>().set_preview_open(false);
+            app.close_preview();
         });
     });
     let w = Rc::downgrade(state);
@@ -1001,7 +922,7 @@ fn wire_logic(state: &Rc<RefCell<AppState>>) {
         with_app(&w, |app| {
             app.pending_preview = None;
             app.preview_gif = None;
-            app.main.global::<State>().set_preview_open(false);
+            app.close_preview();
         });
     });
 
@@ -1055,23 +976,19 @@ fn wire_logic(state: &Rc<RefCell<AppState>>) {
         with_app(&w, AppState::channel_password_cancel);
     });
     let w = Rc::downgrade(state);
+    logic.on_invite_create(move || with_app(&w, AppState::open_invite_dialog));
+    let w = Rc::downgrade(state);
+    logic.on_invite_dialog_create(move || with_app(&w, AppState::invite_dialog_create));
+    let w = Rc::downgrade(state);
+    logic.on_invite_dialog_copy(move || with_app(&w, AppState::invite_dialog_copy));
+    let w = Rc::downgrade(state);
+    logic.on_invite_dialog_cancel(move || {
+        with_app(&w, |app| {
+            app.main.global::<State>().set_invite_dialog_open(false)
+        });
+    });
+    let w = Rc::downgrade(state);
     logic.on_channel_create(move || with_app(&w, AppState::channel_create));
-    let w = Rc::downgrade(state);
-    logic.on_channel_edit(move |channel_id| {
-        with_app(&w, |app| {
-            if let Ok(id) = u16::try_from(channel_id) {
-                app.channel_edit(id);
-            }
-        });
-    });
-    let w = Rc::downgrade(state);
-    logic.on_channel_delete(move |channel_id| {
-        with_app(&w, |app| {
-            if let Ok(id) = u16::try_from(channel_id) {
-                app.channel_delete(id);
-            }
-        });
-    });
     let w = Rc::downgrade(state);
     logic.on_channel_dialog_save(move || with_app(&w, AppState::channel_dialog_save));
     let w = Rc::downgrade(state);
@@ -1508,19 +1425,33 @@ impl AppState {
                     Some(n) => t!("invite-uses", "count" => n),
                     None => t!("invite-uses-unlimited"),
                 };
-                self.push_chat_system(&t!(
-                    "chat-invite-created",
-                    "code" => shown.as_str(),
-                    "role" => role.as_str(),
-                    "expiry" => expiry.as_str(),
-                    "uses" => uses.as_str()
-                ));
+                let s = self.main.global::<State>();
+                if s.get_invite_dialog_open() {
+                    // Minted from the dialog: it shows there, to copy.
+                    s.set_invite_dialog_code(shown.into());
+                    s.set_invite_dialog_summary(format!("{role} · {expiry} · {uses}").into());
+                    s.set_invite_dialog_error("".into());
+                } else {
+                    self.push_chat_system(&t!(
+                        "chat-invite-created",
+                        "code" => shown.as_str(),
+                        "role" => role.as_str(),
+                        "expiry" => expiry.as_str(),
+                        "uses" => uses.as_str()
+                    ));
+                }
             }
             NetworkMessage::InviteDenied { reason } => {
-                self.push_chat_system(&t!(match reason {
+                let line = t!(match reason {
                     client::InviteDenyReason::NoPermission => "chat-invite-no-permission",
                     client::InviteDenyReason::RoleNotAllowed => "chat-invite-role-not-allowed",
-                }));
+                });
+                let s = self.main.global::<State>();
+                if s.get_invite_dialog_open() {
+                    s.set_invite_dialog_error(line.into());
+                } else {
+                    self.push_chat_system(&line);
+                }
             }
             NetworkMessage::History {
                 conv,
@@ -1597,9 +1528,25 @@ impl AppState {
                 self.show_toast(ToastKind::Warning, &t!("chat-rate-limited", "secs" => secs));
             }
             NetworkMessage::ProgressUpdate { xp, level } => {
+                if let Some(user) = self.our_client_id.and_then(|id| self.users.get_mut(&id)) {
+                    user.xp = Some(xp);
+                    user.level = level;
+                }
+                self.update_user_list();
                 let line = t!("chat-level-up", "level" => level, "xp" => xp);
                 self.push_chat_system(&line);
                 self.show_toast(ToastKind::Success, &line);
+            }
+            NetworkMessage::UserProgress {
+                client_id,
+                xp,
+                level,
+            } => {
+                if let Some(user) = self.users.get_mut(&client_id) {
+                    user.xp = Some(xp);
+                    user.level = level;
+                    self.update_user_list();
+                }
             }
             NetworkMessage::ChannelDetails {
                 channel_id,
@@ -2062,6 +2009,20 @@ impl AppState {
                 self.active_sharers.insert(client_id, (width, height));
                 self.sharer_ids = self.active_sharers.keys().copied().collect();
                 self.update_user_list();
+                // A stream going up in our channel, by someone else.
+                let in_our_channel = self
+                    .users
+                    .get(&client_id)
+                    .is_some_and(|u| Some(u.channel_id) == self.our_channel());
+                if in_our_channel
+                    && Some(client_id) != self.our_client_id
+                    && self.settings.sounds.share_started_on()
+                {
+                    self.voice
+                        .tx
+                        .send(VoiceControl::PlaySound(SoundType::ShareStarted))
+                        .ok();
+                }
             }
             NetworkMessage::ScreenShareStopped { client_id } => {
                 self.active_sharers.remove(&client_id);
@@ -2108,6 +2069,10 @@ impl AppState {
                             .set_conv_name(name.as_str().into());
                     }
                 }
+                // Every row they authored, in every conversation, takes
+                // the new name (their look follows: profiles are keyed
+                // by session, and the roster row now carries the name).
+                self.rename_author(&old, &name);
                 self.push_chat_system(&t!(
                     "chat-user-renamed",
                     "old" => old.as_str(),
@@ -2306,6 +2271,11 @@ impl AppState {
                 let limit = args.trim().parse::<u16>().unwrap_or(20).clamp(1, 200);
                 self.load_earlier(limit);
             }
+            "mem" => {
+                let report = self.memory_report();
+                info!("memory report:\n{report}");
+                self.push_chat_system(&report);
+            }
             "dm" | "msg" => {
                 let (name, text) = match args.trim().split_once(char::is_whitespace) {
                     Some((n, t)) if !t.trim().is_empty() => (n.trim(), t.trim().to_string()),
@@ -2459,7 +2429,14 @@ impl AppState {
     fn commands_available(&self) -> String {
         use client::permissions as p;
         let has = |bit: u64| p::has(self.permissions, bit);
-        let mut out: Vec<&str> = vec!["/help", "/history [n]", "/channel list", "/leave", "/quit"];
+        let mut out: Vec<&str> = vec![
+            "/help",
+            "/history [n]",
+            "/channel list",
+            "/mem",
+            "/leave",
+            "/quit",
+        ];
         if has(p::CREATE_INVITES) {
             out.push("/invite [role] [24h] [uses]");
         }
@@ -2970,6 +2947,84 @@ impl AppState {
     /// `/invite [guest|member|organizer] [<n>m|h|d] [<uses>]` from the
     /// composer: ask the server for a code. The answer lands in chat as
     /// a link (and on the clipboard).
+    // ── Invite dialog (spec §3.1) ───────────────────────────────────
+    // The picks are indices into option lists the dialog shows; the
+    // wire carries what the slash command would send for the same
+    // words, so the server applies the same rules (a member's expiry
+    // is capped at the default, roles at or above admin refused).
+
+    /// "Invite users": open the dialog with the defaults (`/invite`'s:
+    /// guest, a day, unlimited).
+    fn open_invite_dialog(&mut self) {
+        let s = self.main.global::<State>();
+        let strings = |keys: &[&str]| -> ModelRc<slint::SharedString> {
+            let items: Vec<slint::SharedString> = keys.iter().map(|k| t!(k).into()).collect();
+            ModelRc::new(VecModel::from(items))
+        };
+        s.set_invite_role_options(strings(&["role-guest", "role-member", "role-organizer"]));
+        s.set_invite_expiry_options(strings(&[
+            "invite-expiry-1h",
+            "invite-expiry-1d",
+            "invite-expiry-7d",
+            "invite-expiry-30d",
+        ]));
+        s.set_invite_uses_options(strings(&[
+            "invite-uses-1",
+            "invite-uses-5",
+            "invite-uses-10",
+            "invite-uses-unlimited-option",
+        ]));
+        s.set_invite_dialog_role(0);
+        s.set_invite_dialog_expiry(1);
+        s.set_invite_dialog_uses(3);
+        s.set_invite_dialog_code("".into());
+        s.set_invite_dialog_summary("".into());
+        s.set_invite_dialog_error("".into());
+        s.set_invite_dialog_open(true);
+    }
+
+    /// "Create invite": mint with the picks. The answer lands in the
+    /// dialog (`InviteCreated` / `InviteDenied`).
+    fn invite_dialog_create(&mut self) {
+        let s = self.main.global::<State>();
+        let grants_role = match s.get_invite_dialog_role() {
+            1 => Some(client::permissions::ROLE_MEMBER),
+            2 => Some(client::permissions::ROLE_ORGANIZER),
+            _ => None,
+        };
+        let expires_secs = match s.get_invite_dialog_expiry() {
+            0 => Some(3_600),
+            2 => Some(7 * 86_400),
+            3 => Some(30 * 86_400),
+            _ => Some(86_400),
+        };
+        let max_uses = match s.get_invite_dialog_uses() {
+            0 => Some(1),
+            1 => Some(5),
+            2 => Some(10),
+            _ => None,
+        };
+        s.set_invite_dialog_error("".into());
+        self.network
+            .tx
+            .send(NetworkControl::CreateInvite {
+                grants_role,
+                expires_secs,
+                max_uses,
+            })
+            .ok();
+    }
+
+    /// The code, again, onto the clipboard (it went there when minted).
+    fn invite_dialog_copy(&mut self) {
+        let code = self.main.global::<State>().get_invite_dialog_code();
+        if code.is_empty() {
+            return;
+        }
+        crate::clipboard::set_clipboard_text(&code);
+        self.show_toast(ToastKind::Success, &t!("invite-copied"));
+    }
+
     fn handle_invite_command(&mut self, args: &str) {
         let mut grants_role = None;
         let mut expires_secs = None;
@@ -3064,7 +3119,11 @@ impl AppState {
         let s = self.main.global::<State>();
         s.set_status_text(format!("●  {}", t!("status-connected")).into());
         s.set_status_color(slint::Color::from_rgb_u8(0x2B, 0xAC, 0x76));
-        self.push_chat_system(&format!("{server_name}: {greeting}"));
+        // The name is the sidebar's title and the greeting the General
+        // header's second line: neither repeats in chat on every login.
+        let s = self.main.global::<State>();
+        s.set_server_name(server_name.into());
+        s.set_greeting(greeting.into());
         self.update_user_list();
         self.show_main();
     }
@@ -3276,6 +3335,8 @@ impl AppState {
         s.set_perm_roles(has(p::MANAGE_ROLES));
         s.set_perm_users(has(p::MANAGE_USERS));
         s.set_perm_create_channels(has(p::CREATE_CHANNELS));
+        s.set_perm_create_invites(has(p::CREATE_INVITES));
+        s.set_perm_manage_invites(has(p::MANAGE_INVITES));
         s.set_perm_manage_own(has(p::MANAGE_OWN_CHANNELS));
         s.set_perm_delete_any(has(p::RESTRICT));
         s.set_perm_dm(has(p::DM));
@@ -3305,6 +3366,15 @@ impl AppState {
         let s = self.main.global::<State>();
         s.set_show_timestamps(self.settings.ui.show_timestamps);
         s.set_compact_rows(self.settings.ui.compact_rows);
+        s.set_messages_collapsed(self.settings.ui.messages_collapsed);
+    }
+
+    /// The Messages header's chevron: fold the section or open it,
+    /// and remember which.
+    fn toggle_messages(&mut self) {
+        self.settings.ui.messages_collapsed = !self.settings.ui.messages_collapsed;
+        self.settings.save();
+        self.push_ui_prefs();
     }
 
     /// Push-to-talk on or off: tell the engine, and the mic button
@@ -3578,12 +3648,13 @@ impl AppState {
         self.our_client_id = None;
         self.is_muted = false;
         self.is_deafened = false;
+        // A menu open on a row that is about to vanish.
+        self.close_menu();
 
         let s = self.main.global::<State>();
         s.set_muted(false);
         s.set_deafened(false);
         s.set_sharing(false);
-        s.set_user_popup_open(false);
         s.set_stream_stats("".into());
         s.set_status_text(format!("●  {}", t!("status-disconnected")).into());
         s.set_status_color(slint::Color::from_rgb_u8(0xE0, 0x1E, 0x5A));
@@ -3874,26 +3945,294 @@ impl AppState {
         )
     }
 
-    fn open_user_popup(&mut self, index: i32) {
-        let Some(id) = self.user_id_at(index) else {
-            return;
-        };
-        if Some(id) == self.our_client_id {
-            return;
-        }
-        let volume = self.users.get(&id).map_or(1.0, |u| u.audio.volume);
-        let s = self.main.global::<State>();
-        s.set_popup_user_index(index);
-        s.set_popup_volume(volume);
-        s.set_user_popup_open(true);
-    }
-
     /// The server-side identity behind roster row `index`, as an admin
     /// command names it.
     fn admin_target_at(&self, index: i32) -> Option<AdminTarget> {
         let client_id = self.user_id_at(index)?;
         let (user_id, _) = self.details.get(&client_id)?;
         Some(AdminTarget::User(*user_id))
+    }
+
+    // ── Context menus ───────────────────────────────────────────────
+    // A row asks for its menu at a window position; app-core's `menu`
+    // decides the entries from what the session may do (spec §8), the
+    // overlay in main.slint draws them, and the pick comes back to
+    // `menu_activated`, which resolves it against the remembered
+    // target. Every action sends the same `NetworkControl` its slash
+    // command does — one authorization path, two front ends.
+
+    /// What this session may do, as the menu builders read it.
+    fn menu_session(&self) -> menu::Session {
+        use client::permissions as p;
+        let has = |bit: u64| p::has(self.permissions, bit);
+        menu::Session {
+            mute: has(p::MUTE) || has(p::RESTRICT),
+            disconnect: has(p::DISCONNECT),
+            kick: has(p::KICK),
+            ban: has(p::BAN),
+            move_users: has(p::MANAGE_CHANNELS),
+            roles: has(p::MANAGE_ROLES),
+            dm: has(p::DM),
+            manage_own_channels: has(p::MANAGE_OWN_CHANNELS),
+            create_channels: has(p::CREATE_CHANNELS),
+            our_role: self.our_role_and_level().0,
+        }
+    }
+
+    /// A roster row asked for its menu (a right-click, or a left-click
+    /// on a user row). The decorated row already carries the rank
+    /// rule and the channel powers.
+    fn open_user_menu(&mut self, index: i32, x: f32, y: f32) {
+        let Some(row) = usize::try_from(index)
+            .ok()
+            .and_then(|i| self.users_model.row_data(i))
+        else {
+            return;
+        };
+        let session = self.menu_session();
+        if row.is_channel {
+            let Ok(id) = u16::try_from(row.channel_id) else {
+                return;
+            };
+            let facts = menu::ChannelFacts {
+                id,
+                owned: row.owned,
+                from_config: row.from_config,
+            };
+            let entries = menu::channel_menu(&session, &facts);
+            self.show_menu(entries, MenuTarget::Channel(id), x, y);
+        } else {
+            let facts = menu::UserFacts {
+                is_us: row.is_us,
+                role: Role::from_int(row.role).unwrap_or_default(),
+                sharing: row.sharing,
+                local_muted: row.local_muted,
+                outranked: row.outranked,
+                role_editable: row.role_editable,
+                channel_kickable: row.channel_kickable,
+                channel_id: u16::try_from(row.channel_id).unwrap_or(0),
+            };
+            let channels: Vec<menu::ChannelChoice> = self
+                .channels
+                .iter()
+                .filter(|c| !c.hidden)
+                .map(|c| menu::ChannelChoice {
+                    id: c.id,
+                    name: c.name.clone(),
+                })
+                .collect();
+            let entries = menu::user_menu(&session, &facts, &channels);
+            // The slider row starts at their current level.
+            let volume = self
+                .user_id_at(index)
+                .and_then(|id| self.users.get(&id))
+                .map_or(1.0, |u| u.audio.volume);
+            self.main.global::<State>().set_menu_volume(volume);
+            self.show_menu(entries, MenuTarget::User(index), x, y);
+        }
+    }
+
+    /// The slider in a user's menu moved: every move reaches the
+    /// audio engine so it is heard at once; the release also persists
+    /// it and refreshes the roster (the badge). The menu stays open.
+    fn menu_volume(&mut self, volume: f32, released: bool) {
+        let Some(MenuTarget::User(index)) = self.menu_target else {
+            return;
+        };
+        let Some(client_id) = self.user_id_at(index) else {
+            return;
+        };
+        if released {
+            let username = self.username_of(client_id);
+            self.handle_set_user_volume(client_id, &username, volume);
+            return;
+        }
+        let mut audio = self
+            .users
+            .get(&client_id)
+            .map(|u| peer_audio_to(u.audio))
+            .unwrap_or_default();
+        audio.volume = volume;
+        self.voice
+            .tx
+            .send(VoiceControl::SetPeerAudio(client_id, audio))
+            .ok();
+    }
+
+    /// A chat row asked for its menu; `selecting` is whether a styled
+    /// body is currently in its plain, selectable view.
+    fn open_row_menu(&mut self, row: &ChatRow, selecting: bool, x: f32, y: f32) {
+        let kind = match row.kind {
+            0 => menu::MessageKind::Text,
+            2 => menu::MessageKind::Image,
+            3 => menu::MessageKind::Code,
+            // System lines and day dividers have no menu.
+            _ => return,
+        };
+        let facts = menu::MessageFacts {
+            kind,
+            own: row.own,
+            deleted: row.deleted,
+            styled: row.styled,
+            selecting,
+            in_dm: self.active_dm.is_some(),
+            delete_any: client::permissions::has(self.permissions, client::permissions::RESTRICT),
+        };
+        let target = MenuTarget::Message {
+            row_id: row.row_id,
+            msg_id: roster::join_id(row.msg_id_lo, row.msg_id_hi),
+            body: row.body.to_string(),
+        };
+        self.show_menu(menu::message_menu(&facts), target, x, y);
+    }
+
+    /// Open the overlay with `entries` for `target` at window
+    /// coordinates; an empty menu opens nothing.
+    fn show_menu(&mut self, entries: Vec<menu::Entry>, target: MenuTarget, x: f32, y: f32) {
+        if entries.is_empty() {
+            return;
+        }
+        let (main, submenus) = ui::convert::menu_entries(&entries, &menu_label);
+        let submenus: Vec<ModelRc<ui::MenuEntry>> = submenus
+            .into_iter()
+            .map(|column| ModelRc::new(VecModel::from(column)))
+            .collect();
+        let s = self.main.global::<State>();
+        s.set_menu_entries(ModelRc::new(VecModel::from(main)));
+        s.set_menu_submenus(ModelRc::new(VecModel::from(submenus)));
+        s.set_menu_x(x);
+        s.set_menu_y(y);
+        s.set_menu_open(true);
+        self.menu_target = Some(target);
+    }
+
+    /// Escape, a click outside, or a pick: the overlay goes, and the
+    /// composer takes back the focus the overlay's key scope held.
+    fn close_menu(&mut self) {
+        self.menu_target = None;
+        let s = self.main.global::<State>();
+        if s.get_menu_open() {
+            s.set_menu_open(false);
+            if s.get_phase() == Phase::Main {
+                self.main.invoke_focus_composer();
+            }
+        }
+    }
+
+    /// An entry was picked: resolve it against the menu's target.
+    fn menu_activated(&mut self, action: MenuAction, arg: i32) {
+        use menu::Action as A;
+        let target = self.menu_target.take();
+        self.close_menu();
+        let (Some(target), Some(action)) = (target, ui::convert::menu_action_back(action, arg))
+        else {
+            return;
+        };
+        match (target, action) {
+            (MenuTarget::User(index), action) => self.user_menu_action(index, action),
+            (MenuTarget::Channel(id), A::ChannelEdit(_)) => self.channel_edit(id),
+            (MenuTarget::Channel(id), A::ChannelDelete(_)) => self.channel_delete(id),
+            (MenuTarget::Message { body, .. }, A::CopyText) => {
+                crate::clipboard::set_clipboard_text(&body);
+            }
+            (MenuTarget::Message { row_id, .. }, A::SelectText(on)) => {
+                self.main
+                    .global::<State>()
+                    .set_selecting_row(if on { row_id } else { -1 });
+            }
+            (MenuTarget::Message { msg_id, .. }, A::EditMessage) => self.row_edit(msg_id),
+            (MenuTarget::Message { msg_id, .. }, A::DeleteMessage) => self.row_delete(msg_id),
+            (MenuTarget::Message { row_id, .. }, A::OpenImage) => {
+                crate::viewers::open_gallery(self, row_id);
+            }
+            (MenuTarget::Message { row_id, .. }, A::SaveImage) => {
+                media::save_image_dialog(self, row_id);
+            }
+            (MenuTarget::Composer, A::Cut) => self.main.invoke_composer_cut(),
+            (MenuTarget::Composer, A::Copy) => self.main.invoke_composer_copy(),
+            (MenuTarget::Composer, A::Paste) => media::paste_into_chat(self),
+            _ => {}
+        }
+    }
+
+    /// The audio, message and moderation entries of a user row.
+    fn user_menu_action(&mut self, index: i32, action: menu::Action) {
+        use menu::Action as A;
+        match action {
+            // The slider row is not a pick; its moves come through
+            // `menu_volume`.
+            A::Volume => {}
+            A::MuteForMe => {
+                if let Some(id) = self.user_id_at(index) {
+                    let username = self.username_of(id);
+                    let muted = self.users.get(&id).is_some_and(|u| u.audio.is_muted);
+                    self.handle_mute_user(id, &username, !muted);
+                }
+            }
+            A::ResetAudio => {
+                if let Some(id) = self.user_id_at(index) {
+                    let username = self.username_of(id);
+                    self.handle_reset_peer_audio(id, &username);
+                }
+            }
+            A::Watch => {
+                if let Some(id) = self.user_id_at(index) {
+                    self.handle_watch_peer(id);
+                }
+            }
+            A::Message => self.dm_from_roster(index),
+            A::SetRole(role) => {
+                // The built-ins nest, so one role is the whole set.
+                if let (Some(target), Ok(role)) =
+                    (self.admin_target_at(index), u32::try_from(role.as_int()))
+                {
+                    self.send_admin(
+                        AdminCommand::SetRoles {
+                            target,
+                            roles: vec![role],
+                        },
+                        PendingAdmin::Show,
+                    );
+                }
+            }
+            A::MoveTo(channel_id) => {
+                if let Some(target) = self.admin_target_at(index) {
+                    self.send_admin(
+                        AdminCommand::MoveUser { target, channel_id },
+                        PendingAdmin::Show,
+                    );
+                }
+            }
+            A::ChannelKick => self.channel_kick_at(index),
+            A::MuteVoice => self.moderate(index, ModAction::MuteVoice),
+            A::MuteChat => self.moderate(index, ModAction::MuteChat),
+            A::UnmuteVoice => self.moderate(index, ModAction::UnmuteVoice),
+            A::UnmuteChat => self.moderate(index, ModAction::UnmuteChat),
+            A::Disconnect => self.moderate(index, ModAction::Disconnect),
+            A::Kick => self.moderate(index, ModAction::Kick),
+            A::Ban => self.moderate(index, ModAction::Ban),
+            _ => {}
+        }
+    }
+
+    /// "Send to the default channel" for the user at roster row
+    /// `index` (the owner's channel kick, spec §5).
+    fn channel_kick_at(&mut self, index: i32) {
+        let Some(client_id) = self.user_id_at(index) else {
+            return;
+        };
+        let (Some((user_id, _)), Some(user)) =
+            (self.details.get(&client_id), self.users.get(&client_id))
+        else {
+            return;
+        };
+        self.network
+            .tx
+            .send(NetworkControl::ChannelKick {
+                channel_id: user.channel_id,
+                user_id: *user_id,
+            })
+            .ok();
     }
 
     /// A moderation entry was picked for the user at row `index`: the
@@ -4364,10 +4703,17 @@ impl AppState {
 
     /// Show the main window, arming the reveal hook so the full
     /// repaint lands on the first OS paint of the (possibly fresh)
-    /// surface — see [`repaint_on_reveal`].
+    /// surface — see [`repaint_on_reveal`]. Also for a window that is
+    /// merely behind others or minimized (the tray's "Show", a second
+    /// launch of the binary): `show()` alone would leave it there.
     pub fn show_main(&self) {
+        use i_slint_backend_winit::WinitWindowAccessor;
         self.main_repaint_arm.set(true);
         let _ = self.main.show();
+        self.main.window().with_winit_window(|w| {
+            w.set_minimized(false);
+            w.focus_window();
+        });
     }
 
     // NOTE: there is deliberately no scroll-after-append here. The
@@ -4392,6 +4738,11 @@ impl AppState {
         for i in (len - delta.appended)..len {
             let row = self.chat_row_at(i);
             self.chat_model.push(row);
+        }
+        if delta.appended > 0 {
+            // A reader at the bottom follows the new rows once the
+            // list has measured them (see `ChatPane.follow-appended`).
+            self.main.invoke_chat_follow_appended();
         }
     }
 
@@ -5092,6 +5443,16 @@ impl AppState {
         self.pending_preview = Some(png);
     }
 
+    /// Close the send preview and let go of its full-resolution
+    /// texture: a property keeps its last image, and a 4K screenshot
+    /// previewed once is 32 MB that would otherwise stay until the
+    /// next one.
+    pub fn close_preview(&mut self) {
+        let s = self.main.global::<State>();
+        s.set_preview_open(false);
+        s.set_preview_image(slint::Image::default());
+    }
+
     fn gif_hover(&mut self, row_id: i32, entering: bool) {
         let needs_ticker = self
             .gifs
@@ -5280,7 +5641,14 @@ impl AppState {
     fn decorate_user_row(&self, row: &mut UserRow, user: &roster::RosterRow) {
         use client::permissions as p;
         self.apply_profile_look(&user.name, user.is_us, row);
-        row.level_line = self.user_level_line(user).into();
+        if user.level > 0 {
+            row.level_label = t!("tooltip-level", "level" => u32::from(user.level)).into();
+        }
+        row.role_label = role_name(user.role).into();
+        if let Some((pct, line)) = xp_progress(user.level, user.xp) {
+            row.xp_pct = pct;
+            row.xp_line = line.into();
+        }
         if user.is_us {
             return;
         }
@@ -5298,22 +5666,6 @@ impl AppState {
     }
 
     /// "Level 3 · Member" for the hover card.
-    fn user_level_line(&self, user: &roster::RosterRow) -> String {
-        let role = match user.role {
-            Role::Guest => Some(t!("role-guest")),
-            Role::Member => Some(t!("role-member")),
-            Role::Organizer => Some(t!("role-organizer")),
-            Role::Admin => Some(t!("role-admin")),
-            Role::Unknown => None,
-        };
-        let level = (user.level > 0).then(|| t!("tooltip-level", "level" => u32::from(user.level)));
-        match (level, role) {
-            (Some(l), Some(r)) => format!("{l} · {r}"),
-            (Some(l), None) => l,
-            (None, Some(r)) => r,
-            (None, None) => String::new(),
-        }
-    }
 
     /// The last telemetry for sessions that may see it — or a note
     /// that none arrived yet; empty for everyone else.
@@ -5430,6 +5782,25 @@ impl AppState {
             .ok();
     }
 
+    /// Someone changed their nickname: every row they authored, in
+    /// every conversation, is rebuilt under the new name.
+    fn rename_author(&mut self, old: &str, new: &str) {
+        if old == new || old.is_empty() {
+            return;
+        }
+        let keys: Vec<Option<client::UserId>> = std::iter::once(self.active_dm)
+            .chain(self.parked.keys().copied())
+            .collect();
+        for key in keys {
+            self.with_conversation(key, |app| {
+                for i in app.history.rename_author(old, new) {
+                    let row = app.chat_row_at(i);
+                    app.chat_model.set_row_data(i, row);
+                }
+            });
+        }
+    }
+
     /// A profile changed: every chat row by that author, in every
     /// conversation, takes the new look (the roster rebuilds anyway).
     fn refresh_author_look(&mut self, name: &str) {
@@ -5508,7 +5879,15 @@ impl AppState {
         let Ok(decoded) = app_core::images::decode_bounded(bytes) else {
             return;
         };
-        let rgba = decoded.to_rgba8();
+        // Ours are 128² at pick time; a picture from another client is
+        // whatever the server's KB cap let through, and it is drawn at
+        // 64 px at most. Never keep more than 128² of it resident.
+        let side = app_core::images::AVATAR_SIDE;
+        let rgba = if decoded.width().max(decoded.height()) > side {
+            decoded.thumbnail(side, side).to_rgba8()
+        } else {
+            decoded.to_rgba8()
+        };
         let image = ui::convert::rgba_image(rgba.as_raw(), rgba.width(), rgba.height());
         self.avatar_images.insert(blob, image);
         if cache {
@@ -5544,17 +5923,47 @@ impl AppState {
         match (hovering, found) {
             (true, Some(index)) => {
                 let index = i32::try_from(index).unwrap_or(-1);
+                s.set_card_guest_open(false);
                 s.set_card_index(index);
                 self.user_hovered(index);
             }
-            (true, None) => s.set_card_index(-1),
+            // Gone since they wrote: a card from what we still know.
+            (true, None) => {
+                s.set_card_index(-1);
+                let guest = self.guest_card_row(name);
+                let s = self.main.global::<State>();
+                s.set_card_guest(guest);
+                s.set_card_guest_open(true);
+            }
             (false, _) => {
                 let shown = usize::try_from(s.get_card_index()).ok();
                 if shown == found {
                     s.set_card_index(-1);
                 }
+                s.set_card_guest_open(false);
             }
         }
+    }
+
+    /// The card for a chat author who is no longer connected: name
+    /// and look from the profile cache, "Offline" where the level
+    /// would go, nothing the roster alone could tell.
+    fn guest_card_row(&self, name: &str) -> UserRow {
+        let initial: String = name
+            .chars()
+            .next()
+            .map(|c| c.to_uppercase().collect())
+            .unwrap_or_default();
+        let mut row = UserRow {
+            name: name.into(),
+            initial: initial.into(),
+            tile_tint: ui::convert::tint(name),
+            level_label: t!("card-offline").into(),
+            xp_pct: -1,
+            ..UserRow::default()
+        };
+        self.apply_profile_look(name, false, &mut row);
+        row
     }
 
     /// The pointer rests on a user row: fetch their last telemetry
@@ -5619,12 +6028,22 @@ impl AppState {
     #[allow(clippy::cast_precision_loss)]
     fn update_stream_stats(&mut self) {
         if !self.screen.shared.is_sharing.load(Ordering::Relaxed) {
+            self.stream_viewers_seen = 0;
             return;
         }
         let sh = &self.screen.shared;
         let frame_bytes = sh.last_frame_bytes.load(Ordering::Relaxed);
         let encode_us = sh.last_encode_us.load(Ordering::Relaxed);
         let viewers = sh.stream_viewers.load(Ordering::Relaxed);
+        // Someone new is watching (the count only reaches us through
+        // the screen thread's health sample, once a second).
+        if viewers > self.stream_viewers_seen && self.settings.sounds.viewer_joined_on() {
+            self.voice
+                .tx
+                .send(VoiceControl::PlaySound(SoundType::ViewerJoined))
+                .ok();
+        }
+        self.stream_viewers_seen = viewers;
         let fps_scale_pct = sh.fps_scale_pct.load(Ordering::Relaxed);
         let loss_pct = f32::from_bits(sh.stream_loss_pct.load(Ordering::Relaxed));
         let quality_str = sh
@@ -5667,6 +6086,83 @@ impl AppState {
         self.main.global::<State>().get_phase() == Phase::Main
             && self.main.window().is_visible()
             && !self.main.window().is_minimized()
+    }
+
+    /// `/mem`: where the client's memory goes, from what it holds. The
+    /// process figure the task monitor shows, beside every pixel
+    /// buffer and row the app retains — so a "the RAM tripled" report
+    /// becomes a number per bucket instead of a guess. Texture bytes
+    /// are `width × height × 4` of each `slint::Image` held; the
+    /// renderer's own caches (Skia's glyphs and surfaces) and the
+    /// allocator's slack are the remainder.
+    #[allow(clippy::cast_precision_loss)]
+    fn memory_report(&mut self) -> String {
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
+        let mb = |bytes: usize| bytes as f64 / (1024.0 * 1024.0);
+        let texture = |img: &slint::Image| {
+            let size = img.size();
+            size.width as usize * size.height as usize * 4
+        };
+        let rss = self.pid.and_then(|pid| {
+            self.sys.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&[pid]),
+                false,
+                ProcessRefreshKind::nothing().with_memory(),
+            );
+            self.sys.process(pid).map(sysinfo::Process::memory)
+        });
+        let rss = crate::resources::native_monitor_memory()
+            .or(rss)
+            .map_or_else(|| "?".to_string(), |b| format!("{:.0} MB", mb(b as usize)));
+
+        // Chat rows and their pictures, over every conversation.
+        let mut rows = self.chat_model.row_count();
+        let mut preview_bytes = 0usize;
+        let mut preview_count = 0usize;
+        for i in 0..self.chat_model.row_count() {
+            if let Some(row) = self.chat_model.row_data(i)
+                && row.kind == 2
+            {
+                preview_count += 1;
+                preview_bytes += texture(&row.image);
+            }
+        }
+        let mut parked_rows = 0usize;
+        for conv in self.parked.values() {
+            parked_rows += conv.model.row_count();
+            for i in 0..conv.model.row_count() {
+                if let Some(row) = conv.model.row_data(i)
+                    && row.kind == 2
+                {
+                    preview_count += 1;
+                    preview_bytes += texture(&row.image);
+                }
+            }
+        }
+        rows += parked_rows;
+        let compressed: usize = self.images.values().map(|e| e.bytes.len()).sum();
+        let gifs_playing = self.gifs.values().filter(|g| g.playing()).count();
+        let avatars: usize = self.avatar_images.values().map(texture).sum();
+        let own_avatar = self.own_avatar.as_ref().map_or(0, texture);
+        let viewers = self.viewers.len();
+
+        format!(
+            "Memory — process {rss}\n\
+             chat: {rows} rows ({parked_rows} parked in {} conversations), \
+             {preview_count} pictures: {:.1} MB of previews, {:.1} MB compressed, \
+             {} GIF players ({gifs_playing} playing)\n\
+             avatars: {} decoded, {:.1} MB (+{:.1} MB ours)\n\
+             roster: {} users, {} profiles; {viewers} stream viewers open",
+            self.parked.len(),
+            mb(preview_bytes),
+            mb(compressed),
+            self.gifs.len(),
+            self.avatar_images.len(),
+            mb(avatars),
+            mb(own_avatar),
+            self.users.len(),
+            self.profiles.len(),
+        )
     }
 
     #[allow(clippy::cast_precision_loss)]
@@ -5983,6 +6479,22 @@ struct Moderation {
     duration_secs: Vec<Option<u64>>,
 }
 
+/// What the open context menu is about (`AppState::show_menu`): the
+/// entries were built for it, and a pick resolves against it.
+enum MenuTarget {
+    /// A roster user row, by index into the users model.
+    User(i32),
+    Channel(u16),
+    /// A chat row: its row id (images, the plain-view toggle), the
+    /// server's message id (edit, delete) and the body (copy).
+    Message {
+        row_id: i32,
+        msg_id: u64,
+        body: String,
+    },
+    Composer,
+}
+
 /// The first bytes of a user id, for log lines and the identity panel.
 #[must_use]
 pub fn short_id(id: &[u8]) -> String {
@@ -6254,6 +6766,78 @@ fn builtin_rank(role: client::RoleId) -> Option<client::permissions::Rank> {
         .map(|r| r.rank)
 }
 
+/// How far into `level` a total of `xp` is (spec §9.1): the percent
+/// for the card's bar and its caption. `None` until the server said.
+fn xp_progress(level: u16, xp: Option<u64>) -> Option<(i32, String)> {
+    let xp = xp?;
+    if level == 0 {
+        return None;
+    }
+    let have = xp.saturating_sub(client::protocol::xp_for_level(level));
+    let need = client::protocol::cost_of_level(level).max(1);
+    let have = have.min(need);
+    let pct = i32::try_from(have * 100 / need).unwrap_or(100);
+    let line = t!(
+        "card-xp-line",
+        "have" => have,
+        "need" => need,
+        "next" => u32::from(level) + 1
+    );
+    Some((pct, line))
+}
+
+/// A built-in role's name, for the card and the menus.
+fn role_name(role: Role) -> String {
+    match role {
+        Role::Guest => t!("role-guest"),
+        Role::Member => t!("role-member"),
+        Role::Organizer => t!("role-organizer"),
+        Role::Admin => t!("role-admin"),
+        Role::Unknown => String::new(),
+    }
+}
+
+/// A menu label as the catalog says it (app-core keeps menus free of
+/// localization).
+fn menu_label(label: &menu::Label) -> slint::SharedString {
+    use menu::Label as L;
+    let key = match label {
+        L::Text(text) => return text.as_str().into(),
+        L::RoleName(role) => return role_name(*role).into(),
+        L::ChannelConfigOwned => "menu-channel-config-owned",
+        L::ChannelEdit => "menu-channel-edit",
+        L::ChannelDelete => "menu-channel-delete",
+        L::Volume => "menu-volume",
+        L::MuteForMe => "menu-mute-for-me",
+        L::UnmuteForMe => "menu-unmute-for-me",
+        L::ResetAudio => "reset-audio",
+        L::WatchStream => "watch-stream",
+        L::Message => "menu-message",
+        L::Role => "menu-role",
+        L::MoveTo => "menu-move-to",
+        L::ChannelKick => "menu-channel-kick",
+        L::Mute => "menu-mute",
+        L::MuteVoice => "menu-mute-voice",
+        L::MuteChat => "menu-mute-chat",
+        L::UnmuteVoice => "menu-unmute-voice",
+        L::UnmuteChat => "menu-unmute-chat",
+        L::Disconnect => "menu-disconnect",
+        L::Kick => "menu-kick",
+        L::Ban => "menu-ban",
+        L::CopyMessage => "menu-copy-message",
+        L::Copy => "menu-copy",
+        L::SelectText => "menu-select-text",
+        L::ShowFormatting => "menu-show-formatting",
+        L::EditMessage => "menu-edit-message",
+        L::DeleteMessage => "menu-delete-message",
+        L::OpenImage => "menu-open-image",
+        L::SaveImage => "menu-save-image",
+        L::Cut => "menu-cut",
+        L::Paste => "menu-paste",
+    };
+    t!(key).into()
+}
+
 fn role_label(role: client::RoleId) -> String {
     client::permissions::BUILTIN_ROLES
         .iter()
@@ -6373,32 +6957,12 @@ pub fn fill_tr(tr: &Tr) {
     tr.set_channel_create(t!("channel-create").into());
     tr.set_channel_save(t!("channel-save").into());
     tr.set_channel_not_persistent_note(t!("channel-not-persistent-note").into());
-    tr.set_menu_channel_edit(t!("menu-channel-edit").into());
-    tr.set_menu_channel_delete(t!("menu-channel-delete").into());
-    tr.set_menu_channel_config_owned(t!("menu-channel-config-owned").into());
     tr.set_share_visibility(t!("share-visibility").into());
     tr.set_share_channel_only(t!("share-channel-only").into());
     tr.set_share_everyone(t!("share-everyone").into());
     tr.set_stop_sharing(t!("stop-sharing").into());
     tr.set_disconnect(t!("disconnect").into());
     tr.set_live(t!("live").into());
-    tr.set_user_volume(t!("user-volume").into());
-    tr.set_watch_stream(t!("watch-stream").into());
-    tr.set_reset_audio(t!("reset-audio").into());
-    tr.set_menu_volume(t!("menu-volume").into());
-    tr.set_menu_mute_for_me(t!("menu-mute-for-me").into());
-    tr.set_menu_unmute_for_me(t!("menu-unmute-for-me").into());
-    tr.set_menu_role(t!("menu-role").into());
-    tr.set_menu_move_to(t!("menu-move-to").into());
-    tr.set_menu_channel_kick(t!("menu-channel-kick").into());
-    tr.set_menu_mute(t!("menu-mute").into());
-    tr.set_menu_mute_voice(t!("menu-mute-voice").into());
-    tr.set_menu_mute_chat(t!("menu-mute-chat").into());
-    tr.set_menu_unmute_voice(t!("menu-unmute-voice").into());
-    tr.set_menu_unmute_chat(t!("menu-unmute-chat").into());
-    tr.set_menu_disconnect(t!("menu-disconnect").into());
-    tr.set_menu_kick(t!("menu-kick").into());
-    tr.set_menu_ban(t!("menu-ban").into());
     tr.set_role_guest(t!("role-guest").into());
     tr.set_role_member(t!("role-member").into());
     tr.set_role_organizer(t!("role-organizer").into());
@@ -6413,33 +6977,34 @@ pub fn fill_tr(tr: &Tr) {
     tr.set_chat_attach_tooltip(t!("chat-attach-tooltip").into());
     tr.set_chat_clear_tooltip(t!("chat-clear-tooltip").into());
     tr.set_image_preview_title(t!("image-preview-title").into());
-    tr.set_menu_cut(t!("menu-cut").into());
-    tr.set_menu_copy(t!("menu-copy").into());
-    tr.set_menu_paste(t!("menu-paste").into());
-    tr.set_menu_copy_message(t!("menu-copy-message").into());
-    tr.set_menu_select_text(t!("menu-select-text").into());
-    tr.set_menu_show_formatting(t!("menu-show-formatting").into());
     tr.set_channel_join(t!("channel-join").into());
-    tr.set_menu_copy_link(t!("menu-copy-link").into());
-    tr.set_menu_open_link(t!("menu-open-link").into());
     tr.set_menu_save_image(t!("menu-save-image").into());
-    tr.set_menu_open_image(t!("menu-open-image").into());
     tr.set_chat_edited_mark(t!("chat-edited-mark").into());
     tr.set_chat_deleted_placeholder(t!("chat-deleted-placeholder").into());
-    tr.set_menu_edit_message(t!("menu-edit-message").into());
-    tr.set_menu_delete_message(t!("menu-delete-message").into());
     tr.set_chat_editing(t!("chat-editing").into());
     tr.set_chat_load_earlier(t!("chat-load-earlier").into());
     tr.set_chat_loading(t!("chat-loading").into());
     tr.set_banner_not_persistent(t!("chat-server-not-persistent").into());
     tr.set_messages_header(t!("messages-header").into());
+    tr.set_voice_header(t!("voice-header").into());
+    tr.set_messages_collapse(t!("messages-collapse").into());
+    tr.set_messages_expand(t!("messages-expand").into());
+    tr.set_invite_button(t!("invite-button").into());
+    tr.set_card_offline(t!("card-offline").into());
+    tr.set_invite_dialog_title(t!("invite-dialog-title").into());
+    tr.set_invite_role(t!("invite-role").into());
+    tr.set_invite_expiry(t!("invite-expiry").into());
+    tr.set_invite_uses_label(t!("invite-uses-label").into());
+    tr.set_invite_create(t!("invite-create").into());
+    tr.set_invite_copy(t!("invite-copy").into());
+    tr.set_invite_close(t!("invite-close").into());
+    tr.set_invite_share_hint(t!("invite-share-hint").into());
+    tr.set_invite_expiry_note(t!("invite-expiry-note").into());
     tr.set_dm_general(t!("dm-general").into());
     tr.set_dm_direct_message(t!("dm-direct-message").into());
     tr.set_dm_note_memory(t!("dm-note-memory").into());
     tr.set_dm_back(t!("dm-back").into());
     tr.set_chat_placeholder_dm(t!("chat-placeholder-dm").into());
-    tr.set_menu_message(t!("menu-message").into());
-    tr.set_dm_close(t!("dm-close").into());
     tr.set_monitor(t!("monitor").into());
     tr.set_quality(t!("quality").into());
     tr.set_start_sharing(t!("start-sharing").into());
@@ -6494,6 +7059,10 @@ pub fn fill_tr(tr: &Tr) {
     tr.set_sounds_mention(t!("sounds-mention").into());
     tr.set_sounds_mention_hint(t!("sounds-mention-hint").into());
     tr.set_sounds_dm(t!("sounds-dm").into());
+    tr.set_sounds_lead(t!("sounds-lead").into());
+    tr.set_sounds_share_started(t!("sounds-share-started").into());
+    tr.set_sounds_viewer_joined(t!("sounds-viewer-joined").into());
+    tr.set_sounds_viewer_joined_hint(t!("sounds-viewer-joined-hint").into());
     tr.set_startup_header(t!("startup-header").into());
     tr.set_startup_auto_connect(t!("startup-auto-connect").into());
     tr.set_startup_auto_connect_hint(t!("startup-auto-connect-hint").into());

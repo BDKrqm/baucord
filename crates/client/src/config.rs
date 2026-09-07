@@ -128,6 +128,10 @@ pub struct UiSettings {
     /// cap (`protocol::MAX_CHAT_IMAGE_BYTES`) is the ceiling.
     #[serde(default = "default_image_max_kb")]
     pub image_max_kb: u32,
+    /// The sidebar's Messages section is folded to its header, giving
+    /// the voice channels the room.
+    #[serde(default)]
+    pub messages_collapsed: bool,
 }
 
 impl Default for UiSettings {
@@ -137,6 +141,7 @@ impl Default for UiSettings {
             show_timestamps: true,
             compact_rows: false,
             image_max_kb: default_image_max_kb(),
+            messages_collapsed: false,
         }
     }
 }
@@ -171,6 +176,13 @@ pub struct SoundSettings {
     /// us, and only us.
     #[serde(default = "default_true")]
     pub direct_message: bool,
+    /// Someone in our channel starts sharing their screen.
+    #[serde(default = "default_true")]
+    pub share_started: bool,
+    /// Someone starts watching the stream we share (a softer sound,
+    /// to the sharer alone).
+    #[serde(default = "default_true")]
+    pub viewer_joined: bool,
 }
 
 impl Default for SoundSettings {
@@ -180,6 +192,8 @@ impl Default for SoundSettings {
             join_leave: true,
             mention: false,
             direct_message: true,
+            share_started: true,
+            viewer_joined: true,
         }
     }
 }
@@ -199,6 +213,16 @@ impl SoundSettings {
     #[must_use]
     pub fn direct_message_on(&self) -> bool {
         self.enabled && self.direct_message
+    }
+
+    #[must_use]
+    pub fn share_started_on(&self) -> bool {
+        self.enabled && self.share_started
+    }
+
+    #[must_use]
+    pub fn viewer_joined_on(&self) -> bool {
+        self.enabled && self.viewer_joined
     }
 }
 
