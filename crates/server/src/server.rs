@@ -28,10 +28,10 @@ use log::{debug, info, warn};
 use protocol::{
     features,
     permissions::{self, RoleId, RANK_ADMIN, RANK_GUEST, ROLE_ADMIN},
-    Auth, ChannelDenyReason, ChannelInfo, ChatMessage, ClientId, ClientKeyProof, ClientMessage,
-    DenyReason, InviteDenyReason, InviteInvalidReason, Lane, NeedInviteReason, RefusedReason,
-    RemovedKind, RestrictionKind, ServerMessage, ShareScope, TelemetryEvent, TelemetrySample,
-    UserId,
+    AdminCommand, Auth, ChannelDenyReason, ChannelInfo, ChatMessage, ClientId, ClientKeyProof,
+    ClientMessage, DenyReason, InviteDenyReason, InviteInvalidReason, Lane, NeedInviteReason,
+    RefusedReason, RemovedKind, RestrictionKind, ServerMessage, ShareScope, TelemetryEvent,
+    TelemetrySample, UserId,
 };
 use sha2::{Digest, Sha256};
 use transport::{
@@ -39,8 +39,10 @@ use transport::{
     Budget, DisconnectReason, Driver, DriverHost, Event, Fingerprint, LinkStats, ServerIdentity,
 };
 
+mod admin;
 mod channels;
 mod dms;
+mod files;
 mod history;
 mod moderation;
 mod profiles;
@@ -144,6 +146,8 @@ pub struct ChatServer {
     /// The clock of the current tick; every timestamp in this file
     /// comes from here so the simulation harness controls it.
     now: Instant,
+    /// When this process started (the panel's uptime).
+    started: Instant,
     /// Wall time, derived from `now` (spec §10).
     clock: Clock,
     /// The persistence thread's handle (spec §1). Never blocks.
@@ -224,6 +228,8 @@ pub struct ChatServer {
     /// Blob uploads in flight (spec §7), announced first.
     blob_uploads: HashMap<ClientId, IncomingUpload>,
     announced_uploads: HashMap<ClientId, AnnouncedUpload>,
+    /// Each user's upload volume today (spec §7's daily allowance).
+    uploads_today: HashMap<UserId, files::DailyUpload>,
     /// Blob bytes by hash: the only copy without persistence, a cache
     /// of the disk with it.
     blob_bytes: HashMap<protocol::BlobId, std::sync::Arc<Vec<u8>>>,
@@ -234,6 +240,9 @@ pub struct ChatServer {
     renamed_at: HashMap<ClientId, Instant>,
     /// DMs waiting for the store, and conversation-list reads (spec §6).
     pending_dms: HashMap<AskId, PendingDm>,
+    /// Audit reads in flight for the panel: who asked, with which
+    /// request id.
+    pending_audits: HashMap<AskId, (ClientId, u32)>,
     pending_convs: HashMap<AskId, ClientId>,
     /// In-progress log uploads, same shape.
     log_uploads: HashMap<ClientId, IncomingUpload>,
@@ -335,6 +344,7 @@ impl ChatServer {
             driver,
             fingerprint: identity.fingerprint(),
             now,
+            started: now,
             clock,
             persist,
             policy,
@@ -371,11 +381,13 @@ impl ChatServer {
             uploads: HashMap::new(),
             blob_uploads: HashMap::new(),
             announced_uploads: HashMap::new(),
+            uploads_today: HashMap::new(),
             blob_bytes: HashMap::new(),
             pending_blobs: HashMap::new(),
             profile_changed_at: HashMap::new(),
             renamed_at: HashMap::new(),
             pending_dms: HashMap::new(),
+            pending_audits: HashMap::new(),
             pending_convs: HashMap::new(),
             log_uploads: HashMap::new(),
             last_log_upload: HashMap::new(),
@@ -502,12 +514,23 @@ impl ChatServer {
             code: code.clone(),
             invite: invite.clone(),
         });
+        let uses = max_uses.map_or_else(|| "unlimited uses".to_string(), |n| format!("{n} uses"));
+        let ttl = ttl_ms.map_or_else(
+            || "never expires".to_string(),
+            |ms| {
+                format!(
+                    "expires in {}",
+                    crate::server::files::human_duration(ms / 1000)
+                )
+            },
+        );
         self.audit(
             created_by,
             "invite.create",
             Some(code.clone()),
             Some(format!(
-                "role {role}, max_uses {max_uses:?}, ttl_ms {ttl_ms:?}"
+                "as {}, {uses}, {ttl}",
+                self.role_name_for_audit(role)
             )),
         );
         Ok((code, invite))
@@ -528,8 +551,17 @@ impl ChatServer {
                 .map(|u| hex(&u[..8]))
                 .or_else(|| stored.key_hash.map(|k| hex(&k[..8]))),
             Some(format!(
-                "{:?} until {:?}: {}",
-                stored.kind, stored.until, stored.reason
+                "{} {}{}",
+                stored.kind.name(),
+                stored.until.map_or_else(
+                    || "indefinitely".to_string(),
+                    |until| format!("until {}", wall_stamp(until))
+                ),
+                if stored.reason.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", stored.reason)
+                }
             )),
         );
         if stored.kind == RestrictionKind::Server {
@@ -1078,7 +1110,10 @@ impl ChatServer {
                 Some(user_id),
                 "user.join",
                 Some(hex(&user_id[..8])),
-                Some(format!("invite {code}, role {role}")),
+                Some(format!(
+                    "with invite {code} as {}",
+                    self.role_name_for_audit(role)
+                )),
             );
             let role_name = self
                 .policy
@@ -1127,6 +1162,10 @@ impl ChatServer {
                     persistent: self.persist.is_persistent(),
                 },
             );
+        }
+        if negotiated & features::ROLE_LIST != 0 {
+            let roles = self.role_list();
+            self.send_msg(peer, &roles);
         }
         self.handle_client_connected(peer, username);
     }
@@ -1279,6 +1318,8 @@ impl ChatServer {
                 self.resolve_dm_answer(id, outcome);
             } else if self.is_conversations_ask(id) {
                 self.resolve_conversations_answer(id, outcome);
+            } else if self.is_audit_ask(id) {
+                self.resolve_audit_answer(id, outcome);
             } else {
                 self.resolve_history_answer(id, outcome);
             }
@@ -1655,7 +1696,7 @@ impl ChatServer {
             .map(|(c, u)| self.user_progress(*c, u))
             .collect();
         for msg in progress {
-            self.send_if(client_id, features::PROGRESS, &msg);
+            self.send_if(client_id, features::PROGRESS_ALL, &msg);
         }
 
         self.broadcast_msg_except(
@@ -1677,7 +1718,7 @@ impl ChatServer {
             }
             let msg = self.user_progress(client_id, &user_id);
             for peer in self.clients() {
-                self.send_if(peer, features::PROGRESS, &msg);
+                self.send_if(peer, features::PROGRESS_ALL, &msg);
             }
         }
         self.refresh_enforcement();
@@ -1816,6 +1857,7 @@ impl ChatServer {
                         body: text,
                         name: username,
                         edited: false,
+                        blob_id: None,
                     };
                     self.remember_message(&row);
                     self.persist.send(Command::InsertMessage(row));
@@ -1868,6 +1910,11 @@ impl ChatServer {
             ClientMessage::MarkRead { conv, msg_id } => {
                 self.handle_mark_read(client_id, conv, msg_id);
             }
+            ClientMessage::SendFile {
+                conv,
+                blob_id,
+                client_ref,
+            } => self.handle_send_file(client_id, conv, blob_id, client_ref),
             ClientMessage::ChatImageChunk {
                 upload_id,
                 index,
@@ -2024,6 +2071,12 @@ impl ChatServer {
                 request_id,
                 command,
             } => {
+                // The audit log is a disk read: answered when the store
+                // does (`resolve_audit_answer`), everything else now.
+                if let AdminCommand::AuditLog { before, limit } = command {
+                    self.handle_audit_log(client_id, request_id, before, limit);
+                    return;
+                }
                 let result = self.handle_admin(client_id, command);
                 self.send_msg(
                     client_id,
@@ -3011,6 +3064,14 @@ fn mint_bootstrap_invite(
         protocol::invite::display_code(&code)
     );
     Some(code)
+}
+
+/// A wall-clock millisecond stamp as `2026-09-08 14:06`, for audit lines.
+fn wall_stamp(ms: u64) -> String {
+    chrono::DateTime::from_timestamp_millis(i64::try_from(ms).unwrap_or(0)).map_or_else(
+        || ms.to_string(),
+        |t| t.format("%Y-%m-%d %H:%M UTC").to_string(),
+    )
 }
 
 fn hex(bytes: &[u8]) -> String {

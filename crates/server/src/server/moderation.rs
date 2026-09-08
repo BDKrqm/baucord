@@ -19,7 +19,7 @@ use protocol::{
     },
     features,
     permissions::{self, RoleId},
-    ClientId, RemovedKind, RestrictionKind, ServerMessage, UserId,
+    ClientId, RemovedKind, RestrictionKind, RoleInfo, ServerMessage, UserId,
 };
 
 use super::{hex, ChatServer};
@@ -202,6 +202,31 @@ impl ChatServer {
                 self.send_if_roles(peer, &msg);
             }
         }
+        // Each session's own permission set, so its gates follow a
+        // `server user grant` without a reconnect.
+        let persistent = self.persist.is_persistent();
+        let sessions: Vec<(ClientId, ServerMessage)> = self
+            .user_of
+            .iter()
+            .map(|(c, u)| {
+                (
+                    *c,
+                    ServerMessage::Session {
+                        user_id: *u,
+                        permissions: self.effective_permissions(u),
+                        persistent,
+                    },
+                )
+            })
+            .collect();
+        for (client, session) in sessions {
+            self.send_if_roles(client, &session);
+        }
+        // The table itself may have changed (`server role`).
+        let roles = self.role_list();
+        for peer in self.clients() {
+            self.send_if(peer, features::ROLE_LIST, &roles);
+        }
     }
 
     /// The roster line for a session (spec §8): who it is and its roles.
@@ -220,6 +245,27 @@ impl ChatServer {
     }
 
     /// Send only to a session that negotiated `ROLES`.
+    /// The role table, in rank order (spec §4), for clients that name
+    /// roles by id.
+    pub(super) fn role_list(&self) -> ServerMessage {
+        let mut roles: Vec<RoleInfo> = self
+            .policy
+            .roles
+            .iter()
+            .map(|(id, r)| RoleInfo {
+                id: *id,
+                name: r.name.clone(),
+                rank: r.rank,
+                permissions: r.permissions,
+                builtin: r.builtin,
+                icon: r.icon.clone(),
+                color: r.color,
+            })
+            .collect();
+        roles.sort_by_key(|r| (r.rank, r.id));
+        ServerMessage::RoleList { roles }
+    }
+
     /// Where a session's user stands (spec §9.1): the xp behind the
     /// level `UserDetails` carries, for sessions that render the bar.
     pub(super) fn user_progress(&self, client: ClientId, user: &UserId) -> ServerMessage {
@@ -228,6 +274,22 @@ impl ChatServer {
             xp: self.policy.xp.get(user).copied().unwrap_or(0),
             level: self.policy.level_of(user),
         }
+    }
+
+    /// A role's name for an audit line (custom ones included).
+    pub(super) fn role_name_for_audit(&self, role: RoleId) -> String {
+        self.policy
+            .roles
+            .get(&role)
+            .map_or_else(|| format!("role {role}"), |r| r.name.clone())
+    }
+
+    /// A channel's name for an audit line, or its id.
+    pub(super) fn channel_name_for_audit(&self, channel_id: u16) -> String {
+        self.channel_infos
+            .iter()
+            .find(|c| c.id == channel_id)
+            .map_or_else(|| format!("channel {channel_id}"), |c| c.name.clone())
     }
 
     pub(super) fn send_if_roles(&mut self, client: ClientId, msg: &ServerMessage) {
@@ -289,6 +351,9 @@ impl ChatServer {
         };
         let actor_name = self.get_username(client);
         info!("{actor_name} ({client:#x}) admin: {command:?}");
+        if let Some(result) = self.handle_panel_command(actor, perms, &command) {
+            return result;
+        }
         match command {
             AdminCommand::ListUsers => {
                 need(permissions::MANAGE_USERS)?;
@@ -506,7 +571,7 @@ impl ChatServer {
                     Some(actor),
                     "user.move",
                     Some(hex(&user_id[..8])),
-                    Some(format!("channel {channel_id}")),
+                    Some(format!("to {}", self.channel_name_for_audit(channel_id))),
                 );
                 Ok(AdminOutcome::Done)
             }
@@ -579,6 +644,14 @@ impl ChatServer {
                 self.reset_profile(actor, &user_id, lock, &actor_name);
                 Ok(AdminOutcome::Done)
             }
+            // The panel's commands answered above.
+            AdminCommand::AuditLog { .. }
+            | AdminCommand::CreateRole { .. }
+            | AdminCommand::EditRole { .. }
+            | AdminCommand::DeleteRole { .. }
+            | AdminCommand::ListBlobs
+            | AdminCommand::DeleteBlob { .. }
+            | AdminCommand::ServerStats => Err(AdminError::Invalid("unreachable".into())),
         }
     }
 
@@ -816,7 +889,15 @@ impl ChatServer {
             Some(actor),
             "user.roles",
             Some(hex(&user_id[..8])),
-            Some(format!("{roles:?}")),
+            Some(if roles.is_empty() {
+                "no roles".to_string()
+            } else {
+                roles
+                    .iter()
+                    .map(|r| self.role_name_for_audit(*r))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }),
         );
         self.roles_changed(user_id);
         Ok(())
@@ -865,7 +946,7 @@ impl ChatServer {
 
     /// After a role change: the relay set, the roster lines, and a
     /// fresh `Session` for the user's own sessions so their UI follows.
-    fn roles_changed(&mut self, user_id: &UserId) {
+    pub(super) fn roles_changed(&mut self, user_id: &UserId) {
         self.refresh_enforcement();
         let sessions = self.sessions_of(user_id);
         let perms = self.effective_permissions(user_id);

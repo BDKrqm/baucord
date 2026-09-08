@@ -47,6 +47,9 @@ export struct UserRow {
     level: int,             // users: progress level, 0 = unknown
     level-label: string,    // users: "Level 3" for the hover card ("" = unknown)
     role-label: string,     // users: "Member" for the hover card ("" = none)
+    role-icon: string,      // users: a custom role's glyph name ("" = none)
+    role-color: color,      // users: a custom role's color
+    has-role-color: bool,
     xp-pct: int,            // users: 0…100 into the current level; -1 = unknown
     xp-line: string,        // users: "128 / 250 xp to level 4"
     telemetry: string,      // users: the last telemetry (admins only), "" otherwise
@@ -102,6 +105,7 @@ export enum MenuAction {
     mute-voice, mute-chat, unmute-voice, unmute-chat, disconnect, kick, ban,
     copy-text, select-text, edit-message, delete-message, open-image, save-image,
     cut, copy, paste,
+    save-file,
 }
 
 /// One row of a context menu, drawn by the overlay in main.slint.
@@ -149,6 +153,11 @@ export struct ChatRow {
     name-color: color,
     has-name-color: bool,
     name-style: int,
+    file-kind: string,      // files: "PDF" — the card's type word
+    file-meta: string,      // files: "1.2 MB" — the card's second line
+    transfer-kind: int,     // files: 0 none, 1 uploading, 2 downloading
+    transfer-pct: int,      // files: 0…100 while a transfer runs
+    file-saved: bool,       // files: already in the Downloads folder
 }
 
 export struct EmojiRow  { glyph: string, code: string, section: string }
@@ -193,6 +202,11 @@ export global State {
     in property <string> users-count-label;
     /// The Messages section is folded to its header (a setting).
     in property <bool> messages-collapsed: false;
+    /// The sidebar's width: dragged at its edge, kept in settings.
+    in-out property <length> sidebar-width: 260px;
+    /// The Messages section's height: dragged at its divider, kept in
+    /// settings.
+    in-out property <length> messages-height: 200px;
     in property <bool> muted;
     in property <bool> deafened;
     /// Push-to-talk: the mic is closed until the key is held.
@@ -214,7 +228,6 @@ export global State {
     in property <[ChatRow]> chat;
     in-out property <string> draft;
     in property <int> max-chars: 400;
-    in property <string> upload-line;      // "" when idle
     /// Older pages exist on the server (History.more): the "load
     /// earlier" control appears at the top of the list.
     in property <bool> history-more: false;
@@ -313,6 +326,7 @@ export global State {
     in property <bool> perm-create-channels: false;
     in property <bool> perm-create-invites: false;
     in property <bool> perm-manage-invites: false;  // longer expiries
+    in property <bool> perm-panel: false;           // the Admin chip (PANEL)
     in property <bool> perm-manage-own: false;  // MANAGE_OWN_CHANNELS
     /// Our highest built-in role (same scale as UserRow.role): the
     /// role submenu offers roles up to it.
@@ -414,6 +428,8 @@ export global Logic {
     callback general-clicked();                // back to the general chat
     /// The Messages header's chevron: fold the section or open it.
     callback messages-toggle();
+    /// The sidebar's edge was dragged and let go: keep the width.
+    callback sidebar-resized(length);
     callback moderation-confirm();             // reads State.moderation-*
     callback moderation-cancel();
 
@@ -432,7 +448,17 @@ export global Logic {
     /// text selection): the host appends it to the draft and refocuses
     /// the composer, so typing anywhere in the chat writes a message.
     callback type-through(string);
+    /// The paperclip: any file — an image previews as before, the
+    /// rest uploads and posts as a card (spec §7).
     callback attach-image();
+    /// A card's Save: fetch the blob into the Downloads folder.
+    callback file-save(int);
+    /// A saved card's Open: the file, with what the system uses for it.
+    callback file-open(int);
+    /// Stop the card's transfer, whichever way it goes.
+    callback file-cancel(int);
+    /// The Voice/Messages divider was let go: keep the height.
+    callback messages-resized(length);
     // Wipe the local chat history/images (each user clears their own).
     callback clear-chat();
     callback emoji-picked(string);
@@ -462,6 +488,8 @@ export global Logic {
     callback channel-password-cancel();
     /// The Invite button: open the dialog.
     callback invite-create();
+    /// The Admin chip: open the panel (spec §8).
+    callback admin-open();
     /// The dialog: mint with the picked options; copy the code; close.
     callback invite-dialog-create();
     callback invite-dialog-copy();

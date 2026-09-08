@@ -22,7 +22,7 @@
 // spoofed by other clients. See `protocol::relayed`.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::SocketAddr,
     sync::Arc,
     thread,
@@ -285,6 +285,35 @@ pub enum NetworkMessage {
         xp: u64,
         level: u16,
     },
+    /// The server's role table (spec §4), custom roles included.
+    RoleList {
+        roles: Vec<protocol::RoleInfo>,
+    },
+    /// A file in a conversation (spec §7): a card, from `username`.
+    FileMessage {
+        conv: protocol::ConvRef,
+        from: UserId,
+        username: String,
+        id: u64,
+        ts: u64,
+        client_id: u64,
+        attachment: protocol::Attachment,
+    },
+    /// A blob fetch is `pct` of the way in (a Save's download).
+    BlobProgress {
+        blob_id: protocol::BlobId,
+        pct: u8,
+    },
+    /// A blob fetch cannot complete: too large for the reassembler,
+    /// or the bytes did not match their hash.
+    BlobFailed {
+        blob_id: protocol::BlobId,
+    },
+    /// The cards of a history page, by message id.
+    HistoryAttachments {
+        conv: protocol::ConvRef,
+        items: Vec<(u64, protocol::Attachment)>,
+    },
     /// Per-channel facts `ChannelInfo` cannot carry (spec §5).
     ChannelDetails {
         channel_id: u16,
@@ -537,6 +566,10 @@ struct IncomingImage {
     hash: [u8; 32],
     chunks: Vec<Option<Vec<u8>>>,
     started: Instant,
+    /// The percent last reported (blob fetches only).
+    last_pct: u8,
+    /// When the last chunk came, for the idle window.
+    last_chunk: Instant,
 }
 
 /// An announced blob upload waiting for the server's `UploadAccept`.
@@ -604,6 +637,12 @@ pub(crate) struct NetworkClient {
     incoming_blobs: HashMap<[u8; 32], IncomingImage>,
     /// The blob we announced and may still have to send.
     pending_blob: Option<PendingBlob>,
+    /// The upload id the media lane is busy with (`upload` is the
+    /// driver's handle for the same send), for a cancel.
+    upload_for: Option<u32>,
+    /// Blobs whose fetch was cancelled: chunks still arriving are
+    /// dropped until the blob is asked for again.
+    ignored_blobs: HashSet<[u8; 32]>,
     last_stats_check: Instant,
     /// Transport counters at the last stats sample.
     stats_baseline: Option<LinkStats>,
@@ -700,6 +739,8 @@ impl NetworkClient {
             incoming_images: HashMap::new(),
             incoming_blobs: HashMap::new(),
             pending_blob: None,
+            upload_for: None,
+            ignored_blobs: HashSet::new(),
             last_stats_check: now,
             stats_baseline: None,
             telemetry_baseline: None,
@@ -1468,6 +1509,30 @@ impl NetworkClient {
                     level,
                 });
             }
+            ServerMessage::RoleList { roles } => {
+                self.message_queue.push(NetworkMessage::RoleList { roles });
+            }
+            ServerMessage::FileMessage {
+                conv,
+                from,
+                msg,
+                attachment,
+            } => {
+                let username = self.username_of(msg.client_id);
+                self.message_queue.push(NetworkMessage::FileMessage {
+                    conv,
+                    from,
+                    username,
+                    id: msg.id,
+                    ts: msg.ts,
+                    client_id: msg.client_id,
+                    attachment,
+                });
+            }
+            ServerMessage::HistoryAttachments { conv, items } => {
+                self.message_queue
+                    .push(NetworkMessage::HistoryAttachments { conv, items });
+            }
             ServerMessage::ChannelDetails {
                 channel_id,
                 stable_id,
@@ -1822,6 +1887,8 @@ impl NetworkClient {
                 hash,
                 chunks: vec![None; count as usize],
                 started: now,
+                last_pct: 0,
+                last_chunk: now,
             });
         if entry.count != count || entry.hash != hash || entry.chunks[index as usize].is_some() {
             return None; // inconsistent or duplicate — drop
@@ -1860,11 +1927,16 @@ impl NetworkClient {
         count: u32,
         data: Vec<u8>,
     ) -> Option<Vec<u8>> {
-        if count == 0 || count > protocol::MAX_IMAGE_CHUNKS || index >= count {
+        if count == 0 || count > protocol::MAX_BLOB_CHUNKS || index >= count {
             return None;
         }
+        if self.ignored_blobs.contains(&blob_id) {
+            return None;
+        }
+        // Idle, not age: a big blob over a slow link outlives the image
+        // window and must not be thrown away mid-transfer.
         self.incoming_blobs
-            .retain(|_, blob| now.duration_since(blob.started) < IMAGE_PARTIAL_TTL);
+            .retain(|_, blob| now.duration_since(blob.last_chunk) < IMAGE_PARTIAL_TTL);
         let entry = self
             .incoming_blobs
             .entry(blob_id)
@@ -1875,18 +1947,33 @@ impl NetworkClient {
                 hash: blob_id,
                 chunks: vec![None; count as usize],
                 started: now,
+                last_pct: 0,
+                last_chunk: now,
             });
         if entry.count != count || entry.chunks[index as usize].is_some() {
             return None;
         }
         entry.bytes += data.len();
-        if entry.bytes > protocol::MAX_CHAT_IMAGE_BYTES {
+        entry.last_chunk = now;
+        // The blob ceiling, not the image one: a 25 MB file used to hit
+        // the image cap at 10 MiB, lose its partial, and start over
+        // from the next chunk — a counter that reset and never landed.
+        if entry.bytes > protocol::MAX_BLOB_BYTES {
             self.incoming_blobs.remove(&blob_id);
+            self.message_queue
+                .push(NetworkMessage::BlobFailed { blob_id });
             return None;
         }
         entry.chunks[index as usize] = Some(data);
         entry.received += 1;
         if entry.received < entry.count {
+            #[allow(clippy::cast_possible_truncation)] // ≤ 100
+            let pct = (u64::from(entry.received) * 100 / u64::from(entry.count)) as u8;
+            if pct != entry.last_pct {
+                entry.last_pct = pct;
+                self.message_queue
+                    .push(NetworkMessage::BlobProgress { blob_id, pct });
+            }
             return None;
         }
         let entry = self.incoming_blobs.remove(&blob_id)?;
@@ -1897,6 +1984,8 @@ impl NetworkClient {
         let digest: [u8; 32] = Sha256::digest(&bytes).into();
         if digest != blob_id {
             warn!("Fetched blob failed its hash; dropped");
+            self.message_queue
+                .push(NetworkMessage::BlobFailed { blob_id });
             return None;
         }
         Some(bytes)
@@ -1960,8 +2049,35 @@ impl NetworkClient {
         let Some(frames) = frames else {
             return;
         };
-        if let Err(e) = self.driver.send_media(now, self.server, frames) {
-            warn!("Blob upload could not start: {e}");
+        match self.driver.send_media(now, self.server, frames) {
+            Ok(id) => {
+                // The same tracker as an image send: one media upload
+                // at a time, its percent to the UI as the bytes go.
+                self.upload = Some(id);
+                self.upload_for = Some(upload_id);
+                self.upload_last_pct = 255;
+                self.report_upload_progress();
+            }
+            Err(e) => warn!("Blob upload could not start: {e}"),
+        }
+    }
+
+    /// Stop a blob upload: not yet accepted → forgotten; in flight →
+    /// the media stream is reset, so the server drops the partial.
+    fn cancel_blob_upload(&mut self, upload_id: u32) {
+        if self
+            .pending_blob
+            .as_ref()
+            .is_some_and(|p| p.upload_id == upload_id)
+        {
+            self.pending_blob = None;
+            return;
+        }
+        if self.upload_for == Some(upload_id)
+            && let Some(id) = self.upload.take()
+        {
+            self.upload_for = None;
+            let _ = self.driver.cancel_media(self.server, id);
         }
     }
 
@@ -2253,6 +2369,25 @@ pub enum NetworkControl {
     },
     FetchBlob {
         blob_id: protocol::BlobId,
+    },
+    /// Stop an upload: forgotten if not yet accepted, the stream reset
+    /// if the bytes are going. Nothing answers.
+    CancelUpload {
+        upload_id: u32,
+    },
+    /// Stop the image send in flight (the stream is reset).
+    CancelImage,
+    /// Stop a fetch: the partial is dropped and later chunks of this
+    /// blob are ignored until it is asked for again.
+    CancelFetch {
+        blob_id: protocol::BlobId,
+    },
+    /// Post an uploaded blob into a conversation (spec §7). Ends in
+    /// `NetworkMessage::MessageAck` / `MessageFailed` on `client_ref`.
+    SendFile {
+        conv: protocol::ConvRef,
+        blob_id: protocol::BlobId,
+        client_ref: u32,
     },
     // ── 1.1.1: direct messages ───────────────────────────────────────
     SendDm {
@@ -2571,7 +2706,45 @@ fn handle_control(
                 c.begin_blob_upload(now, upload_id, name, mime, data);
             }
         }
+        NetworkControl::CancelUpload { upload_id } => {
+            if let Some(c) = client {
+                c.cancel_blob_upload(upload_id);
+            }
+        }
+        NetworkControl::CancelImage => {
+            if let Some(c) = client
+                && c.upload_for.is_none()
+                && let Some(id) = c.upload.take()
+            {
+                let _ = c.driver.cancel_media(c.server, id);
+            }
+        }
+        NetworkControl::CancelFetch { blob_id } => {
+            if let Some(c) = client {
+                c.incoming_blobs.remove(&blob_id);
+                c.ignored_blobs.insert(blob_id);
+            }
+        }
+        NetworkControl::SendFile {
+            conv,
+            blob_id,
+            client_ref,
+        } => {
+            if let Some(c) = client {
+                c.send_control(
+                    now,
+                    &ClientMessage::SendFile {
+                        conv,
+                        blob_id,
+                        client_ref,
+                    },
+                );
+            }
+        }
         NetworkControl::FetchBlob { blob_id } => {
+            if let Some(c) = client {
+                c.ignored_blobs.remove(&blob_id);
+            }
             if let Some(c) = client {
                 c.send_control(now, &ClientMessage::FetchBlob { blob_id });
             }
