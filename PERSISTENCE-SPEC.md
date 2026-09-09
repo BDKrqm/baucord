@@ -779,72 +779,46 @@ invite expiry, `until` and `ts` need wall time. A `Clock` on
 simulator's fake `Instant` advances wall time for free and an
 "expired invite" test simply runs the clock forward.
 
-## 11. Delivery plan
+## 11. Delivery plan — status
 
-Each step is independently releasable and leaves the media path
-untouched.
+Each step was independently releasable and left the media path
+untouched. All of it is shipped; the versions are the client's and
+server's (they move together).
 
 1. **1.1.0 — foundation.** Persistence thread, schema, migrations,
    `backup`. Invites (privilege keys) as the only door, key identity,
    export/import. Roles with the four built-ins and the restriction
-   family.
-   General-chat history replay, edit/delete, rate limit. Channels
-   from the UI (two per organizer, temporary by default, join gates,
-   owner powers, per-channel auto-AFK). Telemetry rows and the admin
-   roster tooltip. Admin CLI (`user`, `role`, `invite`, `restrict`,
-   `telemetry`, `backup`, `purge`).
-
-   The **first** test written in this release, before any feature:
-   "persistence thread stalled for 10 s — voice and video unaffected,
-   writes counted as dropped, history answers empty with a retry hint."
-
-   **Status (server side complete, client UI pending):** steps A–E of
-   the build are in — persistence thread and schema (`0001`, `0002`),
-   `backup`/`db check`, invites and key identity with export/import,
-   the four roles and the restriction family, moderation over the wire
-   and from the CLI, history replay/paging/edit/delete with the ring,
-   the chat rate limit, telemetry rows and `server telemetry`,
-   progress, UI channels with gates, temporary sweep and auto-AFK. The
-   stall test covers voice, dropped writes and the history retry hint.
-   Still open inside 1.1.0: the client UI (F2 — roster badges, the
-   channel dialog, history rendering with ids, moderation menus, the
-   admin roster tooltip), `server role` (custom roles beyond the four
-   built-ins: the table and `SetRoles` accept them, nothing creates
-   them yet), `server restore` and `server db prune` as commands
-   (restore is untarring the backup with the server stopped; prune
-   runs hourly on its own), `AuditLog` over the wire (with the admin
-   channel, 1.1.3). Per-user `DM` enforcement and `Conversations` are
-   1.1.1.
+   family. General-chat history replay, edit/delete, rate limit.
+   Channels from the UI. Telemetry rows and the admin roster tooltip.
+   The admin CLI. The first test written: "persistence thread stalled
+   for 10 s — voice and video unaffected, writes counted as dropped,
+   history answers empty with a retry hint."
 2. **1.1.1 — DMs.** Direct messages with offline delivery, unread
-   counts, `FetchHistory` paging, the conversation list. **Done.**
+   counts, `FetchHistory` paging, the conversation list.
 3. **1.1.2 — profiles.** Name color and style, avatars over the blob
-   path, the contrast check, admin reset/lock, plus the client work
-   that followed (the app's own context menus with the volume slider,
-   the collapsible Messages section, the invite dialog, the XP bar
-   and `UserProgress`, the share sounds, one instance per profile).
-   **Released.**
+   path, the contrast check, admin reset/lock; the app's own context
+   menus with the volume slider, the collapsible Messages section,
+   the invite dialog, the XP bar (`UserProgress`), the share sounds,
+   one instance per profile.
 4. **1.1.3 — roles, files, the admin panel.** Custom roles with
-   badges (`server role`, derived ranks, `RoleList`), files in
-   General and DMs (the blob path, allowance and cap, cards with a
-   transfer ring and cancel), the admin panel (users, roles,
-   restrictions, invites, channels, files, audit, server; `PANEL`
-   as its door), a resizable sidebar. **Released.**
-5. **1.1.4 — the rest of the spec's lines.** Blob retention in the
-   hourly prune (`files.retain_days`), purge dropping the person's
-   blobs, chat xp (1 per message, at the flush), pictures on the blob
-   path everywhere a server keeps files (a picture is a file with a
-   picture inside; only memory-mode servers still get the live
-   relay), the transfer budget in place of the image one
-   (`limits.max_transfer_kb_per_minute[_global]`, old names read),
-   `server restore` and `server db prune`, the **admin channel**
-   (`ADMIN_CHANNEL` permission; the audit as it happens over
-   `AuditLine`, slash commands at hand, a shield row in Messages),
-   and push-to-talk that watches its key instead of taking it.
-5. Later: role badges for organizer and admin (icons from the key's
-   roles), channel topics, reserved names, a manual away toggle shown
-   in the roster, animated avatars, anything built on progress (a
-   leaderboard, level-gated invites), `Auth::Account` only if a server
-   ever wants people rather than devices.
+   derived ranks and badges (`server role`, `RoleList`), `panel`,
+   `gold` and `admin-channel` as permissions, files on the blob path
+   in General and DMs (cards with a transfer ring and cancel), the
+   admin panel (users, roles, restrictions, invites, channels, files,
+   audit, server), a resizable sidebar.
+5. **1.1.4 — the rest of this document.** Blob retention in the hourly
+   prune, purge dropping the person's files, chat xp, pictures as
+   files wherever the server keeps files (only a memory-mode server
+   still gets the live `ImageMessage` relay, and refuses files), the
+   transfer budget in place of the image one, `server restore` and
+   `server db prune`, the admin channel (the audit as it happens over
+   `AuditLine`, commands at hand), keybinds watched rather than
+   grabbed.
+
+**Later, if ever:** channel topics, reserved names, a manual away
+toggle shown in the roster, animated avatars, anything built on
+progress (a leaderboard, level-gated invites), `Auth::Account` only
+if a server ever wants people rather than devices.
 
 Deliberately not taken from TeamSpeak: nested channel trees and
 spacers (a flat list is right at this scale), whisper lists, the
@@ -854,9 +828,9 @@ share-time use case).
 
 Testing follows the existing pattern: every server behavior is an
 `e2e.rs` scenario on the simulator with a real SQLite file in a temp
-dir — "guest cannot DM", "ban takes effect mid-session", "history
-replays 50 with images as references", "persistence thread stalled for
-10 s: voice unaffected, writes counted as dropped".
+dir — "guest cannot DM", "ban takes effect mid-session", "files are
+posted as cards and replayed", "persistence thread stalled for 10 s:
+voice unaffected, writes counted as dropped".
 
 ## 12. Decisions taken
 

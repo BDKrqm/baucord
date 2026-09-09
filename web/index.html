@@ -617,9 +617,10 @@
       <div>
         <h1 x-i18n="hero-title">Take control of your communications</h1>
         <p class="lede" x-i18n="hero-lede">
-          Talk, type and share your screen with the people you actually play
-          with. One of you runs the server, everyone else types the address. No
-          accounts, no feed, and the app uses about 40 MB of memory.
+          Talk, type, share your screen and send files to the people you
+          actually play with. One of you runs the server, everyone else types
+          the address. No accounts, no feed, and the app uses about 40 MB of
+          memory.
         </p>
 
         <!-- Download control. Without JS: a plain link to the list below.
@@ -700,66 +701,73 @@
             <div>
               <h3 x-i18n="f-voice-t">Voice that keeps up</h3>
               <p x-i18n="f-voice-d">
-                Opus audio with voice activation, tuned for the shortest gap
-                between someone speaking and you hearing them. Each person has
-                their own jitter buffer, so one friend on hotel Wi-Fi doesn't
-                affect anyone else's audio.
+                Opus with voice activation, tuned for the shortest gap between a word and hearing it. One friend on hotel Wi-Fi doesn't touch anyone else's audio.
               </p>
             </div>
             <div>
               <h3 x-i18n="f-channels-t">Channels</h3>
               <p x-i18n="f-channels-d">
-                Everyone lands in the Lobby and splits off from there: a room
-                for the game, one for the movie, an AFK corner. Channels can
-                have a password and a user limit, and whoever hosts can edit the
-                list while everyone is connected.
+                Everyone lands in the Lobby and splits off: a room for the game, one for the movie, an AFK corner. Passwords, limits, and channels you create yourself.
               </p>
             </div>
             <div>
               <h3 x-i18n="f-share-t">Screen sharing</h3>
               <p x-i18n="f-share-d">
-                Share your screen with its audio at 720p or 1080p, up to 60 fps,
-                to your channel or the whole server. Viewers watch in a
-                resizable window; a slow connection loses a moment of video,
-                never the voices.
+                Your screen and its audio at 720p or 1080p, up to 60 fps. Viewers get a resizable window; a bad connection drops a moment of video, never the voices.
               </p>
             </div>
             <div>
-              <h3 x-i18n="f-chat-t">Text chat</h3>
+              <h3 x-i18n="f-chat-t">Chat and direct messages</h3>
               <p x-i18n="f-chat-d">
-                One room for the whole server, whichever channel you're in.
-                Links, images, gifs and emoji, and a place to type when a mic
-                dies.
+                One room for the whole server, plus private conversations that wait for you when you're offline. History comes back when you reconnect.
+              </p>
+            </div>
+            <div>
+              <h3 x-i18n="f-files-t">Files and pictures</h3>
+              <p x-i18n="f-files-d">
+                Drop anything into the chat or a DM — pictures show inline, everything else is a card with a progress ring, cancel, and one click to save.
+              </p>
+            </div>
+            <div>
+              <h3 x-i18n="f-roles-t">Roles and permissions</h3>
+              <p x-i18n="f-roles-d">
+                Guests, members, organizers, admins — and your own roles, each a named set of permissions with its own badge. Invites grant a role, no accounts anywhere.
+              </p>
+            </div>
+            <div>
+              <h3 x-i18n="f-admin-t">Admin panel</h3>
+              <p x-i18n="f-admin-d">
+                Users, roles, restrictions, invites, channels, files and a readable audit log, in one window. Every action confirms first, and the same commands work from the chat.
+              </p>
+            </div>
+            <div>
+              <h3 x-i18n="f-persist-t">Remembers what matters</h3>
+              <p x-i18n="f-persist-d">
+                The server keeps history, direct messages, files and profiles in a single SQLite file. Back it up with one command, restore it with another, or run it in memory and keep nothing.
               </p>
             </div>
             <div>
               <h3 x-i18n="f-peruser-t">Per-person volume</h3>
               <p x-i18n="f-peruser-d">
-                Right-click anyone to adjust their volume or mute them. It's
-                remembered, so the loud friend stays quieter next time too.
+                Right-click anyone to adjust their volume or mute them. It's remembered for next time.
               </p>
             </div>
             <div>
-              <h3 x-i18n="f-hotkeys-t">Global hotkeys</h3>
+              <h3 x-i18n="f-hotkeys-t">Hotkeys that don't steal keys</h3>
               <p x-i18n="f-hotkeys-d">
-                Mute, deafen and start sharing from any window. Rebind a key by
-                pressing it.
+                Mute, deafen, share and push to talk from any window. The keys keep working everywhere else.
               </p>
             </div>
             <div>
               <h3 x-i18n="f-private-t">Private by construction</h3>
               <p x-i18n="f-private-d">
-                Every connection is encrypted, and your client remembers your
-                server's identity so it can't be swapped out on you. Nothing is
-                sent anywhere except to the server your friend runs.
+                Every connection is encrypted and your client pins the server's identity. Nothing goes anywhere but the server your friend runs.
               </p>
             </div>
             <div>
               <h3 x-i18n="f-light-t">Light on your machine</h3>
               <p x-i18n="f-light-d">
-                Around 30 to 50 MB of memory at idle. Closes to the tray and
-                keeps the call going. No installer, no background services;
-                settings live in one file next to the app.
+                About 40 MB of memory at idle. Closes to the tray and keeps the call going. No installer, no background services.
               </p>
             </div>
           </div>
@@ -774,6 +782,31 @@
           The whole interface, as it looks on a call.
         </p>
         <div class="shots">
+          <figure>
+            <a class="shot-link" href="img/files.png">
+              <img
+                src="img/files.png"
+                loading="lazy"
+                alt="the chat with file cards: a saved video with Open, documents with Save, a picture uploading with a progress ring, and direct messages in the sidebar"
+                x-i18n:alt="shot-files-alt"
+              />
+            </a>
+            <figcaption x-i18n="shot-files-cap">
+              Files, pictures and direct messages
+            </figcaption>
+          </figure>
+          <figure>
+            <a class="shot-link" href="img/admin.png">
+              <img
+                class="tall"
+                src="img/admin.png"
+                loading="lazy"
+                alt="the admin panel's Users tab: everyone the server knows, their roles, and per-row actions"
+                x-i18n:alt="shot-admin-alt"
+              />
+            </a>
+            <figcaption x-i18n="shot-admin-cap">The admin panel</figcaption>
+          </figure>
           <figure>
             <a class="shot-link" href="img/share.png">
               <img
@@ -797,7 +830,7 @@
               />
             </a>
             <figcaption x-i18n="shot-popover-cap">
-              Per-person volume and mute
+              The user menu: volume, roles, moderation
             </figcaption>
           </figure>
           <figure>

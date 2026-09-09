@@ -337,7 +337,11 @@ contrast against the chat background, the gold band (HSV hue
 30 s, the `profile` restriction as an admin lock (`ResetProfile {
 lock }`). `UserProfile` rides after each `UserDetails` (a batch after
 `Init`), `ProfileUpdated` on change, both only to sessions that
-negotiated `PROFILES`. `SetNickname` renames a live session under the
+negotiated `PROFILES`. `UserProgress { client_id, xp, level }` rides
+the same way under `PROGRESS` — the batch after `Init` (the newcomer
+included), the newcomer to everyone, and once a minute from
+`flush_progress` for whoever gained xp — so every client can draw the
+card's bar (spec §12). `SetNickname` renames a live session under the
 `Hello` name rules and broadcasts `UserRenamed`.
 
 Blobs (spec §7) are the `UploadBegin/Accept/Chunk/Done/Rejected` and
