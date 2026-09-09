@@ -3,14 +3,16 @@
 // Both edges are forwarded with a `pressed` flag: the toggles act on
 // the press only, push-to-talk on both.
 //
-// Push-to-talk is *watched*, not registered: a registered global
-// hotkey is consumed by the OS, so a PTT key of `N` stopped typing
-// `n` in every other program. A small thread polls the keyboard
-// state instead (`device_query`: `GetAsyncKeyState`,
-// `CGEventSourceKeyState`, `XQueryKeymap`) and reports the edges;
-// nothing is swallowed. Where the state cannot be read (Wayland, a
-// macOS without the accessibility grant) PTT falls back to a
-// registered hotkey, as before, with a log line saying so.
+// Bindings are *watched*, not registered: a registered global hotkey
+// is consumed by the OS (`RegisterHotKey`, `RegisterEventHotKey`,
+// `XGrabKey` are grabs — there is no listen-only mode), so a PTT key
+// of `N` stopped typing `n` in every other program. A small thread
+// polls the keyboard state instead (`device_query`:
+// `GetAsyncKeyState`, `CGEventSourceKeyState`, `XQueryKeymap`) and
+// reports the edges; nothing is swallowed, for any binding. Where the
+// state cannot be read (Wayland, a macOS without the accessibility
+// grant) the bindings fall back to registered hotkeys, as before,
+// with a log line saying so.
 //
 // Hotkeys are strictly optional: if the OS refuses to create a global
 // hotkey manager (common on Wayland, some remote sessions, etc.) the
@@ -58,10 +60,11 @@ pub struct HotkeyManager {
     /// `None` when the OS-level manager could not be created — hotkeys
     /// are simply disabled in that case.
     manager: Option<GlobalHotKeyManager>,
-    /// The push-to-talk watcher, when the key state can be read.
-    ptt: Option<PttWatcher>,
-    ptt_rx: Receiver<bool>,
-    ptt_tx: Sender<bool>,
+    /// The key watcher, when the key state can be read: every binding
+    /// goes through it, and none is registered.
+    watcher: Option<KeyWatcher>,
+    watch_rx: Receiver<(BindableAction, bool)>,
+    watch_tx: Sender<(BindableAction, bool)>,
     /// Hotkeys we actually registered, kept so `update()` can unregister
     /// them properly instead of leaking OS-level grabs.
     registered: Vec<HotKey>,
@@ -86,7 +89,7 @@ impl HotkeyManager {
             }));
         });
 
-        let (ptt_tx, ptt_rx) = unbounded::<bool>();
+        let (watch_tx, watch_rx) = unbounded::<(BindableAction, bool)>();
         let manager = match GlobalHotKeyManager::new() {
             Ok(m) => Some(m),
             Err(e) => {
@@ -97,9 +100,9 @@ impl HotkeyManager {
 
         let mut hm = Self {
             manager,
-            ptt: None,
-            ptt_rx,
-            ptt_tx,
+            watcher: None,
+            watch_rx,
+            watch_tx,
             registered: Vec::new(),
             bindings: HashMap::new(),
         };
@@ -117,8 +120,8 @@ impl HotkeyManager {
     /// Reads our own channel (see [`event_channel`]) — with an event
     /// handler installed, the crate's built-in receiver never fires.
     pub fn poll(&self) -> Option<(BindableAction, bool)> {
-        if let Ok(pressed) = self.ptt_rx.try_recv() {
-            return Some((BindableAction::PushToTalk, pressed));
+        if let Ok(edge) = self.watch_rx.try_recv() {
+            return Some(edge);
         }
         if let Ok(event) = event_channel().1.try_recv()
             && let Some(&action) = self.bindings.get(&event.id())
@@ -129,11 +132,40 @@ impl HotkeyManager {
     }
 
     fn register_all(&mut self, settings: &Settings) {
+        // Everything the poller can read goes to one watcher thread.
+        let watched: Vec<(BindableAction, Keycode, (bool, bool, bool))> = settings
+            .keybinds
+            .iter()
+            .filter(|e| !e.bind.is_empty())
+            .filter_map(|e| {
+                let parsed = e.parse()?;
+                let key = keycode_for(&parsed.code)?;
+                Some((e.action, key, (parsed.ctrl, parsed.shift, parsed.alt)))
+            })
+            .collect();
+        let mut taken: Vec<BindableAction> = Vec::new();
+        if !watched.is_empty() {
+            taken = watched.iter().map(|(a, _, _)| *a).collect();
+            match KeyWatcher::start(watched, self.watch_tx.clone()) {
+                Some(w) => {
+                    info!("Watching {} keybind(s); none registered", taken.len());
+                    self.watcher = Some(w);
+                }
+                None => {
+                    info!("Key state not readable here; registering hotkeys instead");
+                    taken.clear();
+                }
+            }
+        }
+
         let Some(manager) = &self.manager else {
             return;
         };
 
         for entry in &settings.keybinds {
+            if taken.contains(&entry.action) {
+                continue;
+            }
             if entry.bind.is_empty() {
                 continue;
             }
@@ -156,20 +188,6 @@ impl HotkeyManager {
                 );
                 continue;
             };
-
-            // Push-to-talk: watch the key, do not take it.
-            if entry.action == BindableAction::PushToTalk
-                && let Some(key) = keycode_for(&parsed.code)
-                && let Some(watcher) = PttWatcher::start(
-                    key,
-                    (parsed.ctrl, parsed.shift, parsed.alt),
-                    self.ptt_tx.clone(),
-                )
-            {
-                info!("Watching push-to-talk key: {} (not registered)", entry.bind);
-                self.ptt = Some(watcher);
-                continue;
-            }
 
             let mut mods = Modifiers::empty();
             if parsed.ctrl {
@@ -207,7 +225,7 @@ impl HotkeyManager {
     }
 
     fn unregister_all(&mut self) {
-        self.ptt = None;
+        self.watcher = None;
         if let Some(manager) = &self.manager {
             for hotkey in self.registered.drain(..) {
                 if let Err(e) = manager.unregister(hotkey) {
@@ -220,52 +238,80 @@ impl HotkeyManager {
     }
 }
 
-// ── Push-to-talk watcher ────────────────────────────────────────────────
+// ── Key watcher ─────────────────────────────────────────────────────────
 
-/// Polls the keyboard state and reports the PTT combo's edges.
-struct PttWatcher {
+/// Polls the keyboard state and reports each binding's edges: both
+/// for push-to-talk, the press alone for the toggles.
+struct KeyWatcher {
     stop: Arc<AtomicBool>,
 }
 
-impl PttWatcher {
+impl KeyWatcher {
     /// `None` where the key state cannot be read (the caller then
-    /// registers the hotkey instead).
-    fn start(key: Keycode, mods: (bool, bool, bool), tx: Sender<bool>) -> Option<Self> {
-        let state = DeviceState::checked_new()?;
+    /// registers the hotkeys instead). The state handle is created on
+    /// the watcher thread itself — on Linux it holds an `Rc` to the
+    /// X11 connection and cannot cross threads — so the thread reports
+    /// back whether it could open one before this returns.
+    fn start(
+        bindings: Vec<(BindableAction, Keycode, (bool, bool, bool))>,
+        tx: Sender<(BindableAction, bool)>,
+    ) -> Option<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
+        let (ready_tx, ready_rx) = unbounded::<bool>();
         let spawned = std::thread::Builder::new()
-            .name("ptt-watch".into())
+            .name("key-watch".into())
             .spawn(move || {
-                let (ctrl, shift, alt) = mods;
-                let mut down = false;
+                let Some(state) = DeviceState::checked_new() else {
+                    let _ = ready_tx.send(false);
+                    return;
+                };
+                let _ = ready_tx.send(true);
+                let mut down = vec![false; bindings.len()];
                 while !flag.load(Ordering::Relaxed) {
                     let keys = state.get_keys();
                     let has = |a: Keycode, b: Keycode| keys.contains(&a) || keys.contains(&b);
-                    let now = keys.contains(&key)
-                        && (!ctrl || has(Keycode::LControl, Keycode::RControl))
-                        && (!shift || has(Keycode::LShift, Keycode::RShift))
-                        && (!alt || has(Keycode::LAlt, Keycode::RAlt));
-                    if now != down {
-                        down = now;
-                        if tx.send(now).is_err() {
-                            return;
+                    for (i, (action, key, (ctrl, shift, alt))) in bindings.iter().enumerate() {
+                        let now = keys.contains(key)
+                            && (!ctrl || has(Keycode::LControl, Keycode::RControl))
+                            && (!shift || has(Keycode::LShift, Keycode::RShift))
+                            && (!alt || has(Keycode::LAlt, Keycode::RAlt));
+                        if now == down[i] {
+                            continue;
+                        }
+                        down[i] = now;
+                        let report = now || *action == BindableAction::PushToTalk;
+                        if report {
+                            if tx.send((*action, now)).is_err() {
+                                return;
+                            }
+                            // Same as a registered hotkey's delivery: wake
+                            // the UI thread now, not at its next timer.
+                            if let Some(wake) = WAKE.get() {
+                                wake();
+                            }
                         }
                     }
                     std::thread::sleep(Duration::from_millis(12));
                 }
             });
-        match spawned {
-            Ok(_) => Some(Self { stop }),
-            Err(e) => {
-                warn!("push-to-talk watcher thread not started: {e}");
+        if let Err(e) = spawned {
+            warn!("key watcher thread not started: {e}");
+            return None;
+        }
+        // Opening the state is quick; a platform that cannot (Wayland,
+        // a macOS without the accessibility grant) says so at once.
+        match ready_rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(true) => Some(Self { stop }),
+            _ => {
+                stop.store(true, Ordering::Relaxed);
                 None
             }
         }
     }
 }
 
-impl Drop for PttWatcher {
+impl Drop for KeyWatcher {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
     }
