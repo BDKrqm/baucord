@@ -1,17 +1,7 @@
 // main.rs
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod adminui;
-mod app;
-mod clipboard;
-mod hotkeys;
-mod instance;
-mod media;
-mod present;
-mod resources;
-mod settingsui;
-mod updater;
-mod viewers;
+use frontend::{app, instance};
 
 fn main() {
     // `--config-dir <dir>` or `--profile <name>`: a second settings
@@ -113,10 +103,10 @@ fn main() {
             .map(|s| (*s).to_string())
             .or_else(|| info.payload().downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "<non-string panic payload>".to_string());
-        let location = info
-            .location()
-            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
-            .unwrap_or_else(|| "<unknown location>".to_string());
+        let location = info.location().map_or_else(
+            || "<unknown location>".to_string(),
+            |l| format!("{}:{}:{}", l.file(), l.line(), l.column()),
+        );
         let backtrace = std::backtrace::Backtrace::force_capture();
         log::error!("PANIC in thread '{thread}' at {location}: {message}\n{backtrace}");
         log::logger().flush();
