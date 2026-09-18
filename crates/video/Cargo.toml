@@ -38,7 +38,19 @@ xcap = "0.9.8"
 #   VCPKG_ROOT silently links a different install)
 # Linux:          apt install libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
 # macOS:          brew install ffmpeg
-ffmpeg-next = "8"
+# The default feature set minus `device`: baucord captures with xcap,
+# not libavdevice, and libavdevice is where every capture-device
+# dependency lives — avfoundation on macOS (a hard reference to a
+# macOS-14 symbol crashed 1.1.5 on Ventura), x11grab/xcbgrab (which
+# linked Homebrew's X11 into the same binary), dshow/Media Foundation
+# on Windows. Not linking it is what makes the release static for real.
+ffmpeg-next = { version = "8", default-features = false, features = [
+  "codec",
+  "filter",
+  "format",
+  "software-resampling",
+  "software-scaling",
+] }
 
 [dev-dependencies]
 env_logger = "0.11"

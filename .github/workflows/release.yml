@@ -140,7 +140,7 @@ jobs:
           # the 24.04 VM's glibc 2.39 headers — its objects EMBED
           # 2.38+ versioned symbol refs and would re-poison the
           # container build if restored.
-          key: ffmpeg-static-7.1.1-x264-${{ runner.os }}-${{ runner.arch }}-ubuntu2204-container-v3
+          key: ffmpeg-static-7.1.1-x264-${{ runner.os }}-${{ runner.arch }}-ubuntu2204-container-v4
 
       - name: Build static FFmpeg 7.1.1 + x264 (Linux)
         if: runner.os == 'Linux' && steps.ffmpeg-static-linux-cache.outputs.cache-hit != 'true'
@@ -172,7 +172,7 @@ jobs:
             --prefix="$PREFIX" \
             --disable-shared --enable-static --enable-pic \
             --disable-programs --disable-doc \
-            --disable-autodetect \
+            --disable-autodetect --disable-avdevice \
             --enable-gpl --enable-libx264
           make -j"$(nproc)"
           make install
@@ -199,7 +199,16 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/ffmpeg-static
-          key: ffmpeg-static-7.1.1-x264-${{ runner.os }}-${{ runner.arch }}-v2
+          key: ffmpeg-static-7.1.1-x264-${{ runner.os }}-${{ runner.arch }}-v3
+
+      # Every macOS compile — x264, FFmpeg, and cargo's own C/ObjC
+      # dependencies — targets 11.0. Without it clang defaults to the
+      # runner's OS (Sequoia), symbols newer than the user's macOS get
+      # hard-linked, and 1.1.5 died on Ventura with "Symbol not found:
+      # _AVCaptureDeviceTypeContinuityCamera" (a macOS 14 symbol).
+      - name: Set the macOS deployment target
+        if: runner.os == 'macOS'
+        run: echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
 
       - name: Build static FFmpeg 7.1.1 + x264 (macOS)
         if: runner.os == 'macOS' && steps.ffmpeg-static-cache.outputs.cache-hit != 'true'
@@ -230,7 +239,7 @@ jobs:
             --prefix="$PREFIX" \
             --disable-shared --enable-static \
             --disable-programs --disable-doc \
-            --disable-autodetect \
+            --disable-autodetect --disable-avdevice \
             --enable-gpl --enable-libx264 --enable-videotoolbox
           make -j"$(sysctl -n hw.ncpu)"
           make install
@@ -337,6 +346,15 @@ jobs:
           # that users will not have — 1.1.5 shipped with libxcb.
           if otool -L "$BIN" | grep -E "/usr/local/|/opt/homebrew/"; then
             echo "::error::baucord links a Homebrew library — the static FFmpeg picked up a runner dependency"
+            exit 1
+          fi
+          # The binary must declare the deployment floor it was built
+          # for; a higher `minos` means some object was compiled without
+          # MACOSX_DEPLOYMENT_TARGET and may reference newer symbols.
+          MINOS=$(otool -l "$BIN" | awk '/LC_BUILD_VERSION/{f=1} f && /minos/{print $2; exit}')
+          echo "minos: $MINOS"
+          if [ "$(printf '%s\n' "$MINOS" 11.0 | sort -V | tail -1)" != "11.0" ]; then
+            echo "::error::binary targets macOS $MINOS (> 11.0) — MACOSX_DEPLOYMENT_TARGET was not honoured"
             exit 1
           fi
 
