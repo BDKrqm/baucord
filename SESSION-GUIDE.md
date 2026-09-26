@@ -344,6 +344,36 @@ and Docker publishes both `51000:51000/udp` and `5000:51000/udp` so
 old saved addresses still work — one socket, two doors; the invite
 string already carries 51000. Rules that came out of it:
 
+- **A shipped binary may reference system libraries only** (macOS:
+  frameworks and `/usr/lib`; Linux: `/lib`, `/usr/lib`). The 1.1.5
+  Intel macOS build aborted at launch for anyone without Homebrew's
+  `libxcb`: FFmpeg's `./configure` auto-enables every optional
+  dependency it finds on the runner and links it dynamically, and
+  the post-build check only grepped for `libav*`. Fixed in
+  `release.yml` (2026-09-18): `--disable-autodetect` on both static
+  FFmpeg builds (only what is named — `x264`, `videotoolbox` — is
+  compiled in), cache keys bumped so the tainted builds are not
+  restored, and both verify steps fail on any non-system path. The
+  user-side stopgap until the rebuilt binary is up is
+  `brew install libxcb libx11`; it is not an instruction for the
+  README. The second failure behind it, "Symbol not found:
+  _AVCaptureDeviceTypeContinuityCamera" on Ventura, is the same
+  class from the other side: no `MACOSX_DEPLOYMENT_TARGET`, so clang
+  targeted the runner's Sequoia and hard-linked a macOS-14 symbol
+  (FFmpeg's avfoundation capture device). Fixes: the job sets
+  `MACOSX_DEPLOYMENT_TARGET=11.0` and the verify step checks the
+  binary's `minos`; and `video` no longer links libavdevice at all
+  (`ffmpeg-next` without the `device` feature; both static builds
+  `--disable-avdevice`) — capture is xcap's, and libavdevice is where
+  every capture-device dependency lived, on all three OSes. The
+  deployment floor then broke the arm64 *link*: with the target below
+  the SDK, FFmpeg's `__builtin_available` checks emit calls to
+  `___isPlatformVersionAtLeast` (clang's compiler-rt), which rustc's
+  `-nodefaultlibs` link never adds — `video/build.rs` now asks
+  `clang -print-file-name=libclang_rt.osx.a` and links it on macOS.
+  A local `cargo run` never sees any of this because without the
+  variable the checks fold to constants: **a Mac dev build is not
+  evidence about the release build; the CI link is.**
 - **Read both loss counters before anything else.** The client's
   `link:` line (transport: our unacked packets) and the relay's
   `VoiceReceiverReport` (`uplink N%` in `audio stats`) are
@@ -378,6 +408,25 @@ string already carries 51000. Rules that came out of it:
 The clients keep marking CS7 on Windows and ECT(0) everywhere; both
 were exonerated and neither is changed.
 
+
+### Memory on macOS/Linux (2026-09-18, open)
+Windows shows ~40 MB at boot, macOS and Linux 100–200 MB, and a
+viewed 1080p stream adds ~150 MB that Linux never gives back. The
+renderer is the same everywhere (Skia raster), so it is not GPU
+contexts. Two separate things: Task Manager's private working set
+excludes file-backed and shared pages that RSS and Activity Monitor
+count (the executable alone is 40–60 MB of text); and glibc keeps
+freed 8 MB frame buffers in its arena once its mmap threshold has
+risen — allocator retention, not a leak. Measure before touching
+code: `/mem` at boot, while viewing and after stopping (the app's
+own buckets vs the process figure); on Linux `smaps_rollup`
+(`Anonymous` vs `Rss`) and the experiment
+`MALLOC_MMAP_THRESHOLD_=131072 ./baucord`; on macOS
+`vmmap --summary`. Expected fix: mimalloc as the global allocator in
+the hosts (one line, returns large blocks eagerly, builds for
+Android). Also check that every stop-watching path *removes* the
+`Viewer` (`close` only hides the window; the last frame lives until
+the struct is dropped).
 
 ## 5. Remaining work
 
