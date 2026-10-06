@@ -62,7 +62,10 @@ impl AppState {
             self.settings.audio.input.device = None;
             self.voice.tx.send(VoiceControl::SetInputDevice(None)).ok();
         }
-        if diff.rebuild_output {
+        // A phone's outputs are routes the engine follows by itself
+        // (audio::route): a picked headset that went away is stood in
+        // for by Automatic until it is back, so the pick is kept.
+        if diff.rebuild_output && !SINGLE_WINDOW_HOST {
             self.settings.audio.output.device = None;
             self.voice.tx.send(VoiceControl::SetOutputDevice(None)).ok();
             // WASAPI loopback captures from the default output device,
@@ -139,6 +142,12 @@ impl AppState {
             self.voice.shared.output_level.clone(),
             self.voice.shared.denoised_level.clone(),
         )
+    }
+
+    /// What echo cancellation the voice session got (`None` = none
+    /// running), as the voice thread last published it.
+    pub fn voice_aec(&self) -> Arc<std::sync::Mutex<Option<audio::AecReport>>> {
+        self.voice.shared.aec.clone()
     }
 
     pub fn apply_reset_defaults(&mut self) {

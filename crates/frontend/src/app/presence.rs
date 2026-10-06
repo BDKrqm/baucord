@@ -28,7 +28,14 @@ impl AppState {
         self.gifs.clear();
         self.reset_chat_flow();
 
-        self.main.global::<State>().set_phase(Phase::Main);
+        let s = self.main.global::<State>();
+        // A session opens on the list: in the narrow layout that is the
+        // sidebar's page, not whichever chat was showing last time.
+        s.set_narrow_chat_open(false);
+        s.set_phase(Phase::Main);
+        // Connected: stay connected off screen too (Android's foreground
+        // service and its notification, D34; nothing on the desktop).
+        crate::host::keep_alive(Some(server_name));
 
         self.our_client_id = Some(client_id);
         self.server_name = server_name.to_string();
@@ -562,7 +569,7 @@ impl AppState {
             win.global::<ui::Theme>().set_scale(scale);
         }
         for viewer in self.viewers.values() {
-            viewer.win.global::<ui::Theme>().set_scale(scale);
+            viewer.apply_text_scale(scale);
         }
     }
 

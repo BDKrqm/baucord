@@ -78,6 +78,14 @@ mod stats;
 
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Slint's Android backend has one window per process (every `Window`
+/// component is handed the same window adapter), so the auxiliary
+/// windows — Settings, the admin panel, the stream viewer — cannot open
+/// there until they become in-window pages (ANDROID-SPEC.md §9). Their
+/// `open` paths check this and say so instead of colliding with the
+/// main window.
+pub(crate) const SINGLE_WINDOW_HOST: bool = cfg!(target_os = "android");
+
 // ── The UI-thread singleton ─────────────────────────────────────────────
 
 thread_local! {
@@ -354,7 +362,18 @@ pub struct AppState {
     /// Consecutive automatic reconnects since the last successful
     /// admission; capped so a dead server does not spin forever.
     reconnect_attempts: u32,
+    /// The next `show_connect_phase` is a reconnect's pause, not the
+    /// end of the session: the host's keep-alive (Android's foreground
+    /// service) stays on through it (D34).
+    reconnect_hold: bool,
     stream_stats_timer_active: Arc<AtomicBool>,
+    /// Once-a-second summaries of frames over the latency budget and
+    /// of slow property sets (`video::timing`), replacing per-frame
+    /// warnings; `slow_frame_worst` keeps the worst frame's stage
+    /// split for the summary line.
+    slow_frames: video::timing::SlowFrames,
+    slow_frame_worst: (f32, f32, f32),
+    slow_presents: video::timing::SlowFrames,
     pub meter_timer: slint::Timer,
     /// The single animation ticker driving every playing GIF (chat
     /// rows + the viewer overlay). Runs only while something plays.
@@ -410,7 +429,9 @@ fn spawn_workers(
 
 /// Prefer the Skia renderer when compiled in: femtovg (the default)
 /// can't rasterize many color-emoji glyph formats, which shows as tofu
-/// boxes in the emoji palette. Skia renders them all.
+/// boxes in the emoji palette. Skia renders them all. (Android's
+/// backend is Skia already and is installed by the host before `run`.)
+#[cfg(not(target_os = "android"))]
 fn select_renderer() {
     // An explicit SLINT_BACKEND still wins — the no-rebuild escape
     // hatch (`winit-software` forces the basic software renderer;
@@ -445,6 +466,10 @@ fn select_renderer() {
 
 /// Build everything and run the event loop until quit.
 pub fn run() {
+    // On Android the host has already installed Slint's Android backend
+    // (`slint::android::init`, with Skia); a second selection would
+    // only fail and log.
+    #[cfg(not(target_os = "android"))]
     select_renderer();
     let is_testing_mic_shared = Arc::new(AtomicBool::new(false));
     let (voice, screen, network, present_shared, screen_fwd_rx) =
@@ -460,9 +485,11 @@ pub fn run() {
     let main = MainWindow::new().expect("failed to create the main window");
 
     // Saved size only; the position is decided at the first show
-    // (centred on the monitor, see `center_on_monitor`).
+    // (centred on the monitor, see `center_on_monitor`). A phone's
+    // window is the screen: nothing to size there.
     // Saved px dimensions; i32→f32 precision is irrelevant at window
     // scale.
+    #[cfg(not(target_os = "android"))]
     #[allow(clippy::cast_precision_loss)]
     main.window().set_size(slint::LogicalSize::new(
         settings.window.width.max(500) as f32,
@@ -599,9 +626,13 @@ pub fn run() {
         keybind_recording: None,
         timers: Vec::new(),
         error_timer: slint::Timer::default(),
+        reconnect_hold: false,
         reconnect_timer: slint::Timer::default(),
         reconnect_attempts: 0,
         stream_stats_timer_active: Arc::new(AtomicBool::new(false)),
+        slow_frames: video::timing::SlowFrames::new("Slow frames"),
+        slow_frame_worst: (0.0, 0.0, 0.0),
+        slow_presents: video::timing::SlowFrames::new("Slow present"),
         meter_timer: slint::Timer::default(),
         gif_ticker: slint::Timer::default(),
     }));
@@ -628,6 +659,16 @@ pub fn run() {
 
     wire_logic(&state);
     start_timers(&state);
+    // A single-window host shows Settings as a page in the main window
+    // (ANDROID-SPEC.md D22): its callbacks are wired once here, where
+    // the desktop wires its SettingsWindow when that is first created.
+    if SINGLE_WINDOW_HOST {
+        // One window means a phone: touch, a soft keyboard, Back.
+        state.borrow().main.global::<State>().set_touch_host(true);
+        crate::settingsui::wire_page(&state.borrow().main);
+        // Same for the stream viewer page (D23).
+        crate::viewers::wire_page(&state.borrow().main);
+    }
 
     // "Start in the tray": the window stays hidden until the tray icon
     // shows it (only meaningful when the tray is compiled in).
@@ -653,6 +694,12 @@ pub fn run() {
         let mut st = state.borrow_mut();
         st.reload_own_avatar();
         st.push_ui_prefs();
+        // A phone has no key to hold: push-to-talk there would keep the
+        // microphone shut for good (the picker no longer offers it, but
+        // a settings file may still say so).
+        if SINGLE_WINDOW_HOST {
+            st.settings.audio.push_to_talk = false;
+        }
         st.apply_push_to_talk();
     }
     // The version check gates the splash; without it, straight to the
@@ -798,8 +845,8 @@ fn wire_logic(state: &Rc<RefCell<AppState>>) {
     logic.on_edit_servers(move || {
         with_app(&w, |app| {
             crate::settingsui::open(app);
-            if let Some(win) = &app.settings_win {
-                win.set_tab(crate::settingsui::TAB_SERVERS);
+            if let Some(sf) = crate::settingsui::surface(app) {
+                sf.set_tab(crate::settingsui::TAB_SERVERS);
             }
         });
     });
@@ -1301,6 +1348,7 @@ fn wire_logic(state: &Rc<RefCell<AppState>>) {
 ///   a drag or a maximize until something forces a full frame. A
 ///   full-window flip per such event is cheap next to the frame it
 ///   already costs.
+///
 /// No raw window events without winit: no reveal glitches to paper
 /// over, and no OS file drags either.
 #[cfg(not(feature = "desktop"))]
@@ -1346,7 +1394,9 @@ pub fn repaint_on_reveal(win: &slint::Window, armed: Rc<Cell<bool>>, flip: impl 
     });
 }
 
-/// The "drop to send" overlay, from the winit hook (deferred).
+/// The "drop to send" overlay, from the winit hook (deferred). Only
+/// the desktop's winit hook drops files on the window.
+#[cfg(feature = "desktop")]
 fn set_drop_hover(on: bool) {
     let _ = slint::invoke_from_event_loop(move || {
         with_current(move |app| app.main.global::<State>().set_drop_hover(on));
@@ -2198,6 +2248,11 @@ pub fn fill_tr(tr: &Tr) {
     tr.set_dm_general(t!("dm-general").into());
     tr.set_dm_direct_message(t!("dm-direct-message").into());
     tr.set_dm_note_memory(t!("dm-note-memory").into());
+    tr.set_reset_confirm_body(t!("reset-confirm-body").into());
+    tr.set_reset_confirm(t!("reset-confirm").into());
+    tr.set_chat_empty_title(t!("chat-empty-title").into());
+    tr.set_chat_empty_general(t!("chat-empty-general").into());
+    tr.set_chat_empty_dm(t!("chat-empty-dm").into());
     tr.set_dm_back(t!("dm-back").into());
     tr.set_chat_placeholder_dm(t!("chat-placeholder-dm").into());
     tr.set_monitor(t!("monitor").into());
@@ -2274,6 +2329,19 @@ pub fn fill_tr(tr: &Tr) {
     tr.set_chat_image_size_hint(t!("chat-image-size-hint").into());
     tr.set_privacy_header(t!("privacy-header").into());
     tr.set_privacy_note(t!("privacy-note").into());
+    tr.set_audio_aec(t!("audio-aec").into());
+    // The platform's side effects of the voice-call path, said where
+    // the setting is (AEC-SPEC.md §4.6).
+    tr.set_audio_aec_hint(
+        if cfg!(windows) {
+            t!("audio-aec-hint-windows")
+        } else if cfg!(target_os = "android") {
+            t!("audio-aec-hint-android")
+        } else {
+            t!("audio-aec-hint")
+        }
+        .into(),
+    );
     tr.set_audio_transmission(t!("audio-transmission").into());
     tr.set_audio_vad_hint(t!("audio-vad-hint").into());
     tr.set_audio_ptt_hint(t!("audio-ptt-hint").into());
@@ -2287,7 +2355,23 @@ pub fn fill_tr(tr: &Tr) {
     tr.set_identity_note(t!("identity-note").into());
     tr.set_audio_devices_header(t!("audio-devices-header").into());
     tr.set_audio_input_device(t!("audio-input-device").into());
-    tr.set_audio_output_device(t!("audio-output-device").into());
+    // A phone picks a route for the call, not a sound card (audio::route).
+    tr.set_audio_output_device(
+        if SINGLE_WINDOW_HOST {
+            t!("audio-output-device-android")
+        } else {
+            t!("audio-output-device")
+        }
+        .into(),
+    );
+    tr.set_audio_output_hint(
+        if SINGLE_WINDOW_HOST {
+            t!("audio-output-hint-android")
+        } else {
+            String::new()
+        }
+        .into(),
+    );
     tr.set_audio_system_default(t!("audio-system-default").into());
     tr.set_audio_input_header(t!("audio-input-header").into());
     tr.set_audio_capture_level(t!("audio-capture-level").into());

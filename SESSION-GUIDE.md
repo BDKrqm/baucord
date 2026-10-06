@@ -12,9 +12,37 @@ the repo root.
 
 ## 1. Setting up the assistant's environment
 
-There is no `cargo` in the sandbox. Rust is compiled by the user; the
-assistant edits files, compile-checks and renders every `.slint`
-change, and hands over a tarball. Do this at the start of a session:
+Rust is compiled by the user; the assistant edits files,
+compile-checks and renders every `.slint` change, and hands over a
+tarball. The 2026-10-05 sandbox *did* have `cargo` 1.97 and crates.io
+(no `dl.google.com`, no `static.rust-lang.org`, so no NDK and no
+Android target) — check with `which cargo` first. When it is there:
+`cargo check -p protocol -p app-core -p i18n -p ui` runs on the host
+(`ui` compiles the `.slint` files, which is a free `--check`; it wants
+a placeholder `assets/icons/icon.png`); anything depending on `video`
+(`client`, `frontend`, `desktop`, `android`) fails at `ffmpeg-sys` /
+`pipewire-sys` for lack of system headers — not a code problem. **But
+`apt-get` reaches the Ubuntu archive** (found 2026-10-05; the Docker
+repo 403s, ignore it): `apt-get update && apt-get install -y
+libasound2-dev libavcodec-dev libavformat-dev libavutil-dev
+libswscale-dev libavfilter-dev libswresample-dev libavdevice-dev clang
+libclang-dev libwayland-dev libxcb1-dev libxcb-randr0-dev
+libxcb-shm0-dev libxrandr-dev libdbus-1-dev libpipewire-0.3-dev
+libspa-0.2-dev libegl-dev libgbm-dev libxkbcommon-dev libfontconfig-dev
+libxi-dev libx11-xcb-dev libxcursor-dev libssl-dev libudev-dev`, plus
+placeholder `assets/sounds/{join,leave}.wav` (any short WAV; `audio`
+`include_bytes!`es them), and `cargo check -p client -p frontend -p
+desktop`, `cargo test -p audio -p video` and clippy all run on the
+host (Ubuntu's FFmpeg 6.1 builds `ffmpeg-next` 8). The Android target
+itself still cannot be installed. The
+root `Cargo.toml`, `Cargo.lock` and `rust-toolchain.toml` joined the
+upload set on 2026-10-05: **ask for them with every `crates.tar.gz`**
+(the lock is what makes a resolution here match the user's; drop
+`rust-toolchain.toml` locally when its channel cannot be downloaded,
+and hand the lock back when the graph grew). For Android, `cargo tree
+-p android --target aarch64-linux-android -e normal,build` is the
+dependency check (needs no target installed). Do this at the start of
+a session:
 
 ```sh
 # the workspace: the user uploads crates.tar.gz (the crates/ folder)
@@ -83,7 +111,14 @@ cargo run -p desktop        # and -- --profile bob for a second instance
 ```
 
 and pastes the first `error:` with its `-->` location. One or two
-compiler rounds per step is normal. Edit scripts must assert their
+compiler rounds per step is normal. **Unpack with `tar -xzf … -m`**
+(Windows' built-in tar has it): `-m` stamps the files with the
+extraction time instead of the sandbox's older mtimes. Without it,
+cargo's mtime-based rerun check skips the Slint build script, `ui`
+does not rebuild, and `frontend` fails with "no method named
+`set_<new property>`" (2026-10-05). `cargo clean -p ui` alone does
+not help for Android — it cleans only the host target; touching
+`crates/ui/slint/*.slint` does. Edit scripts must assert their
 anchors (`assert old in s`): a silent miss once shipped a function
 that did not exist, and once left a script's changes unwritten.
 
@@ -136,8 +171,14 @@ worth re-running.
   panic hook, `frontend::app::run()`. Its `tray` feature forwards to
   `frontend/tray`. Every `crate::` path inside the moved files still
   resolves: they moved together.
-- Planned, not present: `android` (the cdylib host) and the Gradle
-  project in `android/` beside `crates/`.
+- `android` (M0, 2026-10-05) — the cdylib host: `lib.rs`
+  (`android_main`), `java.rs` (JNI: permissions), `logging.rs`
+  (logcat + `baucord.log` tee), `hello.rs` (feature `hello`, the
+  toolchain smoke test). The Gradle project is `android/` beside
+  `crates/` (AGP 8.13.0, Gradle 8.14.3 wrapper, no Kotlin yet) and
+  `.github/workflows/android-release.yml` builds the signed arm64 APK
+  on a published Release (D21; no PR builds). Always build it with
+  `-p android` (ANDROID-SPEC.md §2.1).
 
 Server config keys the user runs with are in the spec §1; the
 CLI is `server user|role|invite|restriction|key|telemetry|backup|
@@ -176,6 +217,13 @@ Memory-mode servers (persistence off) still use the legacy
 - `/kick` forgets keys and roles (needs a new invite); `/ban` is the
   restriction; a ban never catches the actor or an equal rank, and
   skips an address someone else is on.
+- `VoiceChat::start()` fails if *either* stream fails; the caller
+  must check `output_running()` before dropping the engine, or a
+  missing microphone silences playback too (the Android phone test,
+  2026-10-05 — and a PC with no capture device, the field incident
+  the audio crate's comment describes). A never-opened input is
+  retried by `service()` (`input_pending`); a failed one by the
+  existing `input_stream_failed` path.
 - Chat earns 1 xp per message since 1.1.4 (at the minute flush); an
   image counts as a chat message for mutes and
   the rate limit.
@@ -281,11 +329,147 @@ Memory-mode servers (persistence off) still use the legacy
 - Nothing in the app layer knew the negotiated feature set until the
   lobby; `NetworkMessage::Connected { lobby }` is the pattern for the
   next bit a client must gate on (add a field, not a new message).
+- Settings code talks to `settingsui::surface(app)` (an enum over
+  the desktop `SettingsWindow` and Android's in-window page), never
+  to `app.settings_win` directly — the field is the desktop window's
+  storage only. The page is wired once in `app::run`; the window when
+  first created. The stream viewer is the same shape: `viewers::Viewer`
+  owns a private `Surface::{Window, Page}` and the rest of the app
+  only calls its methods (`raise`, `update_frame`, `close`,
+  `apply_text_scale`) — never a `.win`. Anything that opens its own
+  `Window` on the desktop gets a `*Panel` component + `State.*-open`
+  page on Android (ANDROID-SPEC.md D22/D23); that is the pattern for
+  the admin panel too.
+- **`VideoDecoder::flush()` is advisory.** The client calls it before
+  every IDR; FFmpeg honours it (cheap), MediaCodec deliberately does
+  not (it would discard the pipeline's pictures every 2 s, see
+  `video/src/mediacodec.rs`). Don't make a decoder's correctness
+  depend on it — an IDR resets reference state on its own.
+- **A playback cushion is sized from the device's callback, never as
+  a fixed number of ms.** 20 ms ahead was two periods of a 10 ms
+  desktop device and half of one 40 ms AAudio callback — every Android
+  callback came out half silence (D24). The tell in any log: an
+  `Underruns` count that climbs at a steady rate (~one per callback)
+  with `Lost 0`. `output::Cushion` does the arithmetic; the worker
+  logs `Output callbacks of N frames …` once per size it sees.
+- **Read a steady counter as a rate before blaming the platform.** The
+  emulator's `Underruns 162` in 6 s was 27/s — one per callback — and
+  was first written off as the emulator's audio clock. Divide by the
+  time and compare with the callback period first.
+- **Android-only code can be type-checked here; Windows-only code
+  cannot.** `ndk` has a `test` feature that compiles its bindings off
+  Android: a scratch crate depending on `ndk` (`audio`, `api-level-28`,
+  `test`), `jni` 0.22, `ndk-context` and the real `audio` crate, with
+  `#[path]` modules pulling in `native/aaudio.rs` + `native/android.rs`
+  and tiny shims for the `crate::` items they use, runs `cargo clippy`
+  clean (2026-10-06). The `windows` 0.62 crates do not build off
+  Windows at all (`windows-future` needs `windows_core::imp::IMarshal`;
+  `--cfg windows` then trips on `std::os::windows`), so `wasapi.rs`
+  changes are checked against the crate sources by reading and by the
+  user's first Windows `cargo check`. Say so in the hand-over.
+- **No per-frame `warn!`.** A timing alarm that fires once a frame is
+  60 lines a second on any machine slower than the one it was tuned
+  on (the emulator: 652 of 729 logcat lines). Feed the measurement to
+  a `video::timing::SlowFrames` and log the line it returns once a
+  second (count over budget / total, worst, average) — `Slow decode`,
+  `Slow frames`, `Slow present` all do this now.
+- The platform-free half of a platform feature goes in its own module
+  with host tests (`video::yuv` for MediaCodec's planes → RGBA): it is
+  the only part the assistant can run here, and `rustc --test` on the
+  single file beats waiting for the phone. The Android-only half can
+  be type-checked on the host against a signature-only stub of the
+  `ndk` API (a scratch crate named `ndk` with the same method
+  signatures, `unimplemented!()` bodies) — that caught nothing this
+  time but costs a minute, and the real build takes ten.
+- **PowerShell scripts for the user are ASCII-only and saved with a
+  UTF-8 BOM (CRLF).** Windows PowerShell 5.1 reads a BOM-less file as
+  the ANSI code page; a UTF-8 em dash becomes `â€”`, and that `”` is
+  a legal double quote to the PowerShell lexer — the string closed
+  early and the rest of the message ran as a command (`run.ps1`,
+  2026-10-05: "The term 'drop' is not recognized").
 - A menu action lives in **three** places: `app-core::menu::Action`,
   the Slint `MenuAction` enum in `globals.slint` (append only — its
   ordinal crosses the bridge), and both conversions in
   `ui/src/lib.rs` (`menu_action`, `menu_action_back`). Miss one and
   only the compile says so, one round later.
+- **The narrow (phone) layout renders only at a phone width:**
+  `MainWindow` has `preferred-width`/`min-width`, so a fixture alone
+  draws the wide layout. Copy the `.slint` tree, swap
+  `preferred-width: 1000px` → `width: 412px` (and the height; drop
+  both `min-*` lines — the viewer rejects `height` next to
+  `min-height`), then render; `State.narrow-chat-open: true` shows
+  the chat page, `State.touch-host: true` the touch-only affordances
+  (the DM ✕); `State.settings-open: true` the Settings page, with
+  `settings-tab` and `settings-section-open` picking list or section.
+  `--component SettingsWindow ... settings.slint` with `{"tab": 2}`
+  checks the desktop window didn't move. The slide itself (a `Timer`-free `animate`) cannot be
+  captured. Check 1000×640 after any change there: the wide layout
+  must not move.
+- **Drive the real `MainWindow` headless** when a fix is about
+  behaviour (a tap, Back, focus): a scratch crate whose `build.rs`
+  runs `slint_build::compile_with_config` on
+  `crates/ui/slint/main.slint` with the `lucide` library path (as
+  `ui/build.rs` does), `slint::include_modules!()`,
+  `i_slint_backend_testing::init_no_event_loop()`, a 412×880 window,
+  `State` set from Rust, then `dispatch_event(PointerPressed/Released
+  | KeyPressed { text: Key::Back.into() })` with `mock_elapsed_time`
+  + `update_timers_and_animations()` between, asserting on `State`
+  and on Logic callbacks hooked to counters. Used for D29 and D32.
+- **`ndk_context::android_context().context()` is the Application,
+  not the Activity** (android-activity 0.6): fine for `AudioManager`,
+  wrong for anything Activity-only (`requestPermissions`, our
+  `BaucordActivity` methods). The Activity is `java::init`'s, from
+  `AndroidApp::activity_as_ptr()` (D33).
+- **The keyboard and system bars on Android** are on the `Window`:
+  `safe-area-insets`, `virtual-keyboard-position/size`. The pages sit
+  in `MainWindow`'s `inset-*` rectangle; a new full-window page must
+  too (D35). The headless harness can set a keyboard with
+  `window.set_virtual_keyboard(pos, size, i_slint_core::InternalToken)`
+  (dev-dependency `i-slint-core = "=1.17.1"`).
+- **Start the app the way the launcher does, not by a hard-coded
+  class**: `cmd package resolve-activity --brief -a
+  android.intent.action.MAIN -c android.intent.category.LAUNCHER
+  dev.baucord` (last line = the component), then `am start -n` it; or
+  `monkey -p dev.baucord 1`. Not an implicit `am start … dev.baucord`:
+  Activity starts resolve with `MATCH_DEFAULT_ONLY`, and our launcher
+  filter has no `category.DEFAULT` ("unable to resolve Intent"). `am`
+  exits 0 on errors; check its words (D37). A Linux PowerShell 7 can
+  be fetched from the PowerShell GitHub releases to test `run.ps1`.
+- **In `build.gradle.kts`, never write `java.awt.…` / `java.io.…`
+  out in full**: `java` resolves to the project's `java` extension (AGP
+  applies java-base) and the script fails with "Unresolved reference:
+  awt". Import the classes at the top. Gradle 8.14.3 is installed here
+  (`/opt/gradle`) but Maven is blocked, so AGP itself cannot run;
+  check Kotlin script code in a scratch project with `java-base`.
+- **Android 16 + targetSdk 36 never delivers `KEYCODE_BACK`**
+  (predictive back): the manifest's `enableOnBackInvokedCallback=
+  "false"` is what makes every `Key.Back` handler run (D29).
+- **JNI from Java into Rust**: NativeActivity `dlopen`s our library
+  itself, so a `Java_…` export is invisible to the Activity's class
+  loader — register natives from Rust (`env.register_native_methods`
+  on `get_object_class(activity)`). jni 0.22's `native_method!` takes
+  `error_policy = Ident` (an identifier in scope, not a path — the
+  docs show a path and it fails to parse). The Java compiles against
+  stubs here: `javac --release 8` with a dozen hand-written
+  `android.*` stub classes (`scratchpad/jstub`) catches syntax and
+  checked-exception mistakes; Gradle is the real check.
+- `z` takes a number literal only (`z: cond ? 0 : 1` is a compile
+  error); order siblings, or lay them out so they never overlap.
+- **The widget style is fluent everywhere, Android too** (no style in
+  `ui/build.rs` → the compiler's fallback is fluent, not the per-target
+  "native" table). Fluent's `ScrollView`/`ListView` never pan on a drag,
+  so every scroll view a phone reaches binds
+  `mouse-drag-pan-enabled: State.touch-host` (D27) — a new one must too.
+- Interactions (drags, flicks, long-press) can't be screenshotted, but
+  they can be driven headless: a scratch crate with `slint =
+  { version = "=1.17.1", default-features = false, features = ["std",
+  "compat-1-2"] }` and `i-slint-backend-testing = "=1.17.1"`, a
+  `slint::slint!{}` copy of the element under test,
+  `i_slint_backend_testing::init_no_event_loop()`, then
+  `window.dispatch_event(WindowEvent::Pointer*)` with
+  `mock_elapsed_time` between moves, reading back an `out` property
+  (`viewport-y`). Builds in a few minutes with `debug = 0`; Android's
+  touch input reaches items as these same pointer events.
 - A render fixture's `image` fields (`avatar`, `viewer-image`) must
   point at a real file — `""` makes the whole model fail to load
   ("Failed to load image from path") — a 1×1 PNG written by the
@@ -772,7 +956,77 @@ copy and single-click watch confirmed working in QA:
   built-in admin badge turns green. *(batch 1)*
 
 **Android** (v1: voice + chat, sideloaded, Slint) — `ANDROID-SPEC.md`,
-milestones in its §12; M0 (toolchain + hello) follows 1.1.6.
+milestones in its §12, decisions in §14.
+
+**Android M0 done (2026-10-05): the hello APK built (1m18s of Rust)
+and ran on a Pixel 10 AVD; the toolchain rounds are in ANDROID-SPEC.md
+§14. The same day the full `app` build compiled first time and
+connected to the official server from the emulator (roster, channels,
+speaking indicators, voice received) on the desktop `main.slint` —
+cpal's AAudio host carries playback unchanged. Chat pane overflows portrait
+(M2's job). The signed arm64 release ran on a real phone (pt-BR
+locale right, 321 MB) with no audio: the client dropped the engine on
+a capture-only failure and the engine never retried an unopened
+input — both fixed (spec §14); the phone's actual device error is
+the next logcat. Settings on Android is now a page in the main window (`SettingsPanel`
++ `State.settings-open`, `settingsui::SettingsSurface`; D22), and
+voice works on the emulator with the host microphone (run.ps1 starts
+the AVD with `-allow-host-audio`). **Stream viewing landed 2026-10-06
+(D23, untested on a device as of writing): `video::mediacodec` decodes
+H.264 through `AMediaCodec` to byte buffers, `video::yuv` converts the
+planes (8 host tests), `client::screen::create_decoder()` is
+cfg-split, and `viewer.slint`'s `StreamViewerPanel` shows as a page
+under `State.watch-open` through `viewers::Viewer`'s `Surface` enum.
+Stream viewing confirmed on the emulator and the phone the same night.
+Voice then broke up on the phone: the 20 ms playback cushion vs
+AAudio's 20–40 ms callbacks (D24), fixed with a callback-sized cushion,
+a jitter floor for burst pulls and nice −16 audio workers. Reported
+working; emulator log: 45 ms callbacks, underruns down from ~25.6/s to
+~4/s (back-to-back emulator callbacks, most likely). Still wanted: the
+phone's `Output callbacks of …` line and `Underruns` rate — if it is
+not ~0, grow the cushion by a hop per underrun (spec, after D24's
+paragraph).
+**Echo cancellation (2026-10-06, AEC-SPEC.md §12, D25):** built
+fresh from `AEC-SPEC.md` (the old branch was not recovered):
+`audio::aec` contract + tests, Android voice-call streams and
+`AudioManager` mode, Windows Communications category + verification,
+the Settings → Audio picker with a live status line, strings in the
+three catalogs. Host checks/tests/clippy clean; Android modules
+type-checked against the real `ndk`/`jni`; Windows unverified by a
+compiler. First runs to read: on the phone `Android audio:
+communication mode on (speaker on…)`, `AAudio voice capture: … preset
+VoiceCommunication`, `aec: platform (speakers)`; on Windows `category=
+Communications`, `AEC reference endpoint set`, `aec: platform
+(speakers)` or `none (no canceller on this device)`.
+First device run: watch for `MediaCodec c2.… : decoding video/avc`,
+`MediaCodec output layout: …` and `first picture WxH` in logcat; a
+`ColorConversion` error names the layout it could not read.** Next:
+audio on the phone, then the mobile root.** What follows is the M0 record: `crates/android` runs the real
+`frontend::app::run()` on Slint's Android backend (D10) with a `hello`
+feature for the toolchain alone; the `android/` Gradle project runs
+cargo-ndk from `preDebugBuild`/`preReleaseBuild`; `frontend` got
+`SINGLE_WINDOW_HOST` guards (Settings, admin, viewer → toast) and skips
+`select_renderer`/`set_size` on Android; one new string
+(`host-single-window`) in the three catalogs. Verified without an NDK:
+the Android dependency graph (no winit/arboard/hotkeys/ffmpeg/xcap;
+Skia prebuilt key exists in rust-skia's matrix; opus is the one cmake
+build), host `cargo check` of `ui`/`i18n`/`app-core`/`protocol` and of
+the android manifest, and every Android API against the crate sources
+(Slint 1.17.1 `android` module, android-activity 0.6.1, jni 0.22.4 in
+cpal's idiom, cargo-ndk 4.1.2). First build order: `-PcargoFeatures=
+hello` on an x86_64 AVD, then the app; expect a round on jni 0.22
+types in `java.rs` if anything. First-build round 1: Gradle 8.14
+cannot run on Android Studio's JBR (JDK 25) — `What went wrong:
+25.0.3` is that and nothing else; `JAVA_HOME` must be a JDK 17–24
+(Temurin 21). Round 2: `ANDROID_HOME` must be the SDK Manager's
+location (not the Studio dir) and AGP 8.13 wants Build-Tools 35.0.0.
+Round 3: "No Android platforms found" in Slint's build.rs =
+cargo-ndk's `ANDROID_PLATFORM=29` read by `android-build` as the SDK
+platform; the Gradle tasks set `ANDROID_JAR` now (spec §14). Record Skia prebuilt / first-build
+time / AAudio outcome in ANDROID-SPEC.md §14. Then M1 is mostly done
+already (the split shipped as 1.1.6); next is M2 (the mobile `.slint`
+root behind `ui/mobile`); the viewer page and MediaCodec decode (D19,
+D23) came first.
 
 ## 6. Rough edges (known, not urgent)
 

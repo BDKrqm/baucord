@@ -200,6 +200,11 @@ export global Tr {
     in property <string> about-open-config: "Open config location";
     in property <string> save-and-close: "Save & close";
     in property <string> reset-defaults: "Reset to defaults";
+    in property <string> reset-confirm-body: "Every setting goes back to its default, including your saved servers, nickname and picture.";
+    in property <string> reset-confirm: "Reset everything";
+    in property <string> chat-empty-title: "No messages yet";
+    in property <string> chat-empty-general: "Say something to everyone on this server.";
+    in property <string> chat-empty-dm: "Say hello to start the conversation.";
     in property <string> language: "Language";
     in property <string> language-note: "Chat history keeps its language; new labels apply immediately.";
     in property <string> settings-server: "Server";
@@ -256,6 +261,8 @@ export global Tr {
     in property <string> chat-image-size-hint: "Larger pictures are shrunk to fit. Servers cap uploads at 10 MB.";
     in property <string> privacy-header: "Privacy";
     in property <string> privacy-note: "While connected, a server sees your nickname, your key's id, your roles and level, which channel you are in, and every 10 seconds a telemetry line: round-trip time, packet loss, the names of your audio and video devices, your app version and operating system. Admins on that server can read the last line in the roster. Nothing goes anywhere else.";
+    in property <string> audio-aec: "Echo cancellation";
+    in property <string> audio-aec-hint: "Keeps others from hearing themselves through your speakers. Automatic leaves headphones alone.";
     in property <string> audio-transmission: "Transmission";
     in property <string> audio-vad-hint: "Your voice is sent whenever it crosses the sensitivity below.";
     in property <string> audio-ptt-hint: "Hold to talk:";
@@ -271,6 +278,9 @@ export global Tr {
     in property <string> audio-input-device: "Input device";
     in property <string> audio-output-device: "Output device";
     in property <string> audio-system-default: "System default";
+    /// Under the output picker; empty on the desktop (a phone explains
+    /// its routes there).
+    in property <string> audio-output-hint: "";
     in property <string> audio-input-header: "Input";
     in property <string> audio-capture-level: "Capture level";
     in property <string> audio-input-gain: "Input gain";

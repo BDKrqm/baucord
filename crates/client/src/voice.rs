@@ -11,13 +11,15 @@
 use std::{
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering, Ordering::Relaxed},
-        Arc,
+        Arc, Mutex,
     },
     thread,
     time::{Duration, Instant},
 };
 
-use audio::{AudioPacket, PeerAudioSettings, SoundType, VoiceChat, VoiceChatConfig};
+use audio::{
+    AecMode, AecReport, AudioPacket, PeerAudioSettings, SoundType, VoiceChat, VoiceChatConfig,
+};
 use crossbeam_channel::{bounded, select, Receiver, Sender};
 use log::info;
 
@@ -46,6 +48,9 @@ pub enum VoiceControl {
     SetOutputGain(f32),
     SetInputDevice(Option<String>),
     SetOutputDevice(Option<String>),
+    /// The echo-cancellation setting; reopens the streams when the
+    /// voice-call decision changes.
+    SetEchoCancellation(AecMode),
     AddPeer(u64),
     RemovePeer(u64),
     SetPeerAudio(u64, PeerAudioSettings),
@@ -77,6 +82,9 @@ pub struct SharedAudioState {
     pub denoised_level: Arc<AtomicU32>,
     pub speaking: Arc<AtomicBool>,
     pub jitter_buffer_ms: Arc<AtomicU32>,
+    /// What echo cancellation the open streams got (`None` = no voice
+    /// session); refreshed when the engine's report changes.
+    pub aec: Arc<Mutex<Option<AecReport>>>,
 }
 
 impl Default for SharedAudioState {
@@ -94,6 +102,7 @@ impl SharedAudioState {
             denoised_level: Arc::new(AtomicU32::new(0)),
             speaking: Arc::new(AtomicBool::new(false)),
             jitter_buffer_ms: Arc::new(AtomicU32::new(0)),
+            aec: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -111,6 +120,7 @@ fn settings_to_config(s: &Settings) -> VoiceChatConfig {
         agc_enabled: true,
         agc_target_rms: 0.10,
         compressor_enabled: true,
+        echo_cancellation: s.audio.echo_cancellation,
     }
 }
 
@@ -195,6 +205,9 @@ struct VoiceLoopState {
     ptt_held: bool,
     running: bool,
     last_stats_log: Instant,
+    /// `aec_generation` of the engine whose report `shared.aec` holds
+    /// (`None` = no engine).
+    aec_published: Option<u64>,
 }
 
 impl VoiceLoopState {
@@ -208,6 +221,7 @@ impl VoiceLoopState {
             ptt_held: false,
             running: true,
             last_stats_log: Instant::now(),
+            aec_published: None,
         }
     }
 
@@ -281,14 +295,29 @@ impl VoiceLoopState {
                 match VoiceChat::new(config) {
                     Ok(mut voice) => {
                         if let Err(e) = voice.start() {
+                            if !voice.output_running() {
+                                // Nothing came up: no engine this time.
+                                event_tx
+                                    .send(VoiceEvent::Error(format!("Start failed: {e}")))
+                                    .ok();
+                                wake();
+                                return;
+                            }
+                            // Playback is up and only capture failed (no
+                            // microphone; on Android the permission not
+                            // granted yet). Keep the engine: the room stays
+                            // audible, and `service()` retries the input
+                            // every 2 s until it opens. Dropping it here
+                            // silenced everything (first phone test,
+                            // 2026-10-05).
                             event_tx
-                                .send(VoiceEvent::Error(format!("Start failed: {e}")))
+                                .send(VoiceEvent::Error(format!("Microphone unavailable: {e}")))
                                 .ok();
-                            wake();
-                            return;
                         }
                         self.our_client_id = Some(id);
                         self.vc = Some(voice);
+                        // Generations count per engine: republish.
+                        self.aec_published = None;
                         self.was_speaking = false;
                         self.user_muted = false;
                         self.ptt_held = false;
@@ -381,6 +410,11 @@ impl VoiceLoopState {
                         .send(VoiceEvent::Error(format!("Output device: {e}")))
                         .ok();
                     wake();
+                }
+            }
+            VoiceControl::SetEchoCancellation(mode) => {
+                if let Some(v) = self.vc.as_mut() {
+                    v.set_echo_cancellation(mode);
                 }
             }
             VoiceControl::AddPeer(id) => {
@@ -548,6 +582,20 @@ fn run_voice_loop(
                 let _ = network_tx.send(NetworkControl::SendSpeakingStatus(speaking));
                 let _ = event_tx.send(VoiceEvent::SpeakingChanged(speaking));
                 wake();
+            }
+        }
+
+        // The echo-cancellation report for the settings page: it changes
+        // only when streams (re)open, so compare the generation and copy
+        // the report then — and clear it when the engine is gone.
+        let generation = state
+            .vc
+            .as_ref()
+            .map(|v| v.stats().aec_generation.load(Ordering::Relaxed));
+        if generation != state.aec_published {
+            state.aec_published = generation;
+            if let Ok(mut slot) = shared.aec.lock() {
+                *slot = state.vc.as_ref().and_then(VoiceChat::aec_report);
             }
         }
 

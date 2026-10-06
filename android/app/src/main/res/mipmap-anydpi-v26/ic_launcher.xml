@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The adaptive launcher icon: the app background behind the repo's
+     assets/icons/icon.png, which app/build.gradle.kts renders into
+     generated mipmap-*/ic_launcher_foreground.png at build time
+     (ANDROID-SPEC.md D36). -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/baucord_bg" />
+    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+</adaptive-icon>

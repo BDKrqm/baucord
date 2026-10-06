@@ -9,9 +9,117 @@ use client::{
 };
 use i18n::t;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
-use ui::{KeybindRow, ServerRow, SettingsLogic, SettingsState, SettingsWindow};
+use ui::{KeybindRow, MainWindow, ServerRow, SettingsLogic, SettingsState, SettingsWindow, State};
 
 use crate::app::{self, AppState};
+
+/// Where the settings UI lives: its own `SettingsWindow` on desktop,
+/// or the main window's settings page on a single-window host
+/// (Android — `State.settings-open`, ANDROID-SPEC.md D22). Both carry
+/// the same `SettingsState` / `SettingsLogic` globals; everything in
+/// this module reaches them through here, so the rest of the file does
+/// not know which host it is on.
+pub(crate) enum SettingsSurface<'a> {
+    Window(&'a SettingsWindow),
+    Page(&'a MainWindow),
+}
+
+impl<'a> SettingsSurface<'a> {
+    fn state(&self) -> SettingsState<'a> {
+        match self {
+            Self::Window(w) => w.global::<SettingsState>(),
+            Self::Page(m) => m.global::<SettingsState>(),
+        }
+    }
+
+    fn logic(&self) -> SettingsLogic<'a> {
+        match self {
+            Self::Window(w) => w.global::<SettingsLogic>(),
+            Self::Page(m) => m.global::<SettingsLogic>(),
+        }
+    }
+
+    fn tr(&self) -> ui::Tr<'a> {
+        match self {
+            Self::Window(w) => w.global::<ui::Tr>(),
+            Self::Page(m) => m.global::<ui::Tr>(),
+        }
+    }
+
+    /// Select a nav tab (`TAB_*`).
+    pub(crate) fn set_tab(&self, tab: i32) {
+        match self {
+            Self::Window(w) => w.set_tab(tab),
+            Self::Page(m) => {
+                let s = m.global::<State>();
+                s.set_settings_tab(tab);
+                // Asked for a tab (the connect view's pencil): the
+                // narrow page goes straight to that section (D28).
+                s.set_settings_section_open(true);
+            }
+        }
+    }
+
+    /// Give the keybind-capture scope focus. The page never records a
+    /// keybind (no global hotkeys on a phone), so nothing to focus.
+    fn focus_capture(&self) {
+        if let Self::Window(w) = self {
+            w.invoke_focus_capture();
+        }
+    }
+
+    fn show(&self) {
+        match self {
+            Self::Window(w) => {
+                let _ = w.show();
+            }
+            Self::Page(m) => {
+                let s = m.global::<State>();
+                // The narrow page opens on its section list (D28).
+                s.set_settings_section_open(false);
+                s.set_settings_open(true);
+            }
+        }
+    }
+
+    fn hide(&self) {
+        match self {
+            Self::Window(w) => {
+                let _ = w.hide();
+            }
+            Self::Page(m) => {
+                m.global::<State>().set_settings_open(false);
+                // The page held the keyboard focus; without a holder,
+                // Android's Back would find no handler and close the
+                // app (on a touch host this hands it to the main
+                // screen's Back handler, not the composer).
+                m.invoke_focus_composer();
+            }
+        }
+    }
+}
+
+/// The surface to drive, if there is one yet: on desktop `None` until
+/// the window has been created (updates before that are skipped, as
+/// before); on a single-window host always the main window's page.
+pub(crate) fn surface(app: &AppState) -> Option<SettingsSurface<'_>> {
+    if app::SINGLE_WINDOW_HOST {
+        Some(SettingsSurface::Page(&app.main))
+    } else {
+        app.settings_win.as_ref().map(SettingsSurface::Window)
+    }
+}
+
+/// A route's name as the picker shows it: the engine's English names
+/// for the built-in ones translated, a headset's own name as it is.
+fn route_label(name: &str) -> String {
+    match name {
+        audio::route::SPEAKER => t!("audio-route-speaker"),
+        audio::route::EARPIECE => t!("audio-route-earpiece"),
+        audio::route::WIRED => t!("audio-route-wired"),
+        other => other.to_string(),
+    }
+}
 
 /// Nav index of the Servers tab (Profile 0, General 1, Audio 2,
 /// Sounds 3, Keyboard 4, Servers 5, Credits 6, About 7) — the connect
@@ -106,14 +214,14 @@ fn join_address(ip: &str, port: &str) -> String {
 
 /// The Servers tab's selected row as a usable index, if any.
 fn selected_server(app: &AppState) -> Option<usize> {
-    let win = app.settings_win.as_ref()?;
-    let index = usize::try_from(win.global::<SettingsState>().get_server_index()).ok()?;
+    let sf = surface(app)?;
+    let index = usize::try_from(sf.state().get_server_index()).ok()?;
     (index < app.settings.servers.len()).then_some(index)
 }
 
 /// Rebuild the Servers tab's row model from settings.
 fn push_server_rows(app: &AppState) {
-    let Some(win) = &app.settings_win else { return };
+    let Some(sf) = surface(app) else { return };
     let default_pos = app
         .settings
         .servers
@@ -131,15 +239,13 @@ fn push_server_rows(app: &AppState) {
             is_default: i == default_pos,
         })
         .collect();
-    win.global::<SettingsState>()
-        .set_servers(ModelRc::new(VecModel::from(rows)));
+    sf.state().set_servers(ModelRc::new(VecModel::from(rows)));
 }
 
 /// One line under the identity buttons: what just happened.
 fn set_identity_status(app: &AppState, text: &str) {
-    if let Some(win) = &app.settings_win {
-        win.global::<SettingsState>()
-            .set_identity_status(text.into());
+    if let Some(sf) = surface(app) {
+        sf.state().set_identity_status(text.into());
     }
 }
 
@@ -149,16 +255,16 @@ pub fn refresh_avatar(app: &mut AppState) {
     app.reload_own_avatar();
     app.update_user_list();
     app.refresh_own_rows();
-    let Some(win) = &app.settings_win else { return };
-    let s = win.global::<SettingsState>();
+    let Some(sf) = surface(app) else { return };
+    let s = sf.state();
     s.set_has_avatar(app.own_avatar.is_some());
     s.set_avatar(app.own_avatar.clone().unwrap_or_default());
 }
 
 /// "On <server>: Member · Level 3", from what the session knows.
 pub fn refresh_role_line(app: &AppState) {
-    let Some(win) = &app.settings_win else { return };
-    let s = win.global::<SettingsState>();
+    let Some(sf) = surface(app) else { return };
+    let s = sf.state();
     s.set_connected(app.connected);
     let line = if app.connected {
         let (role, level) = app.our_role_and_level();
@@ -192,8 +298,8 @@ pub fn refresh_role_line(app: &AppState) {
 /// The identity line: this device's user id (its key's hash) and
 /// where the key file lives.
 pub fn refresh_identity(app: &AppState) {
-    let Some(win) = &app.settings_win else { return };
-    let s = win.global::<SettingsState>();
+    let Some(sf) = surface(app) else { return };
+    let s = sf.state();
     let id = app.client_key.as_ref().map_or_else(
         || t!("identity-missing"),
         |key| app::short_id(&key.user_id()),
@@ -209,8 +315,8 @@ pub fn refresh_identity(app: &AppState) {
 
 /// Fill the editor fields from the selected entry.
 fn fill_server_editor(app: &AppState) {
-    let Some(win) = &app.settings_win else { return };
-    let s = win.global::<SettingsState>();
+    let Some(sf) = surface(app) else { return };
+    let s = sf.state();
     let entry = selected_server(app).and_then(|i| app.settings.servers.get(i));
     let (ip, port) = entry.map_or_else(Default::default, |e| split_address(&e.address));
     s.set_server_name(entry.map_or("", |e| e.name.as_str()).into());
@@ -234,7 +340,7 @@ fn fill_server_editor(app: &AppState) {
 /// the connect view's dropdown pick or an invite code used. No-op while
 /// the settings window was never created.
 pub fn refresh_servers(app: &AppState) {
-    if app.settings_win.is_some() {
+    if surface(app).is_some() {
         push_server_rows(app);
         fill_server_editor(app);
     }
@@ -268,9 +374,10 @@ fn format_sensitivity(threshold: f32) -> String {
         "threshold" => format!("{threshold:.3}"))
 }
 
-/// Open the settings window (creating it on first use).
+/// Open the settings UI: the window (created on first use) on
+/// desktop, the page on a single-window host.
 pub fn open(app: &mut AppState) {
-    if app.settings_win.is_none() {
+    if !app::SINGLE_WINDOW_HOST && app.settings_win.is_none() {
         let win = match SettingsWindow::new() {
             Ok(w) => w,
             Err(e) => {
@@ -278,7 +385,7 @@ pub fn open(app: &mut AppState) {
                 return;
             }
         };
-        wire(&win);
+        wire(&SettingsSurface::Window(&win));
         win.global::<ui::Theme>()
             .set_scale(app.settings.ui.text_scale);
         let weak = win.as_weak();
@@ -296,16 +403,23 @@ pub fn open(app: &mut AppState) {
     populate(app);
     start_meter_timer(app);
 
-    if let Some(win) = &app.settings_win {
-        let _ = win.show();
+    if let Some(sf) = surface(app) {
+        sf.show();
     }
+}
+
+/// Wire the page's callbacks on a single-window host — once, at
+/// startup (`app::run`), where the desktop wires its window when it
+/// is first created.
+pub(crate) fn wire_page(main: &MainWindow) {
+    wire(&SettingsSurface::Page(main));
 }
 
 /// Fill every `SettingsState` property from current settings + devices.
 pub fn populate(app: &mut AppState) {
-    let Some(win) = &app.settings_win else { return };
-    app::fill_tr(&win.global::<ui::Tr>());
-    let s = win.global::<SettingsState>();
+    let Some(sf) = surface(app) else { return };
+    app::fill_tr(&sf.tr());
+    let s = sf.state();
     let settings = &app.settings;
 
     // Language list: "System default" + native names.
@@ -372,11 +486,26 @@ pub fn populate(app: &mut AppState) {
         .position(|(_, kb)| *kb >= settings.ui.image_max_kb)
         .unwrap_or(IMAGE_SIZES.len() - 1);
     s.set_image_size_index(i32::try_from(size_index).unwrap_or(0));
-    // Audio: transmission mode and the PTT key as bound.
-    let modes: Vec<slint::SharedString> = vec![t!("audio-vad").into(), t!("audio-ptt").into()];
+    // Audio: transmission mode and the PTT key as bound. A phone has no
+    // key to hold, so it gets voice activity alone.
+    let modes: Vec<slint::SharedString> = if app::SINGLE_WINDOW_HOST {
+        vec![t!("audio-vad").into()]
+    } else {
+        vec![t!("audio-vad").into(), t!("audio-ptt").into()]
+    };
     s.set_transmission_modes(ModelRc::new(VecModel::from(modes)));
     s.set_transmission_index(i32::from(settings.audio.push_to_talk));
     s.set_ptt_bind(settings.bind_for(BindableAction::PushToTalk).into());
+    // Echo cancellation: the picker in AecMode::ALL order, and what the
+    // running session got (refreshed by the meter timer).
+    let aec_modes: Vec<slint::SharedString> = audio::AecMode::ALL
+        .iter()
+        .map(|m| aec_mode_label(*m).into())
+        .collect();
+    s.set_aec_modes(ModelRc::new(VecModel::from(aec_modes)));
+    s.set_aec_index(i32::try_from(settings.audio.echo_cancellation.index()).unwrap_or(0));
+    let aec = app.voice_aec();
+    s.set_aec_status(aec_status(aec.lock().ok().and_then(|g| g.clone()).as_ref()).into());
 
     // Profile (spec §7.1): what this device keeps.
     s.set_nickname(settings.user.nickname.as_str().into());
@@ -435,13 +564,23 @@ pub fn populate(app: &mut AppState) {
             .chain(devices.iter().map(|(n, _)| n.as_str().into()))
             .collect()
     };
+    // A phone's outputs are routes (audio::route): "Automatic" first,
+    // the built-in ones in the user's language. The setting keeps the
+    // engine's names; only the shown text changes.
+    let output_model: Vec<slint::SharedString> = if app::SINGLE_WINDOW_HOST {
+        std::iter::once(t!("audio-route-auto").into())
+            .chain(output_devices.iter().map(|(n, _)| route_label(n).into()))
+            .collect()
+    } else {
+        dev_model(&output_devices)
+    };
     let dev_index = |devices: &[(String, bool)], saved: Option<&str>| -> i32 {
         saved
             .and_then(|name| devices.iter().position(|(n, _)| n == name))
             .map_or(0, |i| i32::try_from(i + 1).unwrap_or(0))
     };
     s.set_input_devices(ModelRc::new(VecModel::from(dev_model(&input_devices))));
-    s.set_output_devices(ModelRc::new(VecModel::from(dev_model(&output_devices))));
+    s.set_output_devices(ModelRc::new(VecModel::from(output_model)));
     s.set_input_index(dev_index(
         &input_devices,
         settings.audio.input.device.as_deref(),
@@ -483,10 +622,10 @@ pub fn populate(app: &mut AppState) {
     set_about(&s);
 }
 
-/// Wire `SettingsLogic` callbacks (once per window instance).
+/// Wire `SettingsLogic` callbacks (once per surface).
 #[allow(clippy::too_many_lines)]
-fn wire(win: &SettingsWindow) {
-    let logic = win.global::<SettingsLogic>();
+fn wire(sf: &SettingsSurface<'_>) {
+    let logic = sf.logic();
 
     logic.on_language_selected(|index| {
         app::with_current(move |app| {
@@ -505,8 +644,8 @@ fn wire(win: &SettingsWindow) {
     logic.on_nickname_edited(|text| {
         app::with_current(move |app| {
             app.settings.user.nickname = text.to_string();
-            if let Some(win) = &app.settings_win {
-                win.global::<SettingsState>()
+            if let Some(sf) = surface(app) {
+                sf.state()
                     .set_initial(app_core::roster::initial_of(&text).into());
             }
             // The connect screen shows the same name.
@@ -650,8 +789,17 @@ fn wire(win: &SettingsWindow) {
     });
     logic.on_transmission_selected(|index| {
         app::with_current(move |app| {
-            app.settings.audio.push_to_talk = index == 1;
+            app.settings.audio.push_to_talk = index == 1 && !app::SINGLE_WINDOW_HOST;
             app.apply_push_to_talk();
+        });
+    });
+    logic.on_aec_selected(|index| {
+        app::with_current(move |app| {
+            let mode = audio::AecMode::from_index(usize::try_from(index).unwrap_or(0));
+            app.settings.audio.echo_cancellation = mode;
+            app.voice_tx()
+                .send(VoiceControl::SetEchoCancellation(mode))
+                .ok();
         });
     });
 
@@ -695,9 +843,9 @@ fn wire(win: &SettingsWindow) {
                 channel_passwords: std::collections::HashMap::new(),
             });
             app.settings.save();
-            if let Some(win) = &app.settings_win {
+            if let Some(sf) = surface(app) {
                 let last = app.settings.servers.len() - 1;
-                win.global::<SettingsState>()
+                sf.state()
                     .set_server_index(i32::try_from(last).unwrap_or(0));
             }
             push_server_rows(app);
@@ -721,9 +869,9 @@ fn wire(win: &SettingsWindow) {
             }
             app.settings.normalize_servers();
             app.settings.save();
-            if let Some(win) = &app.settings_win {
+            if let Some(sf) = surface(app) {
                 let clamped = index.min(app.settings.servers.len() - 1);
-                win.global::<SettingsState>()
+                sf.state()
                     .set_server_index(i32::try_from(clamped).unwrap_or(0));
             }
             push_server_rows(app);
@@ -792,6 +940,25 @@ fn wire(win: &SettingsWindow) {
 
     // ── Identity (spec §3.3) ────────────────────────────────────────
     logic.on_identity_export(|| {
+        // No save dialog (Android): into Downloads, and the status line
+        // says where — the user moves it to the other device from there.
+        if !crate::host::HAS_SAVE_DIALOG {
+            app::with_current(|app| {
+                let key = client::config::client_key_path();
+                let saved = std::fs::read(&key)
+                    .map_err(|e| format!("no identity key at {}: {e}", key.display()))
+                    .and_then(|bytes| {
+                        crate::media::save_to_downloads("baucord-identity.key", &bytes)
+                    });
+                match saved {
+                    Ok(saved) => {
+                        set_identity_status(app, &t!("file-saved", "path" => saved.shown.as_str()))
+                    }
+                    Err(e) => app.show_error(&e),
+                }
+            });
+            return;
+        }
         crate::host::save_file("baucord-identity.key", None, |path| {
             let _ = slint::invoke_from_event_loop(move || {
                 app::with_current(move |app| match client::config::export_client_key(&path) {
@@ -817,8 +984,8 @@ fn wire(win: &SettingsWindow) {
     });
     logic.on_identity_regenerate(|| {
         app::with_current(|app| {
-            let Some(win) = &app.settings_win else { return };
-            let s = win.global::<SettingsState>();
+            let Some(sf) = surface(app) else { return };
+            let s = sf.state();
             // First click arms, second acts: a new key is a new user.
             if !s.get_identity_regenerate_armed() {
                 s.set_identity_regenerate_armed(true);
@@ -837,9 +1004,8 @@ fn wire(win: &SettingsWindow) {
     });
     logic.on_identity_regenerate_disarm(|| {
         app::with_current(|app| {
-            if let Some(win) = &app.settings_win {
-                win.global::<SettingsState>()
-                    .set_identity_regenerate_armed(false);
+            if let Some(sf) = surface(app) {
+                sf.state().set_identity_regenerate_armed(false);
             }
         });
     });
@@ -875,8 +1041,8 @@ fn wire(win: &SettingsWindow) {
             app.voice_tx()
                 .send(VoiceControl::SetGateThreshold(threshold))
                 .ok();
-            if let Some(win) = &app.settings_win {
-                win.global::<SettingsState>()
+            if let Some(sf) = surface(app) {
+                sf.state()
                     .set_sensitivity_line(format_sensitivity(threshold).into());
             }
         });
@@ -886,8 +1052,8 @@ fn wire(win: &SettingsWindow) {
         app::with_current(|app| {
             let enable = !app.is_testing_mic;
             app.handle_test_microphone(enable);
-            if let Some(win) = &app.settings_win {
-                let s = win.global::<SettingsState>();
+            if let Some(sf) = surface(app) {
+                let s = sf.state();
                 s.set_testing_mic(enable);
                 s.set_test_hint(
                     if enable {
@@ -905,11 +1071,11 @@ fn wire(win: &SettingsWindow) {
     logic.on_record_keybind(|index| {
         app::with_current(move |app| {
             app.keybind_recording = usize::try_from(index).ok();
-            if let Some(win) = &app.settings_win {
-                let s = win.global::<SettingsState>();
+            if let Some(sf) = surface(app) {
+                let s = sf.state();
                 set_row_recording(&s, index, true);
                 s.set_capturing(true);
-                win.invoke_focus_capture();
+                sf.focus_capture();
             }
         });
     });
@@ -953,12 +1119,16 @@ fn wire(win: &SettingsWindow) {
         app::with_current(close);
     });
 
-    let weak = win.as_weak();
-    win.window().on_close_requested(move || {
-        let _ = &weak;
-        app::with_current(close);
-        slint::CloseRequestResponse::HideWindow
-    });
+    // The OS close box is the window's alone; the page has only the
+    // button.
+    if let SettingsSurface::Window(win) = sf {
+        let weak = win.as_weak();
+        win.window().on_close_requested(move || {
+            let _ = &weak;
+            app::with_current(close);
+            slint::CloseRequestResponse::HideWindow
+        });
+    }
 }
 
 /// Recompute the selected entry's `address` from the editor's IP and
@@ -967,8 +1137,8 @@ fn update_selected_address(app: &mut AppState) {
     let Some(index) = selected_server(app) else {
         return;
     };
-    let Some(win) = &app.settings_win else { return };
-    let s = win.global::<SettingsState>();
+    let Some(sf) = surface(app) else { return };
+    let s = sf.state();
     let address = join_address(&s.get_server_ip(), &s.get_server_port());
     app.settings.servers[index].address = address;
     push_server_rows(app);
@@ -1101,8 +1271,8 @@ fn finish_capture(app: &mut AppState, text: &str, ctrl: bool, alt: bool, shift: 
 /// Leave recording mode without changing the bind.
 fn cancel_capture(app: &mut AppState) {
     app.keybind_recording = None;
-    if let Some(win) = &app.settings_win {
-        let s = win.global::<SettingsState>();
+    if let Some(sf) = surface(app) {
+        let s = sf.state();
         s.set_capturing(false);
         let rows = s.get_keybinds();
         for i in 0..rows.row_count() {
@@ -1118,7 +1288,7 @@ fn cancel_capture(app: &mut AppState) {
 
 /// Refresh just the keybind rows (after a capture or clear).
 fn populate_binds_only(app: &mut AppState) {
-    let Some(win) = &app.settings_win else { return };
+    let Some(sf) = surface(app) else { return };
     let rows: Vec<KeybindRow> = BindableAction::ALL
         .iter()
         .map(|&action| KeybindRow {
@@ -1127,7 +1297,7 @@ fn populate_binds_only(app: &mut AppState) {
             recording: false,
         })
         .collect();
-    let s = win.global::<SettingsState>();
+    let s = sf.state();
     s.set_keybinds(ModelRc::new(VecModel::from(rows)));
     // The Audio tab quotes the push-to-talk key, and so does the mic
     // button's tooltip.
@@ -1139,21 +1309,57 @@ fn populate_binds_only(app: &mut AppState) {
 /// `MeterUpdate` tick).
 fn start_meter_timer(app: &mut AppState) {
     let (output_level, denoised_level) = app.voice_levels();
+    let aec = app.voice_aec();
     app.meter_timer.start(
         slint::TimerMode::Repeated,
         Duration::from_millis(125),
         move || {
             let mic = f32::from_bits(denoised_level.load(Ordering::Relaxed));
             let out = f32::from_bits(output_level.load(Ordering::Relaxed));
+            // Reopening the streams (a headset plugged in, the setting
+            // changed) changes this; property sets of an equal string
+            // cost nothing visible.
+            let aec_line = aec_status(aec.lock().ok().and_then(|g| g.clone()).as_ref());
             app::with_current(move |app| {
-                if let Some(win) = &app.settings_win {
-                    let s = win.global::<SettingsState>();
+                if let Some(sf) = surface(app) {
+                    let s = sf.state();
                     s.set_mic_level(mic);
                     s.set_out_level(out);
+                    if s.get_aec_status() != aec_line.as_str() {
+                        s.set_aec_status(aec_line.into());
+                    }
                 }
             });
         },
     );
+}
+
+/// The picker's word for `mode`.
+fn aec_mode_label(mode: audio::AecMode) -> String {
+    match mode {
+        audio::AecMode::Auto => t!("audio-aec-auto"),
+        audio::AecMode::Always => t!("audio-aec-always"),
+        audio::AecMode::Off => t!("audio-aec-off"),
+    }
+}
+
+/// The status line under the picker: what the open streams got
+/// (AEC-SPEC.md §3.3), in the user's language.
+fn aec_status(report: Option<&audio::AecReport>) -> String {
+    use audio::aec::reasons;
+    let Some(report) = report else {
+        return t!("aec-status-idle");
+    };
+    match report.tier {
+        audio::AecTier::Platform => t!("aec-status-on"),
+        audio::AecTier::None => match report.reason {
+            reasons::OFF => t!("aec-status-off"),
+            reasons::HEADPHONES => t!("aec-status-headphones"),
+            reasons::NO_CANCELLER => t!("aec-status-no-canceller"),
+            reasons::UNSUPPORTED => t!("aec-status-unsupported"),
+            _ => t!("aec-status-refused"),
+        },
+    }
 }
 
 /// Close semantics (both the Save button and the OS close box):
@@ -1162,8 +1368,8 @@ fn close(app: &mut AppState) {
     cancel_capture(app);
     if app.is_testing_mic {
         app.handle_test_microphone(false);
-        if let Some(win) = &app.settings_win {
-            win.global::<SettingsState>().set_testing_mic(false);
+        if let Some(sf) = surface(app) {
+            sf.state().set_testing_mic(false);
         }
     }
     app.meter_timer.stop();
@@ -1183,8 +1389,8 @@ fn close(app: &mut AppState) {
         app.profile_dirty = false;
         app.send_own_profile();
     }
-    if let Some(win) = &app.settings_win {
-        let _ = win.hide();
+    if let Some(sf) = surface(app) {
+        sf.hide();
     }
 }
 
