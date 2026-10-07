@@ -231,4 +231,9 @@ secrets (*Settings → Secrets and variables → Actions*):
 
 Without them the job still builds (unsigned) and leaves the APK as a
 workflow artifact but never attaches it. *Run workflow* on the Actions
-tab is a dry run: same build, artifact only.
+tab with the default input is a dry run of the chosen branch: same
+build, artifact only. With a release tag as the input (`v1.1.7`) it
+rebuilds that release instead — the tag's code, the branch's workflow —
+and attaches the APK to the existing release: the fix when a release's
+own run broke on CI (re-running that run uses the workflow as it was at
+the tag, so it breaks again). ANDROID-SPEC.md D54.

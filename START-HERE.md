@@ -74,7 +74,7 @@ for the work at hand (§3). Everything else is linked from here.
 | `ARCHITECTURE.md` | the runtime: threads, lanes, transport, the server tick, persistence, the client, the hosts | before server, protocol or client-core work |
 | `PERSISTENCE-SPEC.md` | the 1.1 design (accounts by device key, invites, roles, history, DMs, files, profiles, admin) — all shipped; §12 is every later decision | before touching admission, roles, history, DMs, files |
 | `AEC-SPEC.md` | echo cancellation on every platform; §12 the decisions (E1…) | before audio-path work |
-| `ANDROID-SPEC.md` | the Android client; decisions D1…D9 in §1, D10…D53 in §14 (its second table newest first) | before Android work |
+| `ANDROID-SPEC.md` | the Android client; decisions D1…D9 in §1, D10…D54 in §14 (its second table newest first) | before Android work |
 | `IOS-SPEC.md` | the iPhone client; decisions D1…D13 in §1, D14…D51 in §14 (in order) | before iOS work |
 | `android/README.md`, `ios/README.md` | building, running and releasing each phone app | when the user builds |
 

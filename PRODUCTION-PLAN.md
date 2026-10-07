@@ -516,6 +516,11 @@ Today's plan says sideloaded APK (ANDROID-SPEC D4) and Ad Hoc builds
   a room, Android closes the microphone and iOS mutes it on the voice
   unit (plain streams: closed). The desktop is unchanged. The voice
   thread ticks at 250 ms while no microphone is open.
+- **2026-10-07 — Android release CI** (ANDROID-SPEC D54): the v1.1.7
+  run broke in `setup-android@v3` (the obsolete `tools` package is gone
+  from Google's repository); now `setup-android@v4` and the other
+  actions off Node 20, and *Run workflow* with a release tag rebuilds
+  that release and attaches the APK.
 - **2026-10-07 — the documents**: `START-HERE.md` (the way in, the
   reading order), this plan (replacing `todo.md`, `todos` and
   SESSION-GUIDE's diary), SESSION-GUIDE §1–§3 brought up to date (the
