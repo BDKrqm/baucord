@@ -45,8 +45,9 @@ What stands between this and "production for strangers":
 4. **Nothing runs the tests automatically** — releases are
    compile-only (REL-1).
 5. **Crashes in the field are invisible** (OPS-2).
-6. **Phones**: store submission needs several items (MOB-2…MOB-6),
-   report/block above all. (The microphone running in the lobby and
+6. **Phones**: store submission needs several items (MOB-2…MOB-6,
+   MOB-14…17), report/block above all; Google Play is the goal and
+   PLAY-STORE.md the process. (The microphone running in the lobby and
    while muted, MOB-1, is fixed.)
 7. **Malicious content from other users** can freeze or exhaust a
    client: image/GIF decode bombs, oversized video, unbounded audio
@@ -259,7 +260,8 @@ What stands between this and "production for strangers":
 - [ ] **LEG-4 [P1] H.264 patent licensing** for encoding/decoding on the
   desktop — a question for counsel, not code.
 - [ ] **LEG-5 [P0 for stores][S–M] A privacy policy and the stores' data
-  forms.** The app sends voice, messages, files, a device key,
+  forms** (Play's draft: PLAY-STORE.md §6; the policy, terms and
+  account-deletion pages go on the website). The app sends voice, messages, files, a device key,
   telemetry every 10 s and (on request) logs. Who the controller is when
   anyone can host a server needs a deliberate answer; the official
   server's retention needs writing down; telemetry may need consent.
@@ -293,7 +295,10 @@ What stands between this and "production for strangers":
   exist yet**: `web.yaml` runs after any successful "Build and
   Release", including the cache-seeding pushes to `chunk`, and stamps
   that branch's version. Run only for releases, or read the version
-  from the published `version` file.
+  from the published `version` file. Since D55 the page also links the
+  APK, which `android-release.yml` uploads on its own schedule: until
+  it lands, the Android link 404s (minutes). Deploying the page after
+  both workflows, or hiding a row whose HEAD fails, closes it.
 - [ ] **REL-6 [P2] Supply chain and release hygiene**: no
   cargo-deny/audit; `serde_yaml` is deprecated; `atty` arrives through
   `nnnoiseless`'s default `bin` feature; Dependabot PRs merge with no
@@ -323,8 +328,12 @@ What stands between this and "production for strangers":
 
 ## 4. Milestone C — phones in the stores
 
-Today's plan says sideloaded APK (ANDROID-SPEC D4) and Ad Hoc builds
-(IOS-SPEC D37; D10 planned TestFlight). If the stores become the goal (§6, 2), these block it.
+Today's builds are a sideloaded APK (ANDROID-SPEC D4) and Ad Hoc builds
+(IOS-SPEC D37; D10 planned TestFlight). **Google Play is now a goal**
+(§6, 2, 2026-10-07): **PLAY-STORE.md** is the process — account,
+signing, forms, the 14-day closed test — and names the items below it
+needs (MOB-4, 5, 11, 14–17; LEG-2, 3, 5 for the phone). The App Store
+is not decided yet.
 
 - [x] **MOB-1 [P0][M] The microphone runs in the lobby.** Done
   2026-10-07 (§7; ANDROID-SPEC D53, IOS-SPEC D51) — what remains is the
@@ -358,8 +367,13 @@ Today's plan says sideloaded APK (ANDROID-SPEC D4) and Ad Hoc builds
 - [ ] **MOB-5 [P0][M] Store pipelines.** Play wants an AAB (the workflow
   builds an APK) and a decision on Play App Signing before the first
   upload (sideloaded installs cannot update from Play if the key
-  changes); iOS exports Ad Hoc only (`ios-release.yml` ~148, ~231) —
-  add App Store/TestFlight export and symbol upload.
+  changes): `bundleRelease` beside `assembleRelease`, the AAB signed
+  with a new upload key, our release key given to Play as the app
+  signing key (PLAY-STORE.md §4), native debug symbols in the bundle,
+  one `versionCode` counter for both; upload by hand first, then the
+  Play Developer API from CI. iOS exports Ad Hoc only
+  (`ios-release.yml` ~148, ~231) — add App Store/TestFlight export and
+  symbol upload.
 - [ ] **MOB-6 [P1][S] Encryption export compliance.** No
   `ITSAppUsesNonExemptEncryption` in the Info.plist; rustls/ring are
   non-Apple cryptography (a BIS self-classification is likely).
@@ -391,7 +405,10 @@ Today's plan says sideloaded APK (ANDROID-SPEC D4) and Ad Hoc builds
   a first start is the system's "did not call startForeground" crash,
   and on a reconnect stops the service keeping the app alive; a
   `PARTIAL_WAKE_LOCK` is held all session; Play needs the FGS type
-  declarations (video) for `microphone|mediaPlayback`.
+  declarations (video) for every type. P0 for Play: `microphone` in a
+  room, `specialUse` (with its manifest explanation) in the lobby,
+  `mediaPlayback` dropped, the wake lock only in a room
+  (PLAY-STORE.md §5).
 - [ ] **MOB-12 [P1][M] Stream audio on phones** ignores the chosen
   output and the echo canceller (`client/src/screen.rs` ~1580 spawns
   its decoder on the default device; AEC-SPEC E7/E10): a speaker user
@@ -401,10 +418,29 @@ Today's plan says sideloaded APK (ANDROID-SPEC D4) and Ad Hoc builds
   says "Connected" during a reconnect and has no Leave/Mute actions;
   Android does not persist settings on `Stop` (iOS does); iOS build
   numbers come from two counters (commit count locally, run number in
-  CI); the predictive-back opt-out will stop working at targetSdk 37;
+  CI); the predictive-back opt-out (D29) is one Google warns may
+  misbehave "in a future release" (no date given; PRD-7);
   keys and settings are plain files (Keystore/Keychain later); the iOS
   log sits in `Documents` (visible in Files, backed up) and holds
   invite codes (SEC-10).
+- [ ] **MOB-14 [P0][M] Delete my account.** Play (and Apple) require an
+  in-app way to delete an account the app created, plus a web page:
+  here a device key admitted by invite. Settings → "Delete my account
+  on this server": a new message under a new feature bit; the server
+  removes keys, roles, profile, avatar, DMs and files, and deletes or
+  anonymizes the user's messages (decide); the client forgets the
+  server. A kick today deletes only keys and roles.
+- [ ] **MOB-15 [P0][S] Terms before user content.** Play's UGC policy:
+  users accept terms that define and prohibit objectionable content
+  before they post. On the first connect to a server, "By continuing
+  you accept the rules" with a link; recorded per server.
+- [ ] **MOB-16 [P0][S] The Play listing.** Texts (title ≤ 30, short
+  ≤ 80, full ≤ 4,000 characters) in en, es-AR, pt-BR; icon 512 × 512;
+  feature graphic 1024 × 500; 4+ phone screenshots at 1080 × 1920
+  rendered from the UI with demo data.
+- [ ] **MOB-17 [P0][S] Reviewer access.** A long-lived `member` invite
+  on the official server, a channel with history, written steps for
+  Play's App access section; the server kept up through every review.
 
 ## 5. Milestone D — product
 
@@ -483,9 +519,10 @@ Today's plan says sideloaded APK (ANDROID-SPEC D4) and Ad Hoc builds
 1. **Licences** (LEG-1, LEG-2): LGPL FFmpeg without x264 or a GPLv3
    desktop binary; Slint royalty-free with attribution, GPLv3 or
    commercial.
-2. **Stores**: are Google Play and the App Store goals for the next
-   release, or stay with the sideloaded APK and Ad Hoc/TestFlight?
-   That moves Milestone C up or down.
+2. **Stores** — *Google Play decided 2026-10-07*: yes, PLAY-STORE.md
+   (its §2 holds the decisions it needs: account type, signing key,
+   the lobby's service type, reviewer access, audience). The App
+   Store: still open.
 3. **Privacy** (LEG-5): what the official server keeps and for how
    long, telemetry consent, who answers for self-hosted servers.
 4. **Push** (PRD-1): run an official push relay, or live with

@@ -70,11 +70,12 @@ for the work at hand (§3). Everything else is linked from here.
 | `START-HERE.md` | this | first, every time |
 | `SESSION-GUIDE.md` | the working manual: sandbox setup and checks (§1), the crate map (§2), what shipped (§3), rules learned (§4) | every session; §4 by area |
 | `PRODUCTION-PLAN.md` | the prioritized list of what is left, the decisions waiting on the user, what was done | every session |
+| `PLAY-STORE.md` | the route to Google Play: decisions, account, signing, forms, the closed test, what each step needs | before Play or Android release work |
 | `readme.md` | the product, building, running and deploying a server | for deploy/ops, or to know the features |
 | `ARCHITECTURE.md` | the runtime: threads, lanes, transport, the server tick, persistence, the client, the hosts | before server, protocol or client-core work |
 | `PERSISTENCE-SPEC.md` | the 1.1 design (accounts by device key, invites, roles, history, DMs, files, profiles, admin) — all shipped; §12 is every later decision | before touching admission, roles, history, DMs, files |
 | `AEC-SPEC.md` | echo cancellation on every platform; §12 the decisions (E1…) | before audio-path work |
-| `ANDROID-SPEC.md` | the Android client; decisions D1…D9 in §1, D10…D54 in §14 (its second table newest first) | before Android work |
+| `ANDROID-SPEC.md` | the Android client; decisions D1…D9 in §1, D10…D55 in §14 (its second table newest first) | before Android work |
 | `IOS-SPEC.md` | the iPhone client; decisions D1…D13 in §1, D14…D51 in §14 (in order) | before iOS work |
 | `android/README.md`, `ios/README.md` | building, running and releasing each phone app | when the user builds |
 
@@ -98,6 +99,8 @@ by D23).
   ios/README.
 - **Hardening and release** — PRODUCTION-PLAN §2–§3, `.github/workflows/`,
   readme's "Deploying a server".
+- **Google Play** — PLAY-STORE.md (§2 decisions first), then
+  ANDROID-SPEC §11 and D54, android/README §6.
 
 ## 4. The rules that matter most
 
@@ -135,4 +138,5 @@ The full list is SESSION-GUIDE §4; these break things when forgotten:
 - **Server**: persistence on (SQLite), invites and device keys,
   roles, the admin panel.
 - **Next**: PRODUCTION-PLAN.md Milestone A (server and client
-  hardening, signed updates), then the licence decisions.
+  hardening, signed updates), then the licence decisions; in parallel,
+  Google Play (PLAY-STORE.md) — its decisions are pending.

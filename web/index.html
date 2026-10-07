@@ -7,7 +7,7 @@
     <title>baucord — own your comms</title>
     <meta
       name="description"
-      content="Free, open source voice chat with text and screen sharing. One friend runs the server, everyone else types the address. Windows, macOS and Linux; the client uses about 40 MB of RAM."
+      content="Free, open source voice chat with text and screen sharing. One friend runs the server, everyone else types the address. Windows, macOS, Linux and Android; the desktop client uses about 40 MB of RAM."
     />
     <meta name="theme-color" content="#1a1d21" />
 
@@ -187,6 +187,30 @@
         .nav-links a.plain {
           display: none;
         }
+        /* a 360-px phone fits the wordmark, the language and Download */
+        .nav-inner,
+        .nav-links {
+          gap: 0.75rem;
+        }
+        .nav-links .btn {
+          padding: 0.5rem 0.85rem;
+        }
+      }
+      @media (max-width: 400px) {
+        nav .wrap {
+          padding: 0 1rem;
+        }
+        .nav-inner,
+        .nav-links {
+          gap: 0.5rem;
+        }
+        .nav-links .btn {
+          padding: 0.45rem 0.7rem;
+          font-size: 0.9rem;
+        }
+        .lang-select {
+          padding: 0.3rem 0.25rem;
+        }
       }
 
       /* ── buttons ─────────────────────────────── */
@@ -246,7 +270,9 @@
       }
       @media (max-width: 860px) {
         .hero {
-          grid-template-columns: 1fr;
+          /* minmax(0, …), not 1fr: the screenshot's 2000-px width would
+             otherwise set the column's minimum and widen the page. */
+          grid-template-columns: minmax(0, 1fr);
           gap: 2.5rem;
           padding-top: 3rem;
         }
@@ -667,11 +693,17 @@
           </div>
           <p class="dl-meta" x-show="ready" x-cloak x-text="metaText"></p>
           <p class="dl-meta" x-show="!ready" x-cloak x-i18n="dl-meta-generic">
-            Version __VERSION__ for Windows, macOS and Linux.
+            Version __VERSION__ for Windows, macOS, Linux and Android.
           </p>
-          <p class="dl-mobile" x-show="mobile" x-cloak x-i18n="dl-mobile">
-            baucord is a desktop app. Open this page on a Windows, macOS or
-            Linux machine to download it.
+          <p class="dl-mobile" x-show="android" x-cloak x-i18n="dl-android-hint">
+            Android 10 or later. Open the downloaded file to install it;
+            Android asks once to allow installs from your browser. To update,
+            install the new version over the old one: your servers and
+            identity stay.
+          </p>
+          <p class="dl-mobile" x-show="mobile" x-cloak x-i18n="dl-ios">
+            There is no iPhone version to download yet. Open this page on a
+            computer or an Android phone.
           </p>
         </div>
       </div>
@@ -933,7 +965,8 @@
         <h2 x-i18n="dl-title">Download</h2>
         <p class="lede" x-i18n="dl-lede">
           Every zip contains the app and the dedicated server for that platform,
-          so whoever hosts needs nothing extra.
+          so whoever hosts needs nothing extra. The Android app is a single APK
+          for phones with Android 10 or later.
         </p>
         <table class="dl-table" x-data="dl">
           <thead>
@@ -1008,13 +1041,26 @@
                   >
                 </td>
               </tr>
+              <tr>
+                <td><strong>Android</strong> (arm64)</td>
+                <td class="file">baucord-v__VERSION__-android-arm64.apk</td>
+                <td></td>
+                <td>
+                  <a
+                    class="btn solid"
+                    href="baucord-v__VERSION__-android-arm64.apk"
+                    >Download</a
+                  >
+                </td>
+              </tr>
             </tbody>
           </noscript>
         </table>
         <p class="dl-after" x-i18n.html="dl-after">
-          Free and open source. The app checks for updates on start and replaces
-          itself in place; the server is updated by unzipping the new one over
-          it. Older versions and checksums are on the
+          Free and open source. The desktop app checks for updates on start and
+          replaces itself in place; the server is updated by unzipping the new
+          one over it; on Android, install the new APK over the old one. Older
+          versions and checksums are on the
           <a href="https://github.com/mpwsh/baucord/releases">releases page</a>.
         </p>
       </div>
@@ -1179,9 +1225,12 @@
       //                       hints; Safari doesn't, so we look at the WebGL
       //                       renderer string (Intel/AMD => Intel Mac) and
       //                       default to Apple Silicon otherwise.
-      //   phones/tablets   -> a "desktop only" note, no button
-      // Sizes come from a HEAD request to each zip (same origin), so the
-      // page never has to be edited when a build changes size.
+      //   Android          -> the APK (arm64; every Android 10+ phone that
+      //                       is not 32-bit-only), with an install hint
+      //   iPhone/iPad      -> a "not yet" note, no button
+      // Sizes come from a HEAD request to each file (same origin), so the
+      // page never has to be edited when a build changes size. The APK
+      // reaches R2 from android-release.yml, the zips from release.yml.
       document.addEventListener("alpine:init", function () {
         var VERSION = "__VERSION__";
         var PLATFORMS = [
@@ -1208,6 +1257,12 @@
             name: "Linux",
             arch: "x86-64",
             file: "baucord-v" + VERSION + "-linux-x64.zip",
+          },
+          {
+            id: "android-arm64",
+            name: "Android",
+            arch: "arm64",
+            file: "baucord-v" + VERSION + "-android-arm64.apk",
           },
         ];
         var sizes = {}; // id -> "51 MB"
@@ -1248,8 +1303,8 @@
           var ua = navigator.userAgent || "";
           var plat = (navigator.platform || "").toLowerCase();
           var touchMac = plat === "macintel" && navigator.maxTouchPoints > 1; // iPadOS
-          if (/android|iphone|ipad|ipod/i.test(ua) || touchMac)
-            return cb("mobile");
+          if (/android/i.test(ua)) return cb("android-arm64");
+          if (/iphone|ipad|ipod/i.test(ua) || touchMac) return cb("mobile");
           if (/windows/i.test(ua)) return cb("win-x64");
           if (/cros|linux|x11/i.test(ua)) return cb("linux-x64");
           if (/mac/i.test(plat) || /macintosh/i.test(ua)) {
@@ -1302,6 +1357,9 @@
             },
             get mobile() {
               return shared.mobile;
+            },
+            get android() {
+              return shared.selected === "android-arm64";
             },
             get href() {
               return this.current ? this.current.file : "#download";
