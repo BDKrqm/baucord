@@ -7,7 +7,12 @@
 
 pub mod adminui;
 pub mod app;
+/// The log file Settings → Debug reads, sends and clears: each host
+/// says where it writes it (`logfile::set_path`).
+pub use app_core::logfile;
 pub mod media;
+/// What the app asks a phone's notification system for (`host::notify`).
+pub mod notice;
 pub mod present;
 pub mod resources;
 pub mod settingsui;

@@ -67,12 +67,15 @@ impl AppState {
                 .insert(id, UserState::new(name.clone(), audio, channel_id));
         }
 
-        // Start voice engine
+        // Start voice engine. With the lobby we arrive in it, and a
+        // phone opens no microphone there (ANDROID-SPEC.md D53).
+        self.voice_in_room = !self.lobby || self.is_testing_mic;
         self.voice
             .tx
             .send(VoiceControl::Start {
                 settings: Box::new(self.settings.clone()),
                 our_client_id: client_id,
+                in_room: self.voice_in_room,
             })
             .ok();
         // Join ding, queued behind Start on the same channel so it
@@ -133,6 +136,9 @@ impl AppState {
             self.push_chat_system(&t!("chat-user-joined", "name" => username.as_str()));
         }
         self.rebuild_dms_model();
+        // Off screen on a phone, the first voice into empty rooms is
+        // news: someone is starting a call.
+        self.alert_first_join(client_id, &username, channel_id);
         let mut user = UserState::new(username, peer_audio_from(&saved), channel_id);
         // `UserDetails` normally follows `UserJoined`; if it got here
         // first (a replaced session's details), honor it.
@@ -221,6 +227,9 @@ impl AppState {
             }
             let channel = self.channel_name(channel_id);
             self.push_chat_system(&t!("chat-you-moved", "channel" => channel.as_str()));
+            // The streams for the room first (a phone opens them only
+            // now, D53), then the ding — on the new output, not the old.
+            self.sync_voice_room();
             self.play_chime(SoundType::UserJoined);
         } else {
             let name = self.username_of(client_id);
@@ -230,6 +239,10 @@ impl AppState {
                 "name" => name.as_str(),
                 "channel" => channel.as_str()
             ));
+            // Out of the AFK room into empty rooms: a call starting too.
+            if old.is_some_and(|room| self.is_quiet_room(room)) {
+                self.alert_first_join(client_id, &name, channel_id);
+            }
             if Some(channel_id) == our_channel_before {
                 // Someone stepped into our room.
                 self.play_chime(SoundType::UserJoined);

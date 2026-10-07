@@ -19,10 +19,12 @@
 //! `jni_str!` / `jni_sig!` for names. The context is the Activity
 //! `android-activity` registered with `ndk-context`.
 
+use std::time::{Duration, Instant};
+
 use jni::{
     errors::Result as JniResult,
     objects::{JObject, JObjectArray, JString, JValue},
-    refs::Reference,
+    refs::{Global, Reference},
     sys::jobject,
     Env, JavaVM,
 };
@@ -37,6 +39,14 @@ const MODE_IN_COMMUNICATION: i32 = 3;
 const GET_DEVICES_OUTPUTS: i32 = 2;
 /// `Build.VERSION_CODES.S`: `setCommunicationDevice` and friends.
 const API_COMMUNICATION_DEVICE: i32 = 31;
+/// `Build.VERSION_CODES.TIRAMISU`: `getAudioDevicesForAttributes`.
+const API_DEVICES_FOR_ATTRIBUTES: i32 = 33;
+/// `AudioAttributes.USAGE_VOICE_COMMUNICATION`.
+const USAGE_VOICE_COMMUNICATION: i32 = 2;
+/// How long [`wait_for_route`] waits for the call to reach the chosen
+/// device, and how often it looks.
+const ROUTE_SETTLE_MAX: Duration = Duration::from_millis(800);
+const ROUTE_POLL: Duration = Duration::from_millis(20);
 
 /// Run `f` with a JNI environment and the app's `Context`.
 fn with_context<R>(
@@ -102,8 +112,10 @@ fn output_types<'j>(env: &mut Env<'j>, context: &JObject<'j>) -> JniResult<Vec<i
 }
 
 /// `AcousticEchoCanceler.isAvailable()`: whether this phone ships an
-/// AEC effect at all. Reporting only — a phone that says no still gets
-/// the voice-communication path, which may cancel in the HAL anyway.
+/// AEC effect at all. Asked when no effect could be put on the session
+/// ([`attach_echo_canceller`] found none): a phone that says no gets
+/// reported as having no canceller, though its voice path may still
+/// cancel in the HAL.
 ///
 /// # Errors
 /// Any JNI failure, as text.
@@ -116,6 +128,97 @@ pub fn echo_canceller_available() -> Result<bool, String> {
             &[],
         )?
         .z()
+    })
+}
+
+/// An `AcousticEchoCanceler` on our capture stream's audio session,
+/// kept for as long as the stream lives and released after
+/// (`AudioEffect.release()`).
+///
+/// Android attaches the voice-communication pre-processing (AEC among
+/// it) to a `VoiceCommunication` capture by itself on most phones; this
+/// is the belt to that: create the effect on our session explicitly,
+/// switch it on, and read back whether it is on — the same thing
+/// WebRTC's Android audio does, and what makes the verdict a fact
+/// instead of an assumption (`AEC-SPEC.md` D5).
+pub struct EchoCanceller {
+    effect: Global<JObject<'static>>,
+}
+
+impl Drop for EchoCanceller {
+    fn drop(&mut self) {
+        let effect = std::mem::take(&mut self.effect);
+        // Released, and the global reference dropped, on an attached
+        // thread (jni warns about the latter otherwise).
+        let released = with_context(move |env, _context| {
+            env.call_method(&effect, jni::jni_str!("release"), jni::jni_sig!("()V"), &[])?;
+            drop(effect);
+            Ok(())
+        });
+        if let Err(e) = released {
+            warn!("AcousticEchoCanceler.release: {e}");
+        }
+    }
+}
+
+/// What putting an `AcousticEchoCanceler` on a session came to.
+pub enum EchoEffect {
+    /// Created and on (`getEnabled()` true after `setEnabled(true)`).
+    On(EchoCanceller),
+    /// Created but off: `setEnabled` answered the status given (another
+    /// app holding control of it, say). Kept anyway, released with the
+    /// stream.
+    Off(EchoCanceller, i32),
+    /// `create` returned null: no AEC effect for this session.
+    Missing,
+}
+
+/// `AcousticEchoCanceler.create(session)`, `setEnabled(true)`,
+/// `getEnabled()`.
+///
+/// # Errors
+/// Any JNI failure or Java exception (`create` throws on a session it
+/// does not know), as text.
+pub fn attach_echo_canceller(session: i32) -> Result<EchoEffect, String> {
+    with_context(|env, _context| {
+        let effect = env
+            .call_static_method(
+                jni::jni_str!("android/media/audiofx/AcousticEchoCanceler"),
+                jni::jni_str!("create"),
+                jni::jni_sig!("(I)Landroid/media/audiofx/AcousticEchoCanceler;"),
+                &[JValue::Int(session)],
+            )?
+            .l()?;
+        if effect.is_null() {
+            return Ok(EchoEffect::Missing);
+        }
+        let status = env
+            .call_method(
+                &effect,
+                jni::jni_str!("setEnabled"),
+                jni::jni_sig!("(Z)I"),
+                &[JValue::Bool(true)],
+            )?
+            .i()?;
+        let enabled = env
+            .call_method(
+                &effect,
+                jni::jni_str!("getEnabled"),
+                jni::jni_sig!("()Z"),
+                &[],
+            )?
+            .z()?;
+        let effect = EchoCanceller {
+            effect: env.new_global_ref(&effect)?,
+        };
+        // Already on counts: the platform's own pre-processing may hold
+        // control of the effect, in which case our `setEnabled` is
+        // refused while the canceller runs anyway.
+        Ok(if enabled {
+            EchoEffect::On(effect)
+        } else {
+            EchoEffect::Off(effect, status)
+        })
     })
 }
 
@@ -234,17 +337,21 @@ pub fn communication_devices() -> Result<Vec<RouteDevice>, String> {
 }
 
 /// Point communication audio at the device `selection` means
-/// (`route::choose`). Returns what it chose, for the log.
+/// (`route::choose`). Returns what it chose, for the log, and — when
+/// the system took a device by id (API 31+) — that id, to wait for.
 fn apply_route<'j>(
     env: &mut Env<'j>,
     manager: &JObject<'j>,
     selection: Option<&str>,
-) -> JniResult<String> {
+) -> JniResult<(String, Option<i32>)> {
     let sdk = sdk_int(env)?;
     let devices = communication_device_objects(env, manager, sdk)?;
     let described: Vec<RouteDevice> = devices.iter().map(|(_, d)| d.clone()).collect();
     let Some(index) = route::choose(selection, &described) else {
-        return Ok("no communication device listed; the system's choice".to_string());
+        return Ok((
+            "no communication device listed; the system's choice".to_string(),
+            None,
+        ));
     };
     let chosen = &described[index];
     let name = route::label(chosen);
@@ -257,15 +364,18 @@ fn apply_route<'j>(
                 &[(&devices[index].0).into()],
             )?
             .z()?;
-        Ok(format!(
-            "{name} (type {}, id {}){}",
-            chosen.kind,
-            chosen.id,
-            if accepted {
-                ""
-            } else {
-                " — refused by the system"
-            }
+        Ok((
+            format!(
+                "{name} (type {}, id {}){}",
+                chosen.kind,
+                chosen.id,
+                if accepted {
+                    ""
+                } else {
+                    " — refused by the system"
+                }
+            ),
+            accepted.then_some(chosen.id),
         ))
     } else {
         // Before API 31: the loudspeaker by its switch; a wired headset
@@ -296,12 +406,95 @@ fn apply_route<'j>(
                 &[JValue::Bool(true)],
             )?;
         }
-        Ok(format!(
-            "{name} (speakerphone {}{})",
-            if speaker { "on" } else { "off" },
-            if bluetooth { ", Bluetooth SCO" } else { "" }
+        Ok((
+            format!(
+                "{name} (speakerphone {}{})",
+                if speaker { "on" } else { "off" },
+                if bluetooth { ", Bluetooth SCO" } else { "" }
+            ),
+            None,
         ))
     }
+}
+
+/// Wait until the call is really routed to device `id`, at most
+/// `ROUTE_SETTLE_MAX`. `setCommunicationDevice` answers at once, but the
+/// route moves a moment later — on a Galaxy S24 FE (2026-10-07 log) the
+/// speaker stream opened on the earpiece, and Android disconnected it a
+/// quarter second later when the call reached the loudspeaker: a reopen,
+/// and a gap, at every join. Polls `getAudioDevicesForAttributes` for
+/// the call's usage (API 33+); `Ok(None)` = not known (older Android,
+/// or still not there at the limit — the streams open anyway and the
+/// usual reopen covers it), `Ok(Some(t))` = routed after `t`.
+fn wait_for_route(id: i32) -> Result<Option<Duration>, String> {
+    with_context(|env, context| {
+        if sdk_int(env)? < API_DEVICES_FOR_ATTRIBUTES {
+            return Ok(None);
+        }
+        let manager = audio_manager(env, context)?;
+        let builder = env.new_object(
+            jni::jni_str!("android/media/AudioAttributes$Builder"),
+            jni::jni_sig!("()V"),
+            &[],
+        )?;
+        let builder = env
+            .call_method(
+                &builder,
+                jni::jni_str!("setUsage"),
+                jni::jni_sig!("(I)Landroid/media/AudioAttributes$Builder;"),
+                &[JValue::Int(USAGE_VOICE_COMMUNICATION)],
+            )?
+            .l()?;
+        let attributes = env
+            .call_method(
+                &builder,
+                jni::jni_str!("build"),
+                jni::jni_sig!("()Landroid/media/AudioAttributes;"),
+                &[],
+            )?
+            .l()?;
+        let started = Instant::now();
+        loop {
+            // A frame per look, so the poll does not pile up local refs.
+            let routed = env.with_local_frame(16, |env| -> JniResult<bool> {
+                let list = env
+                    .call_method(
+                        &manager,
+                        jni::jni_str!("getAudioDevicesForAttributes"),
+                        jni::jni_sig!("(Landroid/media/AudioAttributes;)Ljava/util/List;"),
+                        &[(&attributes).into()],
+                    )?
+                    .l()?;
+                let count = env
+                    .call_method(&list, jni::jni_str!("size"), jni::jni_sig!("()I"), &[])?
+                    .i()?;
+                for i in 0..count {
+                    let device = env
+                        .call_method(
+                            &list,
+                            jni::jni_str!("get"),
+                            jni::jni_sig!("(I)Ljava/lang/Object;"),
+                            &[JValue::Int(i)],
+                        )?
+                        .l()?;
+                    let device_id = env
+                        .call_method(&device, jni::jni_str!("getId"), jni::jni_sig!("()I"), &[])?
+                        .i()?;
+                    if device_id == id {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            })?;
+            if routed {
+                return Ok(Some(started.elapsed()));
+            }
+            if started.elapsed() >= ROUTE_SETTLE_MAX {
+                return Ok(None);
+            }
+            std::thread::sleep(ROUTE_POLL);
+        }
+    })
 }
 
 /// Undo [`apply_route`]: back to the system's own routing.
@@ -426,12 +619,26 @@ impl CommunicationMode {
             set_mode(env, &manager, MODE_IN_COMMUNICATION)
         })?;
         let guard = Self { _entered: () };
-        let route = with_context(|env, context| {
+        let (route, chosen) = with_context(|env, context| {
             let manager = audio_manager(env, context)?;
             apply_route(env, &manager, selection)
         })
-        .unwrap_or_else(|e| format!("the system's choice (routing failed: {e})"));
+        .unwrap_or_else(|e| (format!("the system's choice (routing failed: {e})"), None));
         info!("Android audio: communication mode on, route {route} (was mode {previous_mode})");
+        // The streams open next: on the route, not on the device the
+        // call is leaving.
+        if let Some(id) = chosen {
+            match wait_for_route(id) {
+                Ok(Some(took)) => info!(
+                    "Android audio: call routed to device {id} after {} ms",
+                    took.as_millis()
+                ),
+                Ok(None) => {
+                    info!("Android audio: route to device {id} not confirmed; opening anyway");
+                }
+                Err(e) => warn!("Android audio: waiting for the route: {e}"),
+            }
+        }
         Ok((guard, route))
     }
 }

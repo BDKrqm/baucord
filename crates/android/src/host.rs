@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use frontend::host::{Hooks, KeepAlive, OnPick, Saved};
+use frontend::host::{ChimeRoute, Hooks, KeepAlive, Notice, NoticeKind, OnPick, Saved};
 
 use crate::java;
 
@@ -99,6 +99,62 @@ impl Hooks for AndroidHost {
             },
         }
     }
+
+    fn keep_screen_on(&self, on: bool) {
+        if let Err(e) = java::keep_screen_on(on) {
+            log::warn!("keep screen on ({on}): {e}");
+        }
+    }
+
+    // Notifications (D52): `Notices.java`, through `BaucordActivity`.
+    fn notifies(&self) -> bool {
+        true
+    }
+
+    fn notify(&self, notice: &Notice) {
+        // Sound-only notices are iOS's way to chime; here the ringer
+        // check of `chime_route` already decided.
+        if notice.on_screen {
+            return;
+        }
+        if let Err(e) = java::post_notice(notice) {
+            log::warn!("notification {}: {e}", notice.key);
+        }
+    }
+
+    fn notices_allowed(&self, kind: NoticeKind) -> bool {
+        java::notices_allowed(kind).unwrap_or_else(|e| {
+            log::warn!("notifications allowed? {e}");
+            true
+        })
+    }
+
+    fn cancel_notice(&self, key: &str) {
+        if let Err(e) = java::cancel_notice(key) {
+            log::warn!("cancel notification {key}: {e}");
+        }
+    }
+
+    fn play_chime(&self, wav: &[u8]) -> bool {
+        match java::play_chime(wav) {
+            Ok(()) => true,
+            Err(e) => {
+                log::warn!("chime: {e}");
+                false
+            }
+        }
+    }
+
+    fn chime_route(&self) -> ChimeRoute {
+        match java::chime_allowed() {
+            Ok(true) => ChimeRoute::App,
+            Ok(false) => ChimeRoute::Muted,
+            Err(e) => {
+                log::warn!("ringer mode: {e}");
+                ChimeRoute::App
+            }
+        }
+    }
 }
 
 /// `nativeFilePicked`: a readable copy of the picked file, a failure,
@@ -123,8 +179,9 @@ pub(crate) fn picked(path: Option<String>, name: Option<String>, error: Option<S
 pub(crate) fn install() {
     if let Err(e) = java::register_natives() {
         // An APK whose manifest still names the bare NativeActivity:
-        // picks will fail with a toast; links and Downloads still work.
-        log::warn!("file picker unavailable (nativeFilePicked not bound): {e}");
+        // picks will fail with a toast, a notification's tap only brings
+        // the app back; links and Downloads still work.
+        log::warn!("file picker and notification taps unavailable (natives not bound): {e}");
     }
     frontend::host::install(Box::new(AndroidHost));
 }

@@ -80,9 +80,10 @@ impl AppState {
                 self.push_command_output(&line);
             }
             "leave" => self.handle_disconnect(),
-            "quit" | "exit" => {
+            "quit" | "exit" if super::HOST_CAN_QUIT => {
                 let _ = slint::quit_event_loop();
             }
+            "quit" | "exit" => self.push_command_output(&t!("quit-ios")),
             "users" => self.send_admin(AdminCommand::ListUsers, PendingAdmin::Show),
             "restrictions" | "bans" => {
                 self.send_admin(AdminCommand::ListRestrictions, PendingAdmin::Show);
@@ -254,14 +255,10 @@ impl AppState {
     pub(super) fn commands_available(&self) -> String {
         use client::permissions as p;
         let has = |bit: u64| p::has(self.permissions, bit);
-        let mut out: Vec<&str> = vec![
-            "/help",
-            "/history [n]",
-            "/channel list",
-            "/mem",
-            "/leave",
-            "/quit",
-        ];
+        let mut out: Vec<&str> = vec!["/help", "/history [n]", "/channel list", "/mem", "/leave"];
+        if super::HOST_CAN_QUIT {
+            out.push("/quit");
+        }
         if has(p::CREATE_INVITES) {
             out.push("/invite [role] [24h] [uses]");
         }

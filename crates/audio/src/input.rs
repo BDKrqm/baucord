@@ -61,6 +61,10 @@ use crate::{
     PcmFrame, FRAME_SIZE, OPUS_SAMPLE_RATE,
 };
 
+/// The capture worker's sleep while the microphone is muted (see the
+/// worker loop).
+const MUTED_WAIT: Duration = Duration::from_millis(50);
+
 pub struct AudioInput {
     device: Device,
     device_config: SupportedStreamConfig,
@@ -74,9 +78,10 @@ pub struct AudioInput {
     #[cfg(windows)]
     native: Option<crate::native::wasapi::NativeCapture>,
     /// The voice-call stream, when the session wants the platform's echo
-    /// canceller and it opened (Android, `native::aaudio`).
-    #[cfg(target_os = "android")]
-    native_voice: Option<crate::native::aaudio::NativeCapture>,
+    /// canceller and it opened (Android `native::aaudio`, iOS
+    /// `native::vpio`).
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    native_voice: Option<crate::native::VoiceCapture>,
     /// Open on the platform's voice-call path (`aec::wants_aec` said so).
     voice: bool,
     /// The output device the canceller should treat as its reference
@@ -161,7 +166,7 @@ impl AudioInput {
             stream: None,
             #[cfg(windows)]
             native: None,
-            #[cfg(target_os = "android")]
+            #[cfg(any(target_os = "android", target_os = "ios"))]
             native_voice: None,
             voice,
             #[cfg(windows)]
@@ -194,7 +199,7 @@ impl AudioInput {
                 Err(e) => log::warn!("Native WASAPI capture unavailable ({e}); using cpal"),
             }
         }
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         if self.voice {
             match self.start_native_voice() {
                 Ok(()) => return Ok(()),
@@ -226,17 +231,18 @@ impl AudioInput {
         self.aec_reference = output_device;
     }
 
-    /// Android: the microphone on the voice-call path (`native::aaudio`),
-    /// which is what lets the platform run its echo canceller on it. On
-    /// failure the ring and latch go back for the cpal path.
-    #[cfg(target_os = "android")]
+    /// Android and iOS: the microphone on the voice-call path
+    /// (`native::aaudio`, `native::vpio`), which is what lets the
+    /// platform run its echo canceller on it. On failure the ring and
+    /// latch go back for the cpal path.
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     fn start_native_voice(&mut self) -> Result<(), String> {
         let producer = self
             .ring_producer
             .take()
             .ok_or("ring producer already taken")?;
         let wake_tx = self.wake_tx.take().ok_or("wake sender already taken")?;
-        match crate::native::aaudio::NativeCapture::start(
+        match crate::native::VoiceCapture::start(
             producer,
             wake_tx,
             self.stats.clone(),
@@ -245,20 +251,11 @@ impl AudioInput {
         ) {
             Ok(native) => {
                 let rate = native.sample_rate;
-                // Verified, not assumed (AEC-SPEC.md D5): the preset has
-                // to have stuck, and the phone has to ship a canceller.
-                self.aec_verdict = Some(if !native.voice_preset {
-                    Err(crate::aec::reasons::PATH_REFUSED)
-                } else {
-                    match crate::native::android::echo_canceller_available() {
-                        Ok(true) => Ok(()),
-                        Ok(false) => Err(crate::aec::reasons::NO_CANCELLER),
-                        Err(e) => {
-                            log::debug!("AcousticEchoCanceler.isAvailable: {e}");
-                            Ok(())
-                        }
-                    }
-                });
+                // Verified, not assumed (AEC-SPEC.md D5): on Android the
+                // preset has to have stuck and the canceller has to be on
+                // the session (aaudio::echo_canceller_on); on iOS the
+                // unit's processing has to read back as on.
+                self.aec_verdict = Some(native.aec_verdict);
                 self.native_voice = Some(native);
                 self.start_worker_thread(rate)
                     .map_err(|e| format!("worker thread: {e}"))
@@ -502,7 +499,7 @@ impl AudioInput {
         if let Some(n) = self.native.as_ref() {
             return Some(n.device_name.clone());
         }
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         if let Some(n) = self.native_voice.as_ref() {
             return Some(n.device_name.clone());
         }
@@ -576,7 +573,12 @@ fn worker_loop(
             if let Ok(chunk) = ring_consumer.read_chunk(stale) {
                 chunk.commit_all();
             }
-            crate::platform::wait_for_wake(&wake_rx, Duration::from_millis(10));
+            // The capture callback stops waking us while muted, so this
+            // timeout is the whole wake rate of a muted microphone: 20
+            // a second rather than 100. Unmuting costs nothing — the
+            // callback's next (unmuted) buffer rings at once — and a
+            // stop waits at most this long for the worker to leave.
+            crate::platform::wait_for_wake(&wake_rx, MUTED_WAIT);
             chain.reset();
             accumulator.clear();
             resampler_accum.clear();
@@ -695,7 +697,7 @@ impl Drop for AudioInput {
         self.stream.take();
         #[cfg(windows)]
         self.native.take();
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         self.native_voice.take();
         if let Some(thread) = self.worker_thread.take() {
             let _ = thread.join();

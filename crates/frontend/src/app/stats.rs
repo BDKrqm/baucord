@@ -94,12 +94,27 @@ impl AppState {
     }
 
     /// Whether the main screen is actually being rendered: false on the
-    /// connect view, hidden to the tray, or minimized. Stats updates
-    /// and resource sampling are skipped while this is false.
+    /// connect view, hidden to the tray, minimized, or with a phone app
+    /// in the background. Stats updates and resource sampling are
+    /// skipped while this is false.
     pub(super) fn main_on_screen(&self) -> bool {
         self.main.global::<State>().get_phase() == Phase::Main
+            && host_visible()
             && self.main.window().is_visible()
             && !self.main.window().is_minimized()
+    }
+
+    /// A phone app is back on screen (`set_host_visible`): restart what
+    /// the background paused. The stats lines come back with the next
+    /// 2-second sample by themselves.
+    pub(super) fn host_shown(&mut self) {
+        self.clear_seen_notices();
+        let animating = self.gallery_gif.is_some()
+            || self.preview_gif.is_some()
+            || self.gifs.values().any(GifPlayer::playing);
+        if animating {
+            self.ensure_gif_ticker();
+        }
     }
 
     /// `/mem`: where the client's memory goes, from what it holds. The
@@ -219,9 +234,9 @@ impl AppState {
     //  MISC
     // ════════════════════════════════════════════════════════════════
 
-    /// Persist geometry + settings immediately (tray Quit path — the
-    /// normal shutdown also does this, but only after the loop exits).
-    #[cfg_attr(not(feature = "tray"), allow(dead_code))]
+    /// Persist geometry + settings immediately (the tray's Quit, and a
+    /// host going into the background — the normal shutdown also does
+    /// this, but only after the loop exits).
     pub fn save_settings_now(&mut self) {
         self.save_window_geometry();
         self.settings.save();

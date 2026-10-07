@@ -34,8 +34,15 @@ pub enum VoiceControl {
     Start {
         settings: Box<Settings>,
         our_client_id: u64,
+        /// In a voice room (or testing the microphone). A phone opens
+        /// no microphone out of one (`audio::RELEASES_MIC`); the
+        /// desktop ignores it.
+        in_room: bool,
     },
     Stop,
+    /// Into a voice room (`true`) or out to the lobby. Phones only act
+    /// on it: the microphone and the call path go with the room.
+    SetInRoom(bool),
     SetMuted(bool),
     /// Transmit only while the key is held (the gate still applies).
     SetPushToTalk(bool),
@@ -191,6 +198,15 @@ impl Drop for VoiceThreadHandle {
 /// hint and jitter depth are recorded for after-the-fact diagnosis.
 const STATS_LOG_INTERVAL: Duration = Duration::from_secs(10);
 
+/// The voice loop's longest sleep while the engine runs (meters,
+/// speaking edges, device supervision); see the loop.
+const VOICE_TICK: Duration = Duration::from_millis(20);
+
+/// The same while no microphone is open (a phone in the lobby or
+/// muted, ANDROID-SPEC.md D53): no input meter or speaking edge to
+/// follow, only device supervision — four wakes a second, not fifty.
+const VOICE_TICK_NO_MIC: Duration = Duration::from_millis(250);
+
 // Mute, deafen, push-to-talk and the rest are independent switches
 // the loop reads every packet; their combinations are all valid.
 #[expect(clippy::struct_excessive_bools)]
@@ -203,6 +219,9 @@ struct VoiceLoopState {
     /// Push-to-talk mode: the mic is closed unless `ptt_held`.
     ptt_mode: bool,
     ptt_held: bool,
+    /// In a voice room (`SetInRoom`); a phone keeps its microphone
+    /// closed out of one.
+    in_room: bool,
     running: bool,
     last_stats_log: Instant,
     /// `aec_generation` of the engine whose report `shared.aec` holds
@@ -219,6 +238,7 @@ impl VoiceLoopState {
             user_muted: false,
             ptt_mode: false,
             ptt_held: false,
+            in_room: true,
             running: true,
             last_stats_log: Instant::now(),
             aec_published: None,
@@ -285,15 +305,40 @@ impl VoiceLoopState {
         }
     }
 
+    /// Hand the engine the effective mute — the samples are dropped —
+    /// and, on a phone, what to keep open: out of a room or muted, the
+    /// microphone closes (`VoiceChat::set_presence`).
+    fn apply_mute(&mut self) {
+        let mute = self.effective_mute();
+        let in_room = self.in_room;
+        if let Some(v) = self.vc.as_mut() {
+            v.set_muted(mute);
+            v.set_presence(in_room, !mute);
+        }
+    }
+
     fn handle_control(&mut self, ctrl: VoiceControl, event_tx: &Sender<VoiceEvent>, wake: &WakeFn) {
         match ctrl {
             VoiceControl::Start {
                 settings,
                 our_client_id: id,
+                in_room,
             } => {
                 let config = settings_to_config(&settings);
+                // The old engine goes first: its device state (Android's
+                // communication mode, iOS's voice-processing unit and
+                // session mode) is process-wide, and leaving it after the
+                // new one entered would undo the new one's.
+                self.vc.take();
+                // A fresh engine starts unmuted; push-to-talk closes it
+                // until the key is held. Known before `start()`, so a
+                // phone never opens a microphone it would close at once.
+                self.user_muted = false;
+                self.ptt_held = false;
+                self.in_room = in_room;
                 match VoiceChat::new(config) {
                     Ok(mut voice) => {
+                        voice.set_presence(in_room, !self.effective_mute());
                         if let Err(e) = voice.start() {
                             if !voice.output_running() {
                                 // Nothing came up: no engine this time.
@@ -319,13 +364,7 @@ impl VoiceLoopState {
                         // Generations count per engine: republish.
                         self.aec_published = None;
                         self.was_speaking = false;
-                        self.user_muted = false;
-                        self.ptt_held = false;
-                        // A fresh engine starts open; push-to-talk
-                        // closes it until the key is held.
-                        if let Some(v) = &self.vc {
-                            v.set_muted(self.effective_mute());
-                        }
+                        self.apply_mute();
                         event_tx.send(VoiceEvent::Started).ok();
                         wake();
                         info!("Voice started for client {id:?}");
@@ -345,32 +384,30 @@ impl VoiceLoopState {
                 self.user_muted = false;
                 info!("Voice stopped");
             }
+            VoiceControl::SetInRoom(in_room) => {
+                self.in_room = in_room;
+                self.apply_mute();
+            }
             VoiceControl::SetMuted(muted) => {
                 self.user_muted = muted;
-                if let Some(v) = &self.vc {
-                    v.set_muted(self.effective_mute());
-                }
+                self.apply_mute();
             }
             VoiceControl::SetPushToTalk(on) => {
                 self.ptt_mode = on;
                 self.ptt_held = false;
-                if let Some(v) = &self.vc {
-                    v.set_muted(self.effective_mute());
-                }
+                self.apply_mute();
             }
             VoiceControl::PushToTalkHeld(held) => {
                 self.ptt_held = held;
-                if let Some(v) = &self.vc {
-                    v.set_muted(self.effective_mute());
-                }
+                self.apply_mute();
             }
             VoiceControl::SetDeafened(deafened) => {
                 if let Some(v) = &self.vc {
                     v.set_deafened(deafened);
-                    // Recompute effective mute — deafen implies mute,
-                    // but undeafen restores the user's explicit mute state.
-                    v.set_muted(self.effective_mute());
                 }
+                // Recompute effective mute — deafen implies mute, but
+                // undeafen restores the user's explicit mute state.
+                self.apply_mute();
             }
             VoiceControl::SetLoopback(enabled) => {
                 if let Some(v) = &self.vc {
@@ -495,6 +532,12 @@ fn run_voice_loop(
             }
         } else {
             let outgoing = state.vc.as_ref().map(audio::VoiceChat::outgoing_receiver);
+            let mic_open = state.vc.as_ref().is_some_and(VoiceChat::input_running);
+            let tick = if mic_open || !audio::RELEASES_MIC {
+                VOICE_TICK
+            } else {
+                VOICE_TICK_NO_MIC
+            };
             select! {
                 recv(control_rx) -> msg => match msg {
                     Ok(ctrl) => state.handle_control(ctrl, &event_tx, &wake),
@@ -509,9 +552,17 @@ fn run_voice_loop(
                         forward_outgoing(&network_tx, id, packet);
                     }
                 },
-                // Engine running: the 5 ms cadence feeds the UI level
-                // meters even when the gate is closed (no packets).
-                default(Duration::from_millis(5)) => {}
+                // Engine running: this cadence feeds the UI level
+                // meters even when the gate is closed (no packets),
+                // notices the gate closing (the speaking light), and
+                // supervises the devices. Packets and commands wake the
+                // loop at once, so nothing waits on it but those. It was
+                // 5 ms — 200 wakes a second for as long as a session
+                // lasted, a quiet channel included; the meters redraw
+                // every 125 ms and the speaking indicator holds for
+                // hundreds, so 20 ms is still far finer than anything
+                // reads it (IOS-SPEC.md §14 D41).
+                default(tick) => {}
             }
         }
 

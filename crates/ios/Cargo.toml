@@ -1,0 +1,137 @@
+[package]
+name = "ios"
+# The iOS host (IOS-SPEC.md): the executable Xcode puts inside
+# baucord.app. `main` sets up the log, the app's folders, the audio
+# session and Slint's winit backend (Skia on Metal), then runs the same
+# `frontend::app::run()` the desktop binary runs. Versioned with the
+# public crates.
+version = "1.1.7"
+edition = "2024"
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+# `baucord.app/baucord`: ios/scripts/build_with_cargo.sh builds this
+# binary and puts it where Xcode expects the app's executable.
+name = "baucord"
+path = "src/main.rs"
+
+[features]
+default = ["app"]
+# The real client: `frontend` without its `desktop` feature (no
+# clipboard crate, hotkeys, updater, dialogs — their `stubs/` twins).
+# Always build this crate with `-p ios`: a workspace-wide build would
+# unify `frontend/desktop` back in from the desktop crate.
+app = ["dep:frontend", "dep:client", "dep:i18n"]
+# M0's toolchain smoke test (IOS-SPEC.md §12): one Slint page in the
+# theme's colours, no engine. Proves Xcode + cargo + the Skia prebuilt
+# + signing before the whole dependency tree is in play
+# (`ios/run.sh --hello`).
+hello = []
+
+[dependencies]
+# The workspace entry as is: on iOS `backend-winit` + `renderer-skia`
+# are exactly what Slint's iOS support is (winit on UIKit, Skia on
+# Metal); `renderer-software` is pure Rust and unused here.
+slint.workspace = true
+# `std` for `set_boxed_logger` (logging.rs), asked for here rather than
+# inherited by accident from whichever dependency enables it.
+log = { workspace = true, features = ["std"] }
+frontend = { path = "../frontend", default-features = false, optional = true }
+client = { path = "../client", optional = true }
+# The attach sheet's words (host.rs), from the app's own catalogs.
+i18n = { path = "../i18n", optional = true }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+# The Apple bindings (objc2 0.6 / the 0.3 framework crates), mostly
+# already in the tree through cpal and Slint's iOS backend; new with
+# host.rs are objc2-photos-ui and objc2-uniform-type-identifiers (and
+# objc2-video-toolbox / -core-media in `video`).
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = [
+  "std",
+  "block2",
+  "NSArray",
+  "NSDictionary",
+  "NSError",
+  "NSFileManager",
+  "NSItemProvider",
+  "NSNotification",
+  "NSOperation",
+  "NSPathUtilities",
+  "NSProgress",
+  "NSSet",
+  "NSString",
+  "NSURL",
+  "NSValue",
+] }
+# The audio session (session.rs). cpal's iOS host uses the same crate.
+objc2-avf-audio = { version = "0.3", default-features = false, features = [
+  "std",
+  "AVAudioSession",
+  "AVAudioSessionTypes",
+] }
+# The lifecycle notifications (lifecycle.rs): the scene's background
+# and foreground, the application's memory warning and termination.
+# The pickers, Quick Look and links (host.rs): the action sheet, the
+# document picker, the document interaction controller, and the window
+# to present them from. The window's safe area (insets.rs): UIGeometry,
+# and the status bar's height where the window's safe area leaves it
+# out (UIStatusBarManager).
+objc2-ui-kit = { version = "0.3", default-features = false, features = [
+  "std",
+  "block2",
+  "objc2-core-foundation",
+  "objc2-uniform-type-identifiers",
+  "UIAlertController",
+  "UIApplication",
+  "UIDocumentInteractionController",
+  "UIDocumentPickerViewController",
+  "UIGeometry",
+  "UIPresentationController",
+  "UIResponder",
+  "UIScene",
+  "UIStatusBarManager",
+  "UIView",
+  "UIViewController",
+  "UIWindow",
+  "UIWindowScene",
+] }
+# Photos' picker (host.rs): its configuration, filter and results. The
+# iOS picker class itself is declared in host.rs (the crate binds it for
+# macOS only). Links PhotosUI.
+objc2-photos-ui = { version = "0.3", default-features = false, features = [
+  "std",
+  "PHPicker",
+] }
+# "Any file" for the document picker.
+objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = [
+  "std",
+  "UTType",
+  "UTCoreTypes",
+] }
+# CGRect for anchoring the share sheet.
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+  "std",
+  "CFCGTypes",
+] }
+# Notifications (notices.rs, IOS-SPEC.md D50): a DM or a call starting
+# while the app is in the background, and the message chime under the
+# ring/silent switch. Local notifications only — no push entitlement.
+objc2-user-notifications = { version = "0.3", default-features = false, features = [
+  "std",
+  "block2",
+  "UNNotification",
+  "UNNotificationContent",
+  "UNNotificationRequest",
+  "UNNotificationResponse",
+  "UNNotificationSettings",
+  "UNNotificationSound",
+  "UNNotificationTrigger",
+  "UNUserNotificationCenter",
+] }
+# Timestamps in baucord.log (the desktop's env_logger format).
+chrono = "0.4"

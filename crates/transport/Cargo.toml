@@ -1,6 +1,6 @@
 [package]
 name = "transport"
-version = "1.1.5"
+version = "1.1.7"
 edition = "2024"
 description = "Sans-IO QUIC transport for baucord: quinn-proto driven from the existing threads, lane mapping, identity pinning, and an in-process simulation harness."
 
@@ -22,7 +22,10 @@ thiserror.workspace = true
 # workspace logger; `rustls-ring` is the TLS provider (ring over aws-lc-rs
 # for footprint). No default features: that would pull `bloom` (fastbloom)
 # which we don't need.
-quinn-proto = { version = "0.11.17", default-features = false, features = [
+# 0.11.19 at least: earlier 0.11 releases panic on a peer whose
+# min_ack_delay exceeds the RTT once ack frequency is on (ours is) — a
+# remote crash of the server with `panic = "abort"` (PRODUCTION-PLAN.md).
+quinn-proto = { version = "0.11.19", default-features = false, features = [
   "rustls-ring",
   "log",
 ] }
@@ -53,6 +56,12 @@ socket2 = { version = "0.6", features = ["all"] }
 
 [dev-dependencies]
 env_logger = "0.11"
+
+[target.'cfg(unix)'.dependencies]
+# `poll(2)` on the socket (`udp::ReadWaiter`): a connected client's
+# network thread sleeps until a datagram arrives instead of polling
+# every millisecond. Already in the tree (quinn-udp, socket2).
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 # qWAVE: the Windows way to mark a UDP flow as voice (DSCP + 802.1p) —

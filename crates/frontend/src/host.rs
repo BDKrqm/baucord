@@ -35,6 +35,41 @@ pub fn save_download(_name: &str, _mime: &str, _bytes: &[u8]) -> Option<Result<S
 /// A desktop process keeps running in the background by itself.
 pub fn keep_alive(_server: Option<&str>) {}
 
+pub use crate::notice::{ChimeRoute, Notice, NoticeKind};
+
+/// No notifications on the desktop yet: the window, the tray and the
+/// chimes carry everything (`stubs/host.rs` has the phones').
+#[must_use]
+pub fn notifies() -> bool {
+    false
+}
+
+pub fn notify(_notice: &Notice) {}
+
+#[must_use]
+pub fn notices_allowed(_kind: NoticeKind) -> bool {
+    false
+}
+
+pub fn cancel_notice(_key: &str) {}
+
+/// The desktop's chimes always go through the voice engine.
+#[must_use]
+pub fn chime_route() -> ChimeRoute {
+    ChimeRoute::App
+}
+
+/// The desktop's engine always has playback open.
+#[must_use]
+pub fn play_chime() -> bool {
+    false
+}
+
+/// The desktop's viewer is a window the user arranges; the display's
+/// sleep is left to the OS (a phone keeps its screen on while a stream
+/// plays, `stubs/host.rs`).
+pub fn keep_screen_on(_on: bool) {}
+
 /// Whether a saved file is still where it was saved.
 #[must_use]
 pub fn target_exists(target: &Path) -> bool {

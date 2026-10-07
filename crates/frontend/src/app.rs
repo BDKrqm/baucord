@@ -62,6 +62,7 @@ use crate::{
     viewers::Viewer,
 };
 
+mod alerts;
 mod chat;
 mod commands;
 mod conversations;
@@ -83,8 +84,77 @@ pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// windows — Settings, the admin panel, the stream viewer — cannot open
 /// there until they become in-window pages (ANDROID-SPEC.md §9). Their
 /// `open` paths check this and say so instead of colliding with the
-/// main window.
-pub(crate) const SINGLE_WINDOW_HOST: bool = cfg!(target_os = "android");
+/// main window. An iPhone app is one full-screen window too (winit on
+/// `UIKit`, IOS-SPEC.md §4), so iOS takes every page Android has — the
+/// Settings and stream pages, the narrow layout, the touch rules.
+pub(crate) const SINGLE_WINDOW_HOST: bool = cfg!(any(target_os = "android", target_os = "ios"));
+
+/// Whether the app may end its own process. Not on iOS: winit ignores
+/// `ControlFlow::Exit` there (the loop never returns, IOS-SPEC.md
+/// §4.1) and Apple's rule is that only the user closes an app, from the
+/// app switcher. The Quit button is hidden and `/quit` says how.
+pub(crate) const HOST_CAN_QUIT: bool = !cfg!(target_os = "ios");
+
+// ── What the host tells the app (phones) ────────────────────────────────
+
+/// Whether the host shows the app: false while a phone app is in the
+/// background (IOS-SPEC.md §14 D42). Voice goes on there; what only
+/// feeds the screen — the latency and resource lines, the stream stats,
+/// GIF animation, the device poll — waits until the app is shown again,
+/// instead of drawing frames nobody sees. The desktop never clears it
+/// (`main_on_screen` has its own tray and minimize checks).
+static HOST_VISIBLE: AtomicBool = AtomicBool::new(true);
+
+pub(crate) fn host_visible() -> bool {
+    HOST_VISIBLE.load(Ordering::Relaxed)
+}
+
+/// The host's app went into the background (`false`) or came back to
+/// the screen. Callable from any thread.
+pub fn set_host_visible(visible: bool) {
+    if HOST_VISIBLE.swap(visible, Ordering::Relaxed) == visible {
+        return;
+    }
+    info!("host: app {}", if visible { "shown" } else { "hidden" });
+    if visible {
+        let _ = slint::invoke_from_event_loop(|| with_current(AppState::host_shown));
+    }
+}
+
+/// A notification about the DM with `dm` (the user id in hex) was
+/// tapped: open that conversation (ANDROID-SPEC.md D52). Any thread.
+#[cfg_attr(feature = "desktop", expect(dead_code, reason = "phones only"))]
+pub(crate) fn open_noticed_conversation(dm: String) {
+    let _ = slint::invoke_from_event_loop(move || {
+        with_current(|app| app.open_noticed_dm(&dm));
+    });
+}
+
+/// The screen edges the host measured itself (logical px: top, left,
+/// bottom, right), applied as `State.host-inset-*` (IOS-SPEC.md §14 D39).
+static HOST_INSETS: std::sync::Mutex<[f32; 4]> = std::sync::Mutex::new([0.0; 4]);
+
+/// The host's own measure of the edges the system draws over (iOS: the
+/// window's safe area), whenever it changes. The pages keep clear of
+/// the larger of this and the window's `safe-area-insets`. Callable
+/// from any thread, before the app exists too.
+pub fn set_host_insets(top: f32, left: f32, bottom: f32, right: f32) {
+    if let Ok(mut insets) = HOST_INSETS.lock() {
+        *insets = [top, left, bottom, right];
+    }
+    let _ = slint::invoke_from_event_loop(|| {
+        with_current(|app| apply_host_insets(&app.main));
+    });
+}
+
+fn apply_host_insets(main: &MainWindow) {
+    let [top, left, bottom, right] = HOST_INSETS.lock().map_or([0.0; 4], |i| *i);
+    let s = main.global::<State>();
+    s.set_host_inset_top(top);
+    s.set_host_inset_left(left);
+    s.set_host_inset_bottom(bottom);
+    s.set_host_inset_right(right);
+}
 
 // ── The UI-thread singleton ─────────────────────────────────────────────
 
@@ -314,6 +384,13 @@ pub struct AppState {
     lobby: bool,
     /// The lobby's name (ids renumber on a hot reload; names hold).
     pub(crate) lobby_name: Option<String>,
+    /// When a phone last said someone started a call (`alerts`): once
+    /// per ten minutes at most.
+    last_join_notice: Option<Instant>,
+    /// What the voice engine was last told: in a voice room (or testing
+    /// the microphone). A phone keeps no microphone open otherwise
+    /// (`sync_voice_room`).
+    voice_in_room: bool,
     /// The room to go back to after an automatic reconnect: set when
     /// the connection drops, spent by the next `Init`, cleared by a
     /// deliberate connect or disconnect.
@@ -430,8 +507,11 @@ fn spawn_workers(
 /// Prefer the Skia renderer when compiled in: femtovg (the default)
 /// can't rasterize many color-emoji glyph formats, which shows as tofu
 /// boxes in the emoji palette. Skia renders them all. (Android's
-/// backend is Skia already and is installed by the host before `run`.)
-#[cfg(not(target_os = "android"))]
+/// backend is Skia already and is installed by the host before `run`;
+/// the iOS host selects winit + Skia on Metal itself, IOS-SPEC.md D7 —
+/// the CPU raster choice below is a Windows answer that would cost a
+/// phone its battery and its 120 Hz.)
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn select_renderer() {
     // An explicit SLINT_BACKEND still wins — the no-rebuild escape
     // hatch (`winit-software` forces the basic software renderer;
@@ -467,9 +547,9 @@ fn select_renderer() {
 /// Build everything and run the event loop until quit.
 pub fn run() {
     // On Android the host has already installed Slint's Android backend
-    // (`slint::android::init`, with Skia); a second selection would
-    // only fail and log.
-    #[cfg(not(target_os = "android"))]
+    // (`slint::android::init`, with Skia), and the iOS host has selected
+    // winit + Skia; a second selection would only fail and log.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     select_renderer();
     let is_testing_mic_shared = Arc::new(AtomicBool::new(false));
     let (voice, screen, network, present_shared, screen_fwd_rx) =
@@ -483,13 +563,14 @@ pub fn run() {
     info!("Locale: {locale}");
 
     let main = MainWindow::new().expect("failed to create the main window");
+    apply_host_insets(&main);
 
     // Saved size only; the position is decided at the first show
     // (centred on the monitor, see `center_on_monitor`). A phone's
     // window is the screen: nothing to size there.
     // Saved px dimensions; i32→f32 precision is irrelevant at window
     // scale.
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     #[allow(clippy::cast_precision_loss)]
     main.window().set_size(slint::LogicalSize::new(
         settings.window.width.max(500) as f32,
@@ -603,6 +684,8 @@ pub fn run() {
         main_placed: Cell::new(false),
         lobby: false,
         lobby_name: None,
+        last_join_notice: None,
+        voice_in_room: true,
         rejoin_channel: None,
         settings_win: None,
         admin_win: None,
@@ -669,6 +752,10 @@ pub fn run() {
         // Same for the stream viewer page (D23).
         crate::viewers::wire_page(&state.borrow().main);
     }
+    // iOS apps never end themselves (IOS-SPEC.md §14 D29).
+    if !HOST_CAN_QUIT {
+        state.borrow().main.global::<State>().set_can_quit(false);
+    }
 
     // "Start in the tray": the window stays hidden until the tray icon
     // shows it (only meaningful when the tray is compiled in).
@@ -721,7 +808,9 @@ pub fn run() {
     // the FLTK build needed an off-screen sentinel window for this.
     slint::run_event_loop_until_quit().expect("event loop failed");
 
-    // Loop exited (quit_event_loop called). Clean shutdown.
+    // Loop exited (quit_event_loop called). Clean shutdown. (Never
+    // reached on iOS: UIKit owns the process and the loop does not
+    // return — the host calls `persist_for_background` instead.)
     let st = state;
     APP.with(|a| a.borrow_mut().take());
     st.borrow_mut().shutdown();
@@ -804,6 +893,15 @@ pub fn with_current(f: impl FnOnce(&mut AppState)) {
     if let Some(app) = app {
         f(&mut app.borrow_mut());
     }
+}
+
+/// The host is going into the background, where the OS may end the
+/// process without `run` ever returning (iOS always: `UIKit` owns the
+/// loop; IOS-SPEC.md §4.3): write the settings now, as the tray's Quit
+/// does. Settings are saved on nearly every change already; this
+/// catches the rest. UI thread only; a no-op before the app exists.
+pub fn persist_for_background() {
+    with_current(AppState::save_settings_now);
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1416,6 +1514,12 @@ fn start_timers(state: &Rc<RefCell<AppState>>) {
         slint::TimerMode::Repeated,
         Duration::from_millis(2500),
         move || {
+            // In the background (a phone) nobody reads the notices; the
+            // first poll back on screen reports whatever changed. The
+            // voice engine follows device loss on its own meanwhile.
+            if !host_visible() {
+                return;
+            }
             let input = audio::VoiceChat::list_input_devices().unwrap_or_default();
             let output = audio::VoiceChat::list_output_devices().unwrap_or_default();
             with_app(&w, |app| app.handle_devices_changed(input, output));
@@ -2261,6 +2365,14 @@ pub fn fill_tr(tr: &Tr) {
     tr.set_stop_watching(t!("stop-watching").into());
     tr.set_viewer_fullscreen(t!("viewer-fullscreen").into());
     tr.set_viewer_exit_fullscreen(t!("viewer-exit-fullscreen").into());
+    tr.set_viewer_fill(t!("viewer-fill").into());
+    tr.set_viewer_fit(t!("viewer-fit").into());
+    tr.set_viewer_rotate(t!("viewer-rotate").into());
+    tr.set_viewer_unrotate(t!("viewer-unrotate").into());
+    tr.set_viewer_mic_mute(t!("viewer-mic-mute").into());
+    tr.set_viewer_mic_unmute(t!("viewer-mic-unmute").into());
+    tr.set_viewer_stream_mute(t!("viewer-stream-mute").into());
+    tr.set_viewer_stream_unmute(t!("viewer-stream-unmute").into());
     tr.set_settings_title(t!("settings-title").into());
     tr.set_tab_profile(t!("tab-profile").into());
     tr.set_tab_general(t!("tab-general").into());
@@ -2302,6 +2414,15 @@ pub fn fill_tr(tr: &Tr) {
     tr.set_general_lead(t!("general-lead").into());
     tr.set_text_size(t!("text-size").into());
     tr.set_text_size_hint(t!("text-size-hint").into());
+    tr.set_tab_debug(t!("tab-debug").into());
+    tr.set_debug_lead(t!("debug-lead").into());
+    tr.set_debug_log_header(t!("debug-log-header").into());
+    tr.set_debug_send_log(t!("debug-send-log").into());
+    tr.set_debug_clear_log(t!("debug-clear-log").into());
+    tr.set_debug_send_hint(t!("debug-send-hint").into());
+    tr.set_debug_tail_label(t!("debug-tail-label").into());
+    tr.set_debug_tail_empty(t!("debug-tail-empty").into());
+    tr.set_debug_no_log_file(t!("debug-no-log-file").into());
     tr.set_log_level(t!("log-level").into());
     tr.set_log_level_hint(t!("log-level-hint").into());
     tr.set_sounds_header(t!("sounds-header").into());
@@ -2311,6 +2432,12 @@ pub fn fill_tr(tr: &Tr) {
     tr.set_sounds_mention(t!("sounds-mention").into());
     tr.set_sounds_mention_hint(t!("sounds-mention-hint").into());
     tr.set_sounds_dm(t!("sounds-dm").into());
+    tr.set_notifs_header(t!("notifs-header").into());
+    tr.set_notifs_lead(t!("notifs-lead").into());
+    tr.set_notifs_messages(t!("notifs-messages").into());
+    tr.set_notifs_messages_hint(t!("notifs-messages-hint").into());
+    tr.set_notifs_first_join(t!("notifs-first-join").into());
+    tr.set_notifs_first_join_hint(t!("notifs-first-join-hint").into());
     tr.set_sounds_lead(t!("sounds-lead").into());
     tr.set_sounds_share_started(t!("sounds-share-started").into());
     tr.set_sounds_viewer_joined(t!("sounds-viewer-joined").into());
@@ -2337,6 +2464,8 @@ pub fn fill_tr(tr: &Tr) {
             t!("audio-aec-hint-windows")
         } else if cfg!(target_os = "android") {
             t!("audio-aec-hint-android")
+        } else if cfg!(target_os = "ios") {
+            t!("audio-aec-hint-ios")
         } else {
             t!("audio-aec-hint")
         }

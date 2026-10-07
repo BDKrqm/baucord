@@ -12,6 +12,8 @@ use std::{
 
 use i18n::t;
 
+pub use crate::notice::{ChimeRoute, Notice, NoticeKind};
+
 pub type Filter = (String, Vec<String>);
 
 /// No save dialog on this host: callers that would ask where to save
@@ -58,6 +60,36 @@ pub trait Hooks: Send + Sync {
     /// Keep the app running while a session is connected and the app is
     /// off screen (`Some`: the notification's words), or stop (`None`).
     fn keep_alive(&self, _notice: Option<&KeepAlive>) {}
+    /// Keep the screen on (`true`: a stream is being watched) or let the
+    /// system dim and lock it again (`false`). Called on the UI thread.
+    fn keep_screen_on(&self, _on: bool) {}
+    /// Whether this host shows notifications at all ([`notify`]).
+    fn notifies(&self) -> bool {
+        false
+    }
+    /// Post (or replace, by [`Notice::key`]) a notification. A tap on one
+    /// with [`Notice::open_dm`] comes back through [`open_conversation`].
+    /// Called on the UI thread.
+    fn notify(&self, _notice: &Notice) {}
+    /// Whether a notification of `kind` would be shown now: the user
+    /// may have refused the permission or switched the channel off, and
+    /// then a DM in the background chimes instead of vanishing.
+    fn notices_allowed(&self, _kind: NoticeKind) -> bool {
+        self.notifies()
+    }
+    /// Take down the notification posted under `key`, if it is up.
+    fn cancel_notice(&self, _key: &str) {}
+    /// How an alert chime may play right now: asked before each one, so
+    /// a phone switched to silent a moment ago is honoured.
+    fn chime_route(&self) -> ChimeRoute {
+        ChimeRoute::App
+    }
+    /// Play the message chime (`wav`) itself, for when the voice engine
+    /// has no playback open (Android out of a voice room). `false`: the
+    /// host cannot, and the engine is asked as before.
+    fn play_chime(&self, _wav: &[u8]) -> bool {
+        false
+    }
 }
 
 /// What the keep-alive notification says (Android's foreground service).
@@ -80,6 +112,89 @@ pub fn keep_alive(server: Option<&str>) {
         })),
         None => hooks.keep_alive(None),
     }
+}
+
+/// A stream is on the screen (`true`) or no longer (`false`): the host
+/// keeps the display awake meanwhile, as a video player does (IOS-SPEC.md
+/// §14 D45). Only while it is watched — chat and the voice lists let the
+/// phone sleep as usual.
+pub fn keep_screen_on(on: bool) {
+    if let Some(hooks) = HOOKS.get() {
+        log::info!(
+            "screen {}",
+            if on {
+                "kept on (watching a stream)"
+            } else {
+                "may sleep again"
+            }
+        );
+        hooks.keep_screen_on(on);
+    }
+}
+
+/// Whether this host shows notifications (a phone that installed hooks).
+pub fn notifies() -> bool {
+    HOOKS.get().is_some_and(|h| h.notifies())
+}
+
+/// Post a notification, if this host shows them.
+pub fn notify(notice: &Notice) {
+    if let Some(hooks) = HOOKS.get().filter(|h| h.notifies()) {
+        log::info!(
+            "notice {} ({:?}{})",
+            notice.key,
+            notice.kind,
+            if notice.on_screen { ", sound only" } else { "" }
+        );
+        hooks.notify(notice);
+    }
+}
+
+/// Whether a notification of `kind` would be shown now (the host
+/// shows them, and the user has not refused or silenced them).
+pub fn notices_allowed(kind: NoticeKind) -> bool {
+    HOOKS
+        .get()
+        .is_some_and(|h| h.notifies() && h.notices_allowed(kind))
+}
+
+/// Take down the notification posted under `key`.
+pub fn cancel_notice(key: &str) {
+    if let Some(hooks) = HOOKS.get().filter(|h| h.notifies()) {
+        hooks.cancel_notice(key);
+    }
+}
+
+/// How an alert chime plays here now ([`ChimeRoute`]); the app's own
+/// mix where no host says otherwise.
+pub fn chime_route() -> ChimeRoute {
+    HOOKS.get().map_or(ChimeRoute::App, |h| h.chime_route())
+}
+
+/// A notification was tapped: open the DM conversation it was about
+/// (`dm` is the user id in hex). Any thread.
+pub fn open_conversation(dm: String) {
+    crate::app::open_noticed_conversation(dm);
+}
+
+/// Have the host play the message chime itself (`Hooks::play_chime`);
+/// `false` when it cannot.
+pub fn play_chime() -> bool {
+    HOOKS
+        .get()
+        .is_some_and(|h| h.play_chime(&alert_sound_wav()))
+}
+
+/// The DM chime as a WAV file, for a host that plays it through the
+/// system (iOS writes it where notifications find their sounds).
+#[must_use]
+pub fn alert_sound_wav() -> Vec<u8> {
+    static WAV: OnceLock<Vec<u8>> = OnceLock::new();
+    WAV.get_or_init(|| {
+        let bank = audio::sounds::SoundBank::new();
+        audio::sounds::wav_bytes(bank.get(audio::SoundType::DirectMessage))
+    })
+    .clone()
 }
 
 static HOOKS: OnceLock<Box<dyn Hooks>> = OnceLock::new();

@@ -11,6 +11,7 @@ import android.os.Environment;
 import android.provider.MediaStore;
 import android.provider.OpenableColumns;
 import android.util.Log;
+import android.view.WindowManager;
 import android.webkit.MimeTypeMap;
 
 import java.io.File;
@@ -41,6 +42,13 @@ public class BaucordActivity extends NativeActivity {
      * or all null when the user backed out.
      */
     static native void nativeFilePicked(String path, String name, String error);
+
+    /**
+     * A message notification was tapped while the app runs: open the DM
+     * conversation with {@code dm} (the user id in hex). Registered from
+     * Rust like {@link #nativeFilePicked} (ANDROID-SPEC.md D52).
+     */
+    static native void nativeOpenConversation(String dm);
 
     // ── Permissions ──────────────────────────────────────────────────────
 
@@ -85,6 +93,74 @@ public class BaucordActivity extends NativeActivity {
     /** Rust, on disconnect: let the process be an ordinary app again. */
     public void stopVoiceService() {
         VoiceService.stop(this);
+    }
+
+    // ── Notifications (ANDROID-SPEC.md D52) ─────────────────────────────
+
+    /**
+     * Rust: post (or replace, by {@code key}) a message or voice-activity
+     * notification. Any thread.
+     */
+    public void postNotice(String kind, String key, String channelName, String title,
+            String text, String dm, boolean sound) {
+        Notices.post(this, kind, key, channelName, title, text, dm, sound);
+    }
+
+    /** Rust: take down the notification posted under {@code key}. */
+    public void cancelNotice(String key) {
+        Notices.cancel(this, key);
+    }
+
+    /** Rust: whether a notification of {@code kind} would show at all. */
+    public boolean noticesAllowed(String kind) {
+        return Notices.allowed(this, kind);
+    }
+
+    /** Rust: play the message chime while no voice stream is open (D53). */
+    public void playChime(final byte[] wav) {
+        runOnUiThread(() -> Notices.playChime(this, wav));
+    }
+
+    /** Rust: whether the phone's ringer and Do Not Disturb allow an alert chime now. */
+    public boolean chimeAllowed() {
+        return Notices.chimeAllowed(this);
+    }
+
+    /**
+     * A notification's tap with the app running (singleTask: the same
+     * Activity, a new intent). One about a message opens its
+     * conversation; the voice service's just brings the app back.
+     */
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        String dm = intent != null ? intent.getStringExtra(Notices.EXTRA_DM) : null;
+        if (dm != null && !dm.isEmpty()) {
+            try {
+                nativeOpenConversation(dm);
+            } catch (UnsatisfiedLinkError e) {
+                Log.w(TAG, "nativeOpenConversation is not bound", e);
+            }
+        }
+    }
+
+    // ── The screen while a stream plays (ANDROID-SPEC.md D45) ──────────
+
+    /**
+     * Rust: keep the screen on while a stream is watched ({@code true}),
+     * or let it time out and lock again ({@code false}). The window flag
+     * only holds while this window is visible, so leaving the app lets
+     * the phone sleep regardless. Window flags belong to the UI thread.
+     */
+    public void keepScreenOn(final boolean on) {
+        runOnUiThread(() -> {
+            if (on) {
+                getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            } else {
+                getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            }
+        });
     }
 
     // ── Files ────────────────────────────────────────────────────────────

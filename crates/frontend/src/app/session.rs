@@ -193,6 +193,7 @@ impl AppState {
 
         self.users.clear();
         self.our_client_id = None;
+        Self::clear_call_notice();
         self.is_muted = false;
         self.is_deafened = false;
         // A menu open on a row that is about to vanish.
@@ -252,7 +253,7 @@ impl AppState {
     //  VOICE CONTROLS
     // ════════════════════════════════════════════════════════════════
 
-    pub(super) fn handle_toggle_mute(&mut self) {
+    pub(crate) fn handle_toggle_mute(&mut self) {
         if self.is_muted && self.server_muted.is_some() {
             self.show_toast(ToastKind::Warning, &t!("chat-server-muted-locked"));
             return;
@@ -276,10 +277,18 @@ impl AppState {
             })
             .ok();
         self.main.global::<State>().set_muted(self.is_muted);
+        self.push_self_audio();
         self.update_user_list();
     }
 
-    pub(super) fn handle_toggle_deafen(&mut self) {
+    /// Mute and deafen to every stream window's own buttons (D43).
+    fn push_self_audio(&self) {
+        for viewer in self.viewers.values() {
+            viewer.set_self_audio(self.is_muted, self.is_deafened);
+        }
+    }
+
+    pub(crate) fn handle_toggle_deafen(&mut self) {
         self.is_deafened = !self.is_deafened;
         self.voice
             .tx
@@ -293,6 +302,7 @@ impl AppState {
             })
             .ok();
         self.main.global::<State>().set_deafened(self.is_deafened);
+        self.push_self_audio();
         self.update_user_list();
     }
 
@@ -409,11 +419,13 @@ impl AppState {
 
         if enabled {
             if !voice_already_running {
+                self.voice_in_room = true;
                 self.voice
                     .tx
                     .send(VoiceControl::Start {
                         settings: Box::new(self.settings.clone()),
                         our_client_id: 0,
+                        in_room: true,
                     })
                     .ok();
             }
@@ -423,6 +435,26 @@ impl AppState {
             if !self.connected {
                 self.voice.tx.send(VoiceControl::Stop).ok();
             }
+        }
+        // A test needs the microphone, in the lobby too.
+        self.sync_voice_room();
+    }
+
+    /// Tell the voice engine whether we are in a voice room (or testing
+    /// the microphone), when that changes. On a phone the microphone
+    /// and the call path go with it: nothing records in the lobby
+    /// (ANDROID-SPEC.md D53, IOS-SPEC.md D51). The desktop keeps its
+    /// streams as they were.
+    pub(super) fn sync_voice_room(&mut self) {
+        // Disconnected, the engine is on its way out (the deferred
+        // Stop) or a microphone test owns it: leave it as it is.
+        if !audio::RELEASES_MIC || (!self.connected && !self.is_testing_mic) {
+            return;
+        }
+        let in_room = !self.in_lobby() || self.is_testing_mic;
+        if in_room != self.voice_in_room {
+            self.voice_in_room = in_room;
+            self.voice.tx.send(VoiceControl::SetInRoom(in_room)).ok();
         }
     }
 

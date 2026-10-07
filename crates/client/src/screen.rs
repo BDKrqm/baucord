@@ -38,7 +38,7 @@ use audio::{
 };
 use crossbeam_channel::{bounded, Receiver, Sender};
 use log::{info, warn};
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use video::codec::FfmpegDecoder;
 use video::{
     buffer::{BufferedPacket, VideoJitterBuffer},
@@ -1615,7 +1615,7 @@ fn create_encoder(
 }
 
 /// Create the video decoder: `FFmpeg` on the desktop.
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn create_decoder() -> Result<Box<dyn VideoDecoder + Send>, CodecError> {
     match FfmpegDecoder::new() {
         Ok(dec) => Ok(Box::new(dec)),
@@ -1634,6 +1634,19 @@ fn create_decoder() -> Result<Box<dyn VideoDecoder + Send>, CodecError> {
         Ok(dec) => Ok(Box::new(dec)),
         Err(e) => {
             warn!("MediaCodec decoder unavailable: {e}");
+            Err(CodecError::DecoderInit(e.to_string()))
+        }
+    }
+}
+
+/// Create the video decoder: `VideoToolbox` on iOS (IOS-SPEC.md D9). It
+/// makes its session on the first keyframe.
+#[cfg(target_os = "ios")]
+fn create_decoder() -> Result<Box<dyn VideoDecoder + Send>, CodecError> {
+    match video::videotoolbox::VideoToolboxDecoder::new() {
+        Ok(dec) => Ok(Box::new(dec)),
+        Err(e) => {
+            warn!("VideoToolbox decoder unavailable: {e}");
             Err(CodecError::DecoderInit(e.to_string()))
         }
     }
