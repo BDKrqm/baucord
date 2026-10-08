@@ -1,16 +1,20 @@
-# The Android release APK (ANDROID-SPEC.md §11): built and signed when a
-# GitHub Release is published, attached to that release as
-# baucord-android-<tag>-arm64.apk. Day-to-day builds are local
-# (android/README.md); there is no push/PR build on purpose.
+# The Android release APK (ANDROID-SPEC.md §11, D55): built and signed
+# when a GitHub Release is published, attached to that release and put
+# on the website's bucket (R2, beside the desktop zips) as
+# baucord-<tag>-android-arm64.apk — the name web/index.html links to.
+# Day-to-day builds are local (android/README.md); there is no push/PR
+# build on purpose.
 #
 # Secrets (repo Settings → Secrets and variables → Actions):
 #   BAUCORD_KEYSTORE_BASE64   the release keystore, base64 of the .jks
 #   BAUCORD_KEYSTORE_PASSWORD
 #   BAUCORD_KEY_ALIAS         (baucord)
 #   BAUCORD_KEY_PASSWORD
-# Gradle reads them as project properties through ORG_GRADLE_PROJECT_*
-# (app/build.gradle.kts, signingConfigs). Without them the APK is built
-# unsigned and only uploaded as a workflow artifact, never to a release.
+#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY   R2, as release.yml uses
+# Gradle reads the keystore ones as project properties through
+# ORG_GRADLE_PROJECT_* (app/build.gradle.kts, signingConfigs). Without
+# them the APK is built unsigned and only uploaded as a workflow
+# artifact, never to a release or the website.
 #
 # Run workflow (Actions tab) with a release tag (v1.1.8) rebuilds that
 # release: the tag's code, this branch's workflow, the APK attached to
@@ -161,7 +165,9 @@ jobs:
           else
             SRC="$OUT/app-release-unsigned.apk"; SUFFIX="-unsigned"
           fi
-          NAME="baucord-android-${TAG}-arm64${SUFFIX}.apk"
+          # The desktop zips' pattern (baucord-v1.1.7-win-x64.zip): the
+          # website builds this name from its version.
+          NAME="baucord-${TAG}-android-arm64${SUFFIX}.apk"
           cp "$SRC" "$NAME"
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
 
@@ -180,3 +186,25 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$TAG" "${{ steps.apk.outputs.name }}" --clobber --repo "$GITHUB_REPOSITORY"
+
+      # The same APK on the website: R2's bucket root, where release.yml
+      # puts the desktop zips and web.yaml the page. Explicit content
+      # type: browsers then save it as an .apk the phone offers to
+      # install.
+      - name: Stage for the website
+        if: ${{ env.SIGNED == '1' && (github.event_name == 'release' || startsWith(env.TAG, 'v')) }}
+        run: |
+          set -eux
+          mkdir -p r2-upload
+          cp "${{ steps.apk.outputs.name }}" r2-upload/
+      - name: Upload to R2
+        if: ${{ env.SIGNED == '1' && (github.event_name == 'release' || startsWith(env.TAG, 'v')) }}
+        uses: jakejarvis/s3-sync-action@v0.5.1
+        with:
+          args: --content-type application/vnd.android.package-archive
+        env:
+          AWS_S3_BUCKET: baucord
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_S3_ENDPOINT: https://6bcc35de83e46a771896026baf11b4ac.r2.cloudflarestorage.com
+          SOURCE_DIR: r2-upload

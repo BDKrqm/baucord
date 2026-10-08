@@ -19,14 +19,14 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.ref }}
-      - name: Stamp version into index.html
+      - name: Stamp version into the page and its translations
         run: |
           VERSION=$(grep '^version' crates/desktop/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
-          sed -i "s/__VERSION__/$VERSION/g" web/index.html
+          sed -i "s/__VERSION__/$VERSION/g" web/index.html web/i18n/*.json
       - name: Upload to R2
         uses: jakejarvis/s3-sync-action@v0.5.1
         with:
-          args: --exclude '*.zip' --exclude 'version'
+          args: --exclude '*.zip' --exclude '*.apk' --exclude 'version'
         env:
           AWS_S3_BUCKET: baucord
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
