@@ -33,13 +33,15 @@ pub mod codec;
 
 // Android decodes with the platform's MediaCodec instead (the stub
 // above still provides the encoder, which Android does not have yet),
-// iOS with VideoToolbox. `yuv` is their step to RGBA and `annexb` the
-// re-framing VideoToolbox needs, both platform-free so they are tested
+// iOS with VideoToolbox. `yuv` is their step to RGBA, `annexb` the
+// re-framing VideoToolbox needs and `held` MediaCodec's pacing of the
+// pictures it finishes, all platform-free so they are tested
 // everywhere.
 pub mod annexb;
+pub mod held;
 #[cfg(target_os = "android")]
 pub mod mediacodec;
-pub mod timing;
+pub mod pool;
 #[cfg(target_os = "ios")]
 pub mod videotoolbox;
 pub mod yuv;
@@ -264,7 +266,25 @@ pub struct EncodedFrame {
     pub height: u32,
 }
 
-/// Decoded RGBA frame ready for display.
+/// How a [`DecodedFrame`]'s bytes are laid out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PictureFormat {
+    /// Tightly packed RGBA, `width × height × 4` bytes.
+    Rgba,
+    /// The decoder's own 4:2:0 planes (Android's `MediaCodec`). Whoever
+    /// shows the picture converts it ([`yuv::to_rgba_into`]) straight
+    /// into the buffer it draws from, and only the pictures it will
+    /// actually draw: converting every decoded frame, one core at a
+    /// time, was most of a mid-range phone's time per frame (MOB-18).
+    Yuv420 {
+        layout: yuv::Yuv420Layout,
+        color: yuv::ColorSpec,
+    },
+}
+
+/// A decoded frame ready for display: RGBA, or YUV planes to convert
+/// (see [`PictureFormat`]). Give `data` back to [`pool::recycle`] once
+/// done with it.
 ///
 /// Not `Clone` by design — same reasoning as [`Frame`].
 pub struct DecodedFrame {
@@ -272,6 +292,7 @@ pub struct DecodedFrame {
     pub width: u32,
     pub height: u32,
     pub timestamp_ms: u64,
+    pub format: PictureFormat,
 }
 
 // ---------------------------------------------------------------------------
@@ -421,18 +442,49 @@ pub trait VideoEncoder {
     fn supports_forced_keyframes(&self) -> bool {
         true
     }
+
+    /// The last frame came out too large to send (over
+    /// `protocol::MAX_VIDEO_FRAME_BYTES`) and was dropped: raise the
+    /// minimum quantizer the next session opens with, so the keyframe
+    /// that replaces it is smaller. Returns the new floor, or `None` when
+    /// the backend has none or the highest is already in force. The
+    /// floor relaxes on its own once frames fit again.
+    fn frame_too_large(&mut self) -> Option<u32> {
+        None
+    }
+
+    /// The minimum quantizer [`Self::frame_too_large`] put in force.
+    fn qp_floor(&self) -> Option<u32> {
+        None
+    }
 }
 
-/// Decoder that converts H.264 bitstream back into RGBA frames.
+/// Where one [`VideoDecoder::decode`] call that produced a picture
+/// spent its time, for the viewer's log: the codec (handing it the
+/// frame and waiting for a picture — on Android and macOS/iOS the
+/// hardware) against getting the picture out of it (`output` — desktop:
+/// the colour conversion to RGBA; Android: copying the YUV planes out,
+/// the conversion happening later and only for pictures that will be
+/// shown, see [`PictureFormat::Yuv420`]). A device that cannot keep up
+/// is fixed in different places depending on which one is slow.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DecodeTiming {
+    pub codec: std::time::Duration,
+    pub output: std::time::Duration,
+}
+
+/// Decoder that turns an H.264 bitstream back into pictures (RGBA, or
+/// YUV planes to convert — see [`PictureFormat`]).
 pub trait VideoDecoder {
     /// Returns `Ok(None)` when the decoder is still buffering (needs more NALs).
     fn decode(&mut self, encoded: &EncodedFrame) -> Result<Option<DecodedFrame>, CodecError>;
 
-    /// Return a previously-decoded RGBA buffer for reuse.
-    ///
-    /// Avoids allocating a new buffer on the next `decode()` call.
-    /// Optional — callers that don't recycle buffers can ignore this.
-    fn return_buffer(&mut self, _buf: Vec<u8>) {}
+    /// Return a previously-decoded buffer for reuse. Every decoder takes
+    /// its buffers from [`pool`], so [`pool::recycle`] does the same from
+    /// anywhere — the app's present thread gives them back that way.
+    fn return_buffer(&mut self, buf: Vec<u8>) {
+        pool::recycle(buf);
+    }
 
     /// Flush decoder state, clearing internal reference frame buffers.
     ///
@@ -440,6 +492,26 @@ pub trait VideoDecoder {
     /// reference state can't leak into the new GOP. (Resolution changes
     /// are handled automatically; flushing for those is not required.)
     fn flush(&mut self) {}
+
+    /// The split of the last `decode` call that returned a picture
+    /// (see [`DecodeTiming`]); `None` from backends that do both in
+    /// one step.
+    fn last_timing(&self) -> Option<DecodeTiming> {
+        None
+    }
+
+    /// A picture finished (or held back) since the last `decode`, handed
+    /// out once frames have stopped coming for a while — the sharer's
+    /// screen went still — so the last picture before a pause does not
+    /// wait for the next frame. The caller asks between frames, as often
+    /// as it likes; `Ok(None)` from backends whose `decode` hands out
+    /// every picture itself.
+    ///
+    /// # Errors
+    /// As [`Self::decode`].
+    fn poll(&mut self) -> Result<Option<DecodedFrame>, CodecError> {
+        Ok(None)
+    }
 }
 
 #[cfg(test)]

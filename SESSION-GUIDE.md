@@ -242,6 +242,7 @@ ten-line parity script over the `.ftl` keys is worth re-running.
 | 1.1.6 | the `frontend` split (the UI logic shared by every host; `desktop` is `main.rs`), dropping files from the OS onto the window, the tech-debt cycles (clippy clean at `deny`), drag-to-move and badge fixes |
 | 1.1.7 | the Android client (sideloaded; voice, chat, DMs, files, stream viewing through MediaCodec, the in-window Settings and stream pages), the iPhone client (Ad Hoc; the same, VideoToolbox), echo cancellation (Windows, Android, iOS VPIO), Slint 1.18.1, the battery work (no polling workers, nothing drawn in the background), the stream page (zoom, fill, rotate), Settings → Debug (log upload), the one-row sidebar header, notifications on the phones |
 | 1.1.8 | Windows asks not to lower other apps while in voice (AEC-SPEC E11, the vendored `wasapi`); the phones open the microphone only in a voice room and unmuted (ANDROID-SPEC D53, IOS-SPEC D51); the APK on the website, named like the desktop zips (D55); the Android release workflow on maintained actions, with *Run workflow* able to rebuild a release (D54) |
+| 1.1.9 | phones keep up with a 60 fps stream (MOB-18: only the shown picture is converted, on several cores, into reused buffers; MediaCodec's pictures paced instead of dropped; a jitter buffer that holds a keyframe interval); stream audio through the call path on phones (MOB-12); the `viewing …` / `sharing …` stream logs; Settings → Debug → *Copy log*, and a clipboard on the phones; Windows audio that recovers from a device that came back (CLI-12, CLI-9); the video ladder reading a collapsed uplink (CLI-13); a quantizer floor after AMD keyframes too large to send (CLI-15); a stream's stereo mixed to mono on the phones without cancelling out-of-phase sound (ANDROID-SPEC D60) |
 
 Memory-mode servers (persistence off) still use the legacy
 `ImageMessage` relay for pictures and refuse files.
@@ -269,9 +270,16 @@ Memory-mode servers (persistence off) still use the legacy
   must check `output_running()` before dropping the engine, or a
   missing microphone silences playback too (the Android phone test,
   2026-10-05 — and a PC with no capture device, the field incident
-  the audio crate's comment describes). A never-opened input is
-  retried by `service()` (`input_pending`); a failed one by the
-  existing `input_stream_failed` path.
+  the audio crate's comment describes). A side that is not open —
+  never opened, or its reopen failed — is retried by `service()`
+  (`input_pending`, `output_pending`; until 2026-10-08 a failed
+  reopen was never retried, CLI-9); a failed stream by the
+  `*_stream_failed` flags.
+- Windows opens its voice streams on the native WASAPI backend
+  without asking cpal first; cpal is only the fallback, asked when the
+  native stream will not open (CLI-12). Asked first, a cpal failure
+  ("Cannot change thread mode after it is set", after a device change)
+  kept the native path from ever being tried.
 - Chat earns 1 xp per message since 1.1.4 (at the minute flush); an
   image counts as a chat message for mutes and
   the rate limit.
@@ -415,12 +423,49 @@ Memory-mode servers (persistence off) still use the legacy
   `--cfg windows` then trips on `std::os::windows`), so `wasapi.rs`
   changes are checked against the crate sources by reading and by the
   user's first Windows `cargo check`. Say so in the hand-over.
-- **No per-frame `warn!`.** A timing alarm that fires once a frame is
-  60 lines a second on any machine slower than the one it was tuned
-  on (the emulator: 652 of 729 logcat lines). Feed the measurement to
-  a `video::timing::SlowFrames` and log the line it returns once a
-  second (count over budget / total, worst, average) — `Slow decode`,
-  `Slow frames`, `Slow present` all do this now.
+- **Check a pasted log's first line before reading it.** Settings →
+  Debug → *Copy log* starts the text with `# baucord <version>
+  (<os>/<arch>), copied … at <time>, from <path>`: the build, the
+  machine and the file. A log without it was taken by hand and may be
+  the wrong one — on 2026-10-08 a "sharer's log" was a stale copy from
+  another folder, an older build, and a different session (its client
+  ids matched nothing in the phone's log). Ask for *Copy log* from the
+  same time as the other side's.
+- **No per-frame or per-event `warn!` for a steady state.** A timing
+  alarm that fires once a frame is 60 lines a second on any machine
+  slower than the one it was tuned on (the emulator: 652 of 729 logcat
+  lines), and once a second is still 120 lines a minute repeating one
+  fact (the A07, 2026-10-08). A stream logs one summary line every 5 s
+  (`client::viewlog`: `viewing …` per watched stream, `sharing …` for
+  our own) — warn when something is wrong, info otherwise — and a line
+  only when its state changes (falling behind live, caught up, frozen
+  waiting for a keyframe, resumed). New measurements go into those
+  lines, not beside them.
+- **Reading a stream's lines.** `viewing <peer> 1920x1080: in 60.0/s,
+  decoded 59.6/s, shown 41.2/s (92 skipped for a newer one) … |
+  decoding busy 70%: codec 8.1 + output 1.3 ms (p95 …) | behind live
+  60 ms (max 140), then 12 ms to screen (max 30; preparing 9.8 ms
+  each) | audio 120 ms queued`. *In* below the sharer's encoded rate
+  = the network (check the `sharing` line); *decoded* below *in* with
+  busy near 100 % = the device cannot decode the stream — *codec* is
+  the hardware decoder, *output* getting the picture out of it (the
+  desktop's colour conversion; on Android a copy of the YUV planes);
+  *shown* below *decoded*, with skips, = the present thread or the UI:
+  *preparing* is the present thread's work per shown frame (on Android
+  the YUV → RGBA conversion, spread over up to four cores), and above
+  a frame period (16 ms at 60 fps) it is the limit — frames are then
+  skipped by design, the picture stays live. *Behind live* is how late a frame is
+  against the fastest delivery seen (the playout delay and network
+  wobble are part of it: tens of ms); a value that keeps growing is the
+  A/V drift, and *audio queued* is the audio's side of it (stream
+  audio has no timestamps yet). `sharing 1080p 60fps: … encoded
+  58.4/s … | offered 6.8 Mbit/s, sent 6.5 Mbit/s, abandoned 0/3
+  groups, path loss up to 0%, rtt 45 ms | bitrate 100%, fps 100%, 1
+  viewer`: offered far above sent with groups abandoned = the uplink;
+  the bitrate ladder should be stepping down (`bitrate ladder:`
+  lines). `N too large to send (up to X KB)` and `bitrate 100% (QP ≥
+  28)`: the encoder made frames over the wire's 275 KB and runs with
+  a quantizer floor until they fit (CLI-15, AMD mostly).
 - The platform-free half of a platform feature goes in its own module
   with host tests (`video::yuv` for MediaCodec's planes → RGBA): it is
   the only part the assistant can run here, and `rustc --test` on the
@@ -627,6 +672,15 @@ Memory-mode servers (persistence off) still use the legacy
   `sync_voice_room` count it, as the microphone test does. An Android
   engine in the lobby has no playback either: chimes there go through
   `host::play_chime`.
+- **On a phone's call path a stream plays through the voice output**
+  (ANDROID-SPEC.md D56, IOS-SPEC.md D52): anything that should sound
+  with the call (stream audio, and any future in-call playback) goes
+  into that output's mix (`stream::mix`), never onto a second output —
+  a second output is *media* beside the call: the wrong volume (the
+  buttons move the call's), the wrong route, outside the echo
+  canceller, and on some phones silent. Deafen and the voice volume do
+  not touch the stream; its own volume and mute are applied before the
+  mix.
 - **A Windows Communications stream ducks every other app** (by 80 %
   by default). Any stream opened on the voice-call path asks Windows
   not to (`ask_not_to_duck` in `native/wasapi.rs`, AEC-SPEC.md E11)

@@ -47,9 +47,10 @@ first two are hard to undo.
    - *Recommendation*: personal, unless a company already exists — the
      testers are the existing users anyway (§3, step 5).
 2. **Who holds the app signing key** (§4).
-   - *Recommendation*: give Play a copy of **today's release key**
-     (the one the sideloaded APKs are signed with), and generate a new
-     **upload key** for CI. Then a sideloaded install updates in place
+   - *Decided 2026-10-08*: give Play a copy of **today's release key**
+     (the one the sideloaded APKs are signed with), and use the same
+     key as the upload key: one key and one password, not two (§4).
+     Then a sideloaded install updates in place
      from Play — same signature, keys and history kept (the user taps
      Install on the listing once; Play updates it from then on) — and
      one key is registered for Android's developer verification on
@@ -105,6 +106,9 @@ Google, the engineering takes sessions.
 - [ ] Verify identity (government ID, through the payments profile)
   and the contact email and phone (one-time codes). Organization:
   D-U-N-S first.
+- [ ] Turn on 2-Step Verification for the owning Google account and
+  for anyone else added to the Console. The Play App Signing page asks
+  for it for every Console user.
 - [ ] Personal account: verify access to an Android device with the
   **Play Console mobile app**.
 - [ ] Developer verification (Google's new programme for every app,
@@ -122,12 +126,13 @@ Google, the engineering takes sessions.
 
 In this order; each is a PRODUCTION-PLAN item.
 
-- [ ] **MOB-5 — the store pipeline.** `bundleRelease` beside
-  `assembleRelease`; the AAB signed with the new upload key, the APK
-  for GitHub still with the release key; the AAB as a workflow
-  artifact; native debug symbols in the bundle (Play's crash reports
-  then show Rust frames). Uploads by hand at first; the Play
-  Developer API from CI once the app exists.
+- [x] **MOB-5 — the store pipeline** (done 2026-10-08, ANDROID-SPEC
+  D62). `bundleRelease` runs beside `assembleRelease`. The AAB and
+  the APK for GitHub are both signed with the release key, after the
+  build. The AAB is a workflow artifact,
+  with the native debug symbols inside (Play's crash reports then show
+  Rust frames). Uploads are by hand for now; the Play Developer API
+  from CI can come once the app exists.
 - [ ] **MOB-11 — the foreground service, for Play**: decision 3's
   types, switched as we enter and leave a room; the
   `startForeground`-refused crash fixed; the wake lock only in a room.
@@ -148,7 +153,11 @@ In this order; each is a PRODUCTION-PLAN item.
   server.
 - [ ] **LEG-5 — privacy policy, terms, account deletion pages** on the
   website (`web/`), public, not a PDF, naming the app as the listing
-  does. The assistant drafts; you approve (decision 6).
+  does. The assistant drafts; you approve (decision 6). The privacy
+  policy is written: `web/privacy.html`, linked from the site's
+  footer, signed 0x0 Studios (support@mpw.sh). Its URL is
+  `https://baucord.com/privacy.html` once `web.yaml` deploys it.
+  LEG-6 lists what would let it promise less.
 - [ ] **LEG-2 / LEG-3, phone part**: `AboutSlint` in About; notices
   bundled and shown.
 - [ ] Recommended before testers arrive: MOB-8 (font size change ends
@@ -159,11 +168,18 @@ In this order; each is a PRODUCTION-PLAN item.
 ### Step 3 — create the app and fill the forms (you, from drafts)
 
 - [ ] Create the app: name (30 characters max; "baucord"), default
-  language, app (not game), free, no ads.
+  language, app (not game), free, no ads. Package name
+  **`dev.baucord`**: the `applicationId` every APK so far has shipped
+  with (`android/app/build.gradle.kts`), and the iPhone's bundle id.
+  It is permanent on Play: it can never be renamed, and never reused,
+  even if the app is deleted. Keeping it is what lets today's
+  sideloaded installs update from Play (with decision 2's key);
+  another name would be a second app beside the first.
 - [ ] Play App Signing: change the default to **provide your own key**
   (decision 2; Play Console's PEPK tool encrypts it for upload) — it
   must be settled before any release reaches open testing or
-  production; do it before the first upload. Register the upload key.
+  production; do it before the first upload. The same key is the
+  upload key (§4).
 - [ ] **App content** page, every section:
   - Privacy policy URL.
   - App access: "restricted": server address, invite code, steps
@@ -186,6 +202,32 @@ In this order; each is a PRODUCTION-PLAN item.
   and writes the texts.
 
 ### Step 4 — internal test (both)
+
+An internal test can start before app setup is complete (checked
+2026-10-08): no store listing, no forms, possibly no review. It needs
+the account, an AAB, the signing choice and, because the app asks for
+the microphone, probably a privacy policy URL. The first one, 1.1.9:
+
+1. *Once:* check that the release key is RSA 2048+ (`keytool -list
+   -v`). The three `BAUCORD_KEY*` secrets the APK already uses sign
+   the bundle too; nothing to add.
+2. Publish the v1.1.9 GitHub release as usual. The android-release
+   run prints the key's SHA-256. Download
+   `baucord-v1.1.9-android.aab` from the run's *Artifacts*.
+3. Deploy the site (push `web/` to `main`) so the privacy policy is
+   live.
+4. Play Console: *Create app* (`dev.baucord`, §3 step 3). Before
+   uploading: *Protected with Play → Play Store distribution → Go to
+   Play app signing → Change the app signing key*, and choose to
+   provide a copy of your own key. Play shows the PEPK command; run it
+   on `baucord-release.jks`. Don't create a separate upload key. If
+   Play asks for an upload certificate, export this key's
+   (android/README.md §6). Then compare the SHA-256 Play shows with
+   the one the run printed.
+5. *App content → Privacy policy*: the URL. *Test and release →
+   Internal testing*: add testers (an email list), create a release,
+   upload the AAB, roll out. The opt-in link can take a few hours the
+   first time, and testers see a temporary name for up to 48 h.
 
 - [ ] Upload the first AAB to the **internal testing** track (up to 100
   testers by email, available within minutes, lighter review). Install
@@ -232,8 +274,8 @@ In this order; each is a PRODUCTION-PLAN item.
 
 ## 4. Signing: the decision that cannot be undone
 
-Play installs what Google signs with the **app signing key**; we only
-sign the uploads with an **upload key**. For a new app Play's default
+Play installs what Google signs with the **app signing key**, and
+checks each upload against an **upload key**. For a new app Play's default
 is keys Google generates (a "quantum-ready" hybrid of a classical key
 and a post-quantum one); the alternative, offered until a release
 reaches open testing or production, is to give Play a copy of our own
@@ -253,8 +295,14 @@ reaches open testing or production, is to give Play a copy of our own
   and reinstall from Play; the GitHub APK and the Play build can never
   update each other.
 
-The upload key is new, lives only in CI secrets and your backup, and
-can be reset from Play Console (*Request upload key reset*) if lost.
+**One key (decided 2026-10-08).** Our release key is the app signing
+key Play holds a copy of, and also the upload key: CI signs the APK and
+the bundle with it. That means one set of secrets and one password.
+The cost is the one Google points at ("should be different"): a
+separate upload key could be reset from Play Console if it leaked or
+was lost, and this one cannot. Since this key sits in CI for the APK
+anyway, a separate upload key would protect little here.
+
 The app signing key is close to permanent: Play's yearly key upgrade
 reaches Android 13 and later, but Android 12 and older keep checking
 the original — keep its offline backup.
@@ -322,11 +370,13 @@ baucord server and say in the policy who runs it.
 | Play's category | what baucord sends | stored by the server? |
 |---|---|---|
 | Personal info — name | display name, profile | yes |
-| Personal info — user IDs | the device key (public half) | yes |
+| Personal info — user IDs | a SHA-256 of the device key (not the key) | yes |
 | Messages — other in-app messages | chat and DMs | yes (history) |
 | Photos / files and docs | attachments, avatars | yes |
 | Audio — voice | voice to the room | no — relayed in memory, never stored (declare as ephemeral) |
-| App info and performance — diagnostics | telemetry every 10 s; logs when the user sends them | logs yes; telemetry in the server log |
+| App info and performance — diagnostics | telemetry every 10 s (app version, OS family and CPU type, link and codec figures, audio device names); logs when the user sends them | telemetry 30 days in the database (and the server log); logs until deleted (LEG-6) |
+| App activity — other actions | activity counters (time talking, sharing, watching, online; message count) | yes, until the account is deleted |
+| IP address (check Play's guidance on where, if anywhere, it goes; it is not used for location) | seen on every connection | in the server log; with a ban while it lasts |
 | Device or other IDs | none beyond the device key | — |
 
 Also: data encrypted in transit — yes (QUIC/TLS); users can request
@@ -385,3 +435,22 @@ Four to six weeks end to end if the decisions come early.
 - Testing tracks — support.google.com/googleplay/android-developer/answer/9845334
 - August 2026 age-restricted chat categories (a "Preview" page, effective 2026-08-26) — support.google.com/googleplay/android-developer/answer/17036597
 - Age Signals API (not mandated by Play) — support.google.com/googleplay/android-developer/answer/16569691
+
+## 10. Compliance check against six of Google's pages (2026-10-08)
+
+These are the pages the user sent, checked against the app as of 1.1.9
+(`applicationId` `dev.baucord`, decided). **Verdict:** nothing on
+these pages blocks us that is not already a planned item. The open
+ones are the AAB (MOB-5) and the signing setup (§4). The policy
+centre's own requirements are the §3 step 2 list.
+
+| page | what it asks of us | where we stand | to do |
+|---|---|---|---|
+| Developer Program Policy (the index) | It summarises the policy areas. The detailed rules (UGC, account deletion, permissions, foreground services, Data safety) are the pages in §9. | Already mapped in §3: MOB-4 report and block, MOB-14 account deletion (the Data safety "deletion options" date was 2023-12-07), MOB-15 terms, LEG-5 privacy policy, MOB-11 service types. The manifest still declares `microphone\|mediaPlayback` (decision 3). There are no ads, payments or third-party SDKs. Android has no self-updater and downloads no code. | §3 step 2 as written. In the listing, do not name or look like another chat app (impersonation, store listing policy). LEG-2/LEG-3 attributions and notices. |
+| Advance notice to App Review (answer 6320428) | Advance notice is accepted only for 8 cases: third-party IP permission, government, healthcare, Korean gambling, accessibility services, non-profits, law enforcement, regulators. | None of them applies. There is no AccessibilityService in the manifest and no third-party brand assets. | Nothing. Google says other requests may get no reply. |
+| Android App Bundle (developer.android.com) | New apps must publish an AAB. Compressed download ≤ 4 GB. No `.obb` files. Sideloaded split APKs fail on Android 10+. | **Not yet**: CI builds an APK only (MOB-5). Size, `.obb` and dynamic resource tables are non-issues. The release build is not debuggable. | MOB-5: `bundleRelease`. Keep the GitHub APK *universal* (`assembleRelease`): never hand out the split APKs Play generates. |
+| Play App Signing terms | Publishing an AAB means using Play App Signing. You either give Google your key or it generates one. Google keeps a copy indefinitely. A key handed over cannot be retrieved. Google may generate and optimise APKs "for performance, security and/or size" but "will not change the purpose". Terms can change with notice. | Acceptable. We give our own key (§4) and keep our original. Play's APKs will not be byte-identical to our builds. | Accept them in the Console. |
+| Use Play App Signing (answer 9842756) | A new app starts on Google-generated (quantum-ready hybrid) keys. Change to your own **before a release reaches open testing or production**. Own key: **RSA ≥ 2048**. The upload key must be RSA ≥ 2048 and "should be different" from the signing key. 2-Step Verification for every Console user. Register the app-signing fingerprints with any API that checks them. Update `assetlinks.json` for App Links. | Plan matches (§4): our key for both Play and GitHub ("Option 2" on that page), also used as the upload key (allowed: Google says "should", not "must"). **Unverified:** the release key's algorithm and size. No Google sign-in, Maps or App Links (no `autoVerify` filter), so no fingerprints to register. | `keytool -list -v -keystore baucord-release.jks` must say RSA 2048+. Switch to our key before the first upload (allowed until open testing, but internal testers would have to reinstall). Turn on 2SV. |
+| Export compliance (answer 113770) | US export law may apply to encryption, including open source. You decide; Google blocks embargoed countries. | Standard cryptography only: TLS 1.3 over QUIC (rustls, ring), SHA-2, device keys. A free mass-market app: ECCN 5D992.c under §740.17(b)(1). Since BIS's 2021-03-29 rule this needs no licence and no self-classification report, and an email notification only for *non-standard* crypto. BIS's page still describes that notification for public source code. | Nothing to file for Play. If the source goes public, the BIS/NSA email is a few lines and cheap insurance. Not legal advice. The iOS side stays MOB-6. |
+
+Sources: play.google/developer-content-policy; support.google.com/googleplay/android-developer/answer/6320428, /9842756, /113770; developer.android.com/guide/app-bundle; play.google.com/about/play-app-signing-terms.html; bis.gov/learn-support/encryption-controls/encryption-items-not-subject-to-ear; thompsonhine.com/publications/bis-eliminates-most-mass-market-encryption-reporting-obligations.

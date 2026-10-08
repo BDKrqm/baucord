@@ -199,7 +199,14 @@ What stands between this and "production for strangers":
   speaker for the session** (`audio/src/lib.rs` ~1106, ~1144, ~959;
   `client/src/voice.rs` ~547 ignores `service()`). Pending flags for
   both sides on any failed reopen, a `DeviceLost/Restored` event, the
-  mic button shows it.
+  mic button shows it. 2026-10-08, seen in the field (a Windows log:
+  the playback device vanished, the reopen failed, the room stayed
+  silent for 35 minutes until a restart): the pending flags are done
+  (`output_pending` beside `input_pending`; every failed reopen, the
+  user's own device pick included, is retried every 2 s; a missing
+  output no longer closes and reopens a working microphone each try)
+  and host-tested (`a_playback_that_failed_is_retried`). Still open:
+  the event and the mic button.
 - [ ] **CLI-11 [P0][S] Windows lowers other apps while baucord is in
   voice** (user reports, 1.1.7). The echo canceller's Communications
   streams trigger Windows' "reduce other sounds by 80 %" (AEC-SPEC
@@ -212,6 +219,68 @@ What stands between this and "production for strangers":
   software canceller (AEC-SPEC §8) or Auto keeping speakers off the
   call path — decide then. Meanwhile users: `control mmsys.cpl,,3` →
   "Do nothing".
+- [x] **CLI-12 [P1][S] Windows: cpal kept the native backend from
+  reopening.** Done 2026-10-08 (§7). `AudioOutput::new` and
+  `AudioInput::new` asked cpal for the device and its config before
+  `start()` tried the native WASAPI stream, which needs neither. In the
+  same log, after the device change cpal's default-device activation
+  failed on every retry with "Cannot change thread mode after it is
+  set" (`RPC_E_CHANGED_MODE`) until the app restarted, so the native
+  path was never tried. Now Windows asks cpal only when the native
+  stream will not open (the ring grows then if cpal's rate needs it).
+  Windows-only code, not compiler-checked here. To verify on Windows:
+  in voice, unplug the headset (or disable the playback device in
+  `mmsys.cpl`) and plug it back — sound returns within ~2 s with
+  `Output started late` or a fresh `Native WASAPI render:` line, no
+  restart.
+- [x] **CLI-13 [P1][S] The video bitrate ladder never stepped down on
+  a collapsed uplink.** Done 2026-10-08 (§7). A 1080p60 share (8 Mbit/s)
+  ran two minutes with nearly every group abandoned and the viewer at
+  0.4 fps, and the ladder never moved: QUIC's window had shrunk to 2 KB,
+  so the uplink read ~200 kbit/s, and a step down wants a sample that
+  carried a quarter of the rung — else it is taken for an idle screen.
+  Now the screen thread counts what the encoder offered, and a lossy
+  sample also counts when the offer was a quarter of the rung, or at
+  least 250 kbit/s and twice what went out (`client/src/screen.rs`
+  `LinkSample`; host tests with the field numbers). To verify: a share
+  on a capped uplink logs `bitrate ladder: 100% → 50%` within ~4 s of
+  a `sharing` line with abandoned groups, and `25%` ten seconds later. Not
+  done: the sharer's own voice lost 45 % beside the video in the same
+  session — voice and video share the congested window.
+- [ ] **CLI-14 [P2][S] A stream's own audio output never sheds
+  latency when it resamples.** Found reading `audio/src/stream/output.rs`
+  for MOB-18: on a device that is not at 48 kHz, decoded audio waits in
+  the worker's accumulator while the ring is full and is never
+  trimmed, so a network burst or clock drift adds delay for good (the
+  48 kHz path drops the excess instead). Rare — the output asks for
+  48 kHz first — but it is an A/V drift. The `viewing` line's `audio
+  … ms queued` shows it if it happens; drain to a target like the
+  phones' mix does (`stream::mix`, by playing slightly faster).
+- [ ] **CLI-15 [P1][S] AMD keyframes too large to send.** On AMF
+  (FFmpeg 7.1, which cannot force an IDR, so every requested keyframe
+  is a fresh session) the session's first frame ignores the VBV and
+  `max_au_size`: 287–522 KB against the wire's 275,400 B (255 chunks ×
+  1,080 B), dropped, a new keyframe forced, too large again — a viewer
+  froze ~30 s on detailed 1080p content (2026-10-08 logs; one session
+  opened at 2.1 Mbit/s still made a 425 KB first frame, so the bitrate
+  is not the lever). 2026-10-08, 1.1.9: a frame too large raises a
+  quantizer floor (`qmin` 24 → 28 → 32 → 36) the next session opens
+  with, relaxed one step per 30 s without one; the `sharing` line
+  counts them and shows the floor. Checked with libx264 here (QP
+  15.9 → 36.0 on the first frame); whether AMF honours `MIN_QP` from
+  its first frame is for the next AMD log: after the first drop or two
+  there should be none. If it does not: FFmpeg 8's amfenc forces IDRs
+  without a new session, or a 2-byte chunk count in the video format
+  (wire v4) lifts the limit.
+- [ ] **CLI-16 [P2][M] Desktop voice latency: what is left.** The
+  2026-10-08 review: native WASAPI cost nothing (event-driven, MMCSS,
+  20 ms render buffer). Our code adds ~74 ms one way; the estimate
+  mouth to ear is 135–175 ms. Nine candidates, ranked, in
+  `LATENCY-SPEC.md`. First: measure (a clap test, and buffer depths
+  in the voice summary). Then LAT-1 (late packets push playback 20 ms
+  later), LAT-2 (share audio waits for the video tick) and LAT-3 (the
+  32 KiB datagram send buffer holds seconds, not ~200 ms). Parked
+  until the Play release is out.
 - [ ] **CLI-10 [P2] Smaller client items** *(review)*: auto-reconnect
   gives up after ~60 s (5 tries) — phones on a train need longer;
   server addresses must be IP literals (no DNS — also an App Review
@@ -277,6 +346,33 @@ What stands between this and "production for strangers":
   telemetry every 10 s and (on request) logs. Who the controller is when
   anyone can host a server needs a deliberate answer; the official
   server's retention needs writing down; telemetry may need consent.
+  2026-10-08: `web/privacy.html` drafted from the code, as it behaves
+  today (an inventory of every table, log and upload). It covers the
+  apps and the official server; other servers' operators answer for
+  their own. Signed 0x0 Studios, contact support@mpw.sh. Left: the
+  terms page (MOB-15), the
+  account-deletion page (MOB-14), the Data safety form from §6, and
+  LEG-6, which would let the policy promise less retention.
+- [ ] **LEG-6 [P1][S] What the privacy policy has to admit today.**
+  Found writing it (2026-10-08). Each fix shortens a paragraph of
+  `web/privacy.html`:
+  - The server log writes the text of every chat message
+    (`server.rs` ~1985, `[{username}]: {text}`), the names of files
+    posted (`files.rs` ~238), who sends DMs to whom and invite codes.
+    That is SEC-10; doing it removes a paragraph of the policy.
+  - Uploaded client logs (`<data>/logs/`) are never deleted. Prune them
+    after 30 days, and on purge.
+  - The 90-day message prune (`store.rs` `prune`, `DELETE FROM
+    messages`) does not lower the attachments' `refs`, so their files
+    are kept for good. Release them in the same transaction.
+  - Purge leaves telemetry rows, read markers, DM conversation rows and
+    uploaded logs. The CLI purge also keeps the files.
+  - The in-app note (`privacy-note`) says "Nothing goes anywhere else".
+    On the desktop the update check and pasted image links do; nor does
+    it say that the server keeps messages. Point it at the policy.
+  - The deployed server writes its log to stderr; compose now keeps
+    5 × 10 MB of it (2026-10-08), so its age depends on traffic.
+    Keep it for a fixed time instead.
 - [ ] **REL-1 [P0][S–M] A CI gate.** `ci.yaml` and `pr-check.yaml` are
   `.disabled`; `release.yml` runs `cargo build` only, without
   `--locked`; the versions test (`protocol/tests/versions.rs`) never
@@ -297,6 +393,11 @@ What stands between this and "production for strangers":
   `contents: write` workflow-wide and `checkout` persists the token.
   Build without secrets, sign in a last step, `contents: read`,
   `persist-credentials: false`, upload from a separate job.
+  2026-10-08: Android builds without secrets in its environment,
+  signs in later steps and no longer persists the token (D62). Still
+  on the same runner, so a build script could tamper with the
+  signing tools: a separate signing job finishes it. `contents: write`
+  is still workflow-wide; iOS is unchanged.
 - [ ] **REL-4 [P1][S] Pin and verify build inputs.** Actions by SHA
   (`dtolnay/rust-toolchain@stable` is a branch), top-level
   `permissions: {}`, SHA-256 for the FFmpeg, PipeWire and x264 sources
@@ -319,14 +420,23 @@ What stands between this and "production for strangers":
   the site promises SHA256SUMS that are never produced, "about 40 MB of
   RAM" (100–200 MB on macOS/Linux) and "a desktop app"; Google Fonts are
   loaded from Google (privacy); no crate declares `license`.
-- [ ] **OPS-1 [P1][S] Deployment drift.** `scripts/setup.sh` requires
-  `docker-compose.yml` but the repo has `docker-compose.yaml` (it exits
-  at once); it greps for an `Invite:` line the server never prints;
-  the readme says UDP 51000 while the committed compose and
-  `config/baucord.yaml` use 5000; that config commits a public IP and
-  a 1.0 room password ignored since 1.1. Also: no `HEALTHCHECK`, no
-  log rotation, no `read_only`/`cap_drop`/`no-new-privileges`, base
-  images not pinned by digest, amd64 only.
+- [ ] **OPS-1 [P1][S] Deployment drift.** *2026-10-08, the drift part
+  (§7):* `setup.sh` accepts the compose file as named, prints the
+  `Address for clients` and `Bootstrap invite` lines, and reads the
+  port from the config. Compose and the Dockerfile use 51000, and
+  compose rotates the log (5 × 10 MB). A new host starts from
+  `config/baucord.example.yaml`, which a server test keeps loading as
+  documented. The guide is on the website (`web/deploy.html`). Compose
+  runs the published `mpwsh/baucord:latest`, which setup.sh pulls.
+  `web.yaml` publishes compose, the scripts and the example config to
+  `baucord.com/deploy/`, so a host needs no clone. Left:
+  `config/baucord.yaml` is still the official server's own, committed
+  with its public IP, port 5000 and a 1.0 room password. Take it out
+  of the repo once the host has its own copy (a pull that deletes it
+  would break the bind mount, and a changed channel list applies
+  live). Also: no `HEALTHCHECK`, no
+  `read_only`/`cap_drop`/`no-new-privileges`, base images not pinned
+  by digest, amd64 only.
 - [ ] **OPS-2 [P1][M] Crash reporting.** Release builds abort on panic
   and write the hook's lines to a local log; native crashes (Skia,
   AAudio, JNI, FFmpeg) leave nothing a user can reach; Android symbols
@@ -376,19 +486,23 @@ is not decided yet.
   device key registered by invite. Protocol (a report message, a
   per-user block list), server (a moderator queue in the admin panel)
   and UI.
-- [ ] **MOB-5 [P0][M] Store pipelines.** Play wants an AAB (the workflow
-  builds an APK) and a decision on Play App Signing before the first
-  upload (sideloaded installs cannot update from Play if the key
-  changes): `bundleRelease` beside `assembleRelease`, the AAB signed
-  with a new upload key, our release key given to Play as the app
-  signing key (PLAY-STORE.md §4), native debug symbols in the bundle,
-  one `versionCode` counter for both; upload by hand first, then the
-  Play Developer API from CI. iOS exports Ad Hoc only
-  (`ios-release.yml` ~148, ~231) — add App Store/TestFlight export and
-  symbol upload.
+- [ ] **MOB-5 [P0][M] Store pipelines.** *Android done 2026-10-08
+  (ANDROID-SPEC D62, §7):* `android-release.yml` builds the AAB beside
+  the APK in one Gradle run, with one versionCode. A step after the
+  build signs both the APK and the AAB with the release key, which
+  is also the upload key (one key, by choice). The native debug
+  symbols are in the bundle, which is a workflow artifact. Left: on Play's side, give it our release key as the app
+  signing key, which is also the upload key (PLAY-STORE.md §4, the
+  user); later, upload from CI through the Play Developer API. iOS
+  exports Ad Hoc only (`ios-release.yml` ~148, ~231): add the App
+  Store/TestFlight export and the symbol upload.
 - [ ] **MOB-6 [P1][S] Encryption export compliance.** No
   `ITSAppUsesNonExemptEncryption` in the Info.plist; rustls/ring are
-  non-Apple cryptography (a BIS self-classification is likely).
+  non-Apple cryptography (a BIS self-classification is likely). Play:
+  nothing to file (checked 2026-10-08, PLAY-STORE.md §10). Standard
+  crypto in a free mass-market app is 5D992.c, and since BIS's
+  2021-03-29 rule it needs no report; the email notification is only
+  for non-standard crypto.
 - [ ] **MOB-7 [P1][S] Android moves the identity key to a new phone**:
   `allowBackup="false"` no longer covers device-to-device transfer for
   apps targeting 31+. Add `dataExtractionRules` excluding everything
@@ -421,11 +535,13 @@ is not decided yet.
   room, `specialUse` (with its manifest explanation) in the lobby,
   `mediaPlayback` dropped, the wake lock only in a room
   (PLAY-STORE.md §5).
-- [ ] **MOB-12 [P1][M] Stream audio on phones** ignores the chosen
-  output and the echo canceller (`client/src/screen.rs` ~1580 spawns
-  its decoder on the default device; AEC-SPEC E7/E10): a speaker user
-  echoes the stream back. Route stream audio through the voice render
-  mix. (Discussed 2026-10-07 and put on hold by the user.)
+- [x] **MOB-12 [P1][M] Stream audio on phones.** Done 2026-10-08 (§7;
+  ANDROID-SPEC D56, IOS-SPEC D52): on the call path the stream plays
+  through the voice output. To verify on a phone, on speakers: the
+  stream is heard, the volume buttons change it, the log says `Stream
+  audio: playing through the voice output (call path)`; others hear no
+  stream audio from that phone's open microphone; plugging headphones
+  in moves it back to its own output (`back on its own output`).
 - [ ] **MOB-13 [P2] Smaller phone items**: the service notification
   says "Connected" during a reconnect and has no Leave/Mute actions;
   Android does not persist settings on `Stop` (iOS does); iOS build
@@ -453,6 +569,26 @@ is not decided yet.
 - [ ] **MOB-17 [P0][S] Reviewer access.** A long-lived `member` invite
   on the official server, a channel with history, written steps for
   Play's App access section; the server kept up through every review.
+- [ ] **MOB-18 [P1][M] A mid-range phone cannot keep up with a 60 fps
+  stream.** The Galaxy A07 (MediaTek, `c2.mtk.avc.decoder`) decodes
+  ~30 of 60 fps at 1080p: every frame costs ~22–32 ms, the picture
+  drifts behind the audio until the buffer jumps to a keyframe, and
+  repeats. 30 fps keeps up, barely. 2026-10-08: the stream logs said
+  where the time went — codec 7–10 ms, our YUV → RGBA conversion
+  24–30 ms on the decode thread, one core — and that the freezes were
+  the jitter buffer's 90-frame cap (1.5 s at 60 fps) emptying itself
+  inside a 2 s keyframe interval. Fixed the same day, for every phone
+  (§7): the decode thread only copies the planes out; the present
+  thread converts only the newest picture of each stream, on up to
+  four cores, straight into the UI's buffer; the cap is 3 s of frames
+  at the stream's rate, and a picture ≥ 1 s behind live jumps to a
+  buffered keyframe. The A07 then showed ~51 of 60 with its decode
+  thread half idle and *preparing* at 3.5 ms: MediaCodec handed over
+  pictures in pairs and the newest-only drain threw 15 % away
+  (3,799 of 25,539). 1.1.9 paces them instead (`video::held`, §7).
+  Next: the A07 at 60 fps once more — *decoded* and *shown* should
+  read ~60. Real A/V sync (timestamps on stream audio) is separate
+  and later.
 
 ## 5. Milestone D — product
 
@@ -565,6 +701,113 @@ is not decided yet.
   a room, Android closes the microphone and iOS mutes it on the voice
   unit (plain streams: closed). The desktop is unchanged. The voice
   thread ticks at 250 ms while no microphone is open.
+- **2026-10-08 — MOB-12, stream audio on phones** (ANDROID-SPEC D56,
+  IOS-SPEC D52): on the call path a watched stream is mixed into the
+  voice output — call volume, call route, inside the echo canceller.
+  Prompted by an Android user who never heard streams (media beside a
+  call). The stream's own output, where it is still used, now reopens
+  after its device goes away.
+- **2026-10-08 — Settings → Debug: Copy log** (ANDROID-SPEC D58,
+  IOS-SPEC D53): the end of the log (512 KB on the desktop, 128 KB on
+  a phone) onto the clipboard, its first line naming the build, the
+  platform, the time and the file it came from — a sharer's log had
+  come from a stale copy in another folder. The phones gained a
+  clipboard on the way (Android's `ClipboardManager`, iOS's
+  pasteboard), so copying an invite code works there too.
+- **2026-10-08 — 1.1.9**: (1) MOB-18, the A07's last 15 %: MediaCodec
+  finishes pictures unevenly (none in one call, two in the next) and
+  the drain kept only the newest; now every picture waits in a
+  two-deep queue (`video::held`) and each decode call hands out the
+  oldest, so they leave at the frames' own cadence, and once the
+  stream pauses (a still screen) `VideoDecoder::poll` hands out the
+  last one instead of leaving it for the next frame. (2) CLI-15: a
+  frame too large to send raises the encoder's quantizer floor for
+  the next session. (3) Logs: the system-audio gate's open/close to
+  debug (29 lines in 9 minutes of one share); closing a viewer drops
+  the stream in the screen thread (`ScreenControl::StopWatching`), so
+  it no longer writes an empty `viewing` line every 5 s, nor polls at
+  250 Hz, until the sharer stops. The same session's logs, all three
+  lined up by Copy log's header: the PC clean (60 fps, 8 Mbit/s, no
+  abandoned groups, ladder at 100 %), the iPhone 60/60/60 at 4.4 ms a
+  frame, the A07 ~51 shown. (4) Version 1.1.9 everywhere. (5) Stereo
+  streams on the phones' call path: `(L + R) / 2` silenced whatever was
+  out of phase between the channels (audiocheck.net's polarity test
+  played nothing on the A07; a game's spatial sound came and went);
+  `stream::downmix` mixes per frequency at an aligned phase instead
+  (ANDROID-SPEC D60, IOS-SPEC D54). The next A07 log, same session as
+  the PC's: ~60 fps shown at 1024x768 and ~58 at 1080p, 106 of 12,420
+  pictures passed over; one AMD frame too large (307 KB), floor 24,
+  none after, relaxed 30 s later. (6) The phones' stream mix no longer
+  drops 150 ms at once when a source passes 300 ms queued (a skip;
+  one burst then left the A07 at 250–290 ms for a minute): past
+  180 ms it plays 1–4 % faster until it is back at 120 ms, ~10 s for
+  160 ms over, nothing skipped or repeated; only past 400 ms is
+  anything dropped (ANDROID-SPEC D61, IOS-SPEC D55).
+- **2026-10-08 — MOB-5, Android: an app bundle for Play**
+  (ANDROID-SPEC D62): the release workflow makes
+  `baucord-<tag>-android.aab` beside the APK. It is signed with the
+  release key, which is also the upload key, and has the native
+  debug symbols inside, and is a workflow artifact for uploading by
+  hand. Both outputs are signed after the build, so the keys are not
+  in the environment of cargo and the build scripts (REL-3 in part).
+  The APK is published before the bundle is signed. The first upload,
+  1.1.9 to internal testing: PLAY-STORE.md §3 step 4. Also a privacy
+  policy draft for the website, `web/privacy.html` (LEG-5 in part).
+- **2026-10-08 — the hosting guide on the website, OPS-1's drift**:
+  `web/deploy.html`, from the readme's "Server" and "Deploying a
+  server" sections, for people who will never open the repo. It covers
+  the server from the download (any computer) and with Docker on a
+  Linux host, the first admin invite, configuration, the command line,
+  backups and the identity key, updating, the log, monitoring, and
+  what an operator holds. The site's hosting steps lost the 1.0 room
+  password and port 5000 (en, es, pt-BR) and link the guide. The
+  deploy files now match the readme (OPS-1). There is a new
+  `config/baucord.example.yaml` with a server test,
+  `the_example_config_loads_as_documented`. Compose uses the published
+  image. `web.yaml` serves the compose file, the scripts and the example
+  config from `/deploy/` and shows the compose file in the guide.
+- **2026-10-08 — MOB-18, phones keep up with a stream**: from the first
+  `viewing` lines of a Galaxy A07 — codec 7–10 ms a frame, our colour
+  conversion 24–30 ms, and freezes. (1) *Convert only what is shown*:
+  Android's decoder hands over its YUV planes (`video::PictureFormat`)
+  and the frontend's present thread drains its queue, keeps the newest
+  frame per stream and converts that one — frames it cannot get to are
+  skipped, never converted, so the picture stays live with its sound
+  and the frame rate drops instead. (2) *Cheaper*: `yuv::to_rgba_into`
+  splits a picture into bands of rows over up to four cores (half the
+  device's) with fast paths for I420 and NV12/NV21, writing straight
+  into the `SharedPixelBuffer` the UI draws; each stream reuses a ring
+  of three such buffers and the decoders' buffers go round
+  `video::pool` — no 8 MB allocation, zero-fill and page faults per
+  frame, on the desktop too. (3) *No freezes from the cap*: the jitter
+  buffer holds 3 s of frames at the stream's rate (at least one
+  keyframe interval; it was 90 frames, 1.5 s at 60 fps) and a frame
+  ≥ 1 s behind live jumps to a newer buffered keyframe. The log line
+  reads `codec + output` and `preparing X ms each`.
+- **2026-10-08 — stream logs** (MOB-18): one summary line per stream
+  every 5 s, `viewing …` for each watched stream (in / decoded / shown
+  per second, dropped and lost frames, decoding busy %, codec vs
+  colour-conversion time, how far behind live, ms to screen, stream
+  audio queued) and `sharing …` for our own (captured, encoded,
+  keyframes, encode time, offered vs sent, abandoned groups, path
+  loss, ladder and pace) — warn only when something is wrong — plus a
+  line when a stream falls behind, catches up, freezes or resumes.
+  Gone: `Slow decode` / `Slow frames` / `Slow present` every second,
+  `Requesting keyframe` per request, `seq jumped` per audio gap,
+  `Video frame … dropped` per group, `video uplink` and `link:` every
+  2 s while sharing, `share telemetry` / `viewer telemetry`, and the
+  AMF encoder's two lines per keyframe. `video::timing` is retired.
+- **2026-10-08 — CLI-13, the video ladder**: from a share the Android
+  viewer saw at 0.4 fps — the sharer's uplink was losing ~80 % and the
+  ladder, reading the collapsed send rate as an idle screen, held
+  8 Mbit/s. It now also weighs what the encoder offered.
+- **2026-10-08 — CLI-12, and CLI-9's retries**: a Windows user's log
+  (the phone plugged into the PC for `run.ps1`; Windows' playback
+  device went away twice) showed both: a failed reopen was never
+  retried (the room silent until a restart), and the reopen asked cpal
+  first, whose "Cannot change thread mode after it is set" kept the
+  native backend from being tried. Every side that is not open is now
+  retried every 2 s, and Windows asks cpal only as the fallback.
 - **2026-10-07 — Android release CI** (ANDROID-SPEC D54): the v1.1.7
   run broke in `setup-android@v3` (the obsolete `tools` package is gone
   from Google's repository); now `setup-android@v4` and the other

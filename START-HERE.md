@@ -3,7 +3,7 @@
 baucord is a voice, text and screen-sharing app in Rust: a self-hosted
 relay server (QUIC, no media mixing), a desktop client for Windows,
 macOS and Linux, and clients for Android and iPhone that run the same
-Rust engine and the same Slint UI. It is in daily use: 1.1.8 on every
+Rust engine and the same Slint UI. It is in daily use: 1.1.9 on every
 platform, desktop users on the in-app updater, Android as a sideloaded
 APK, iPhone as an Ad Hoc build, the official server in Docker.
 
@@ -75,8 +75,9 @@ for the work at hand (§3). Everything else is linked from here.
 | `ARCHITECTURE.md` | the runtime: threads, lanes, transport, the server tick, persistence, the client, the hosts | before server, protocol or client-core work |
 | `PERSISTENCE-SPEC.md` | the 1.1 design (accounts by device key, invites, roles, history, DMs, files, profiles, admin) — all shipped; §12 is every later decision | before touching admission, roles, history, DMs, files |
 | `AEC-SPEC.md` | echo cancellation on every platform; §12 the decisions (E1…) | before audio-path work |
-| `ANDROID-SPEC.md` | the Android client; decisions D1…D9 in §1, D10…D55 in §14 (its second table newest first) | before Android work |
-| `IOS-SPEC.md` | the iPhone client; decisions D1…D13 in §1, D14…D51 in §14 (in order) | before iOS work |
+| `LATENCY-SPEC.md` | the desktop voice latency budget and what could still be cut (LAT-1…9), parked 2026-10-08 | before latency work |
+| `ANDROID-SPEC.md` | the Android client; decisions D1…D9 in §1, D10…D62 in §14 (its second table newest first) | before Android work |
+| `IOS-SPEC.md` | the iPhone client; decisions D1…D13 in §1, D14…D55 in §14 (in order) | before iOS work |
 | `android/README.md`, `ios/README.md` | building, running and releasing each phone app | when the user builds |
 
 The specs keep their first draft at the top and a decision log at the
@@ -122,9 +123,9 @@ The full list is SESSION-GUIDE §4; these break things when forgotten:
 - **The server's identity folder must survive every deploy** — it is
   what every client has pinned.
 
-## 5. Where things stand (2026-10-07)
+## 5. Where things stand (2026-10-08)
 
-- **Version 1.1.8** everywhere; the crate map is SESSION-GUIDE §2.
+- **Version 1.1.9** everywhere; the crate map is SESSION-GUIDE §2.
 - **Desktop**: in production (Windows mostly), self-updating.
 - **Android**: voice with the platform echo canceller, chat, DMs,
   files, stream viewing (MediaCodec), Settings → Debug, notifications

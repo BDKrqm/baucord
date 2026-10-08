@@ -55,7 +55,10 @@
 
 extern crate ffmpeg_next as ffmpeg;
 
-use std::collections::VecDeque;
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
 
 use ffmpeg::{
     codec::{self, encoder, packet::Packet},
@@ -105,6 +108,19 @@ const AMF_MAX_AU_BITS: u32 = 2_000_000;
 /// hard per-frame chunking limit (~275 KB), not just under it. 1.6 Mbit
 /// ⇒ ~200 KB nominal, leaving overshoot room.
 const VBV_MAX_BITS: u32 = 1_600_000;
+
+/// The quantizer floors an encoder steps through when it makes frames
+/// too large to send (`VideoEncoder::frame_too_large`), lowest first. A
+/// fresh AMF session's first IDR ignores both the VBV and
+/// `max_au_size`: 287–522 KB against the 275 KB limit on a detailed
+/// 1080p desktop (2026-10-08), and 425 KB from a session opened at
+/// 2.1 Mbit/s — so a lower bitrate does not shrink it, but a quantizer
+/// floor binds every frame from the first. Each step roughly halves a
+/// detailed keyframe; text stays readable at all of them.
+const QP_FLOORS: [u32; 4] = [24, 28, 32, 36];
+/// A floor is relaxed one step after this long without a frame too
+/// large (re-applied with the next session, which a change opens).
+const QP_FLOOR_RELAX_AFTER: Duration = Duration::from_secs(30);
 
 /// The three rate-control numbers a session is opened with, all derived
 /// from one target so they scale together.
@@ -167,10 +183,19 @@ pub struct FfmpegEncoder {
     /// Last time [`Self::encode`] reopened the session to force an IDR
     /// (rate limiting, capture-timestamp clock).
     last_idr_reopen_ms: Option<u64>,
+    /// The session shape last logged at info (source size, output
+    /// size, scale): a reopen that only buys an IDR — every keyframe on
+    /// AMF — logs at debug, so the log says what changed, not each
+    /// keyframe (the sharer's summary line counts those).
+    logged_session: Option<(u32, u32, u32, u32, u32)>,
     /// Capture timestamp of the last IDR we forced (drives cadence).
     last_keyframe_ms: Option<u64>,
     /// Last PTS handed to the encoder — used to keep PTS strictly increasing.
     last_pts: Option<i64>,
+    /// Index into [`QP_FLOORS`] once a frame came out too large to send,
+    /// and when it last moved (relaxed after [`QP_FLOOR_RELAX_AFTER`]).
+    qp_floor: Option<usize>,
+    qp_floor_moved: Option<Instant>,
     session: Option<EncSession>,
 }
 
@@ -186,6 +211,8 @@ struct EncSession {
     out_h: u32,
     /// Scale this session's rate control was opened with, percent.
     bitrate_scale_pct: u32,
+    /// The quantizer floor it was opened with (`qmin`), if any.
+    qp_floor: Option<u32>,
     /// Reusable `FFmpeg` frame for RGBA input (source resolution).
     rgba_frame: VideoFrame,
     /// Reusable `FFmpeg` frame for YUV420P — fed to the encoder.
@@ -230,6 +257,7 @@ impl FfmpegEncoder {
                 name,
                 quality,
                 100,
+                None,
                 quality.width(),
                 quality.height(),
                 PixelFormat::Rgba,
@@ -244,8 +272,11 @@ impl FfmpegEncoder {
                         force_next_keyframe: false,
                         last_idr_out_ms: None,
                         last_idr_reopen_ms: None,
+                        logged_session: None,
                         last_keyframe_ms: None,
                         last_pts: None,
+                        qp_floor: None,
+                        qp_floor_moved: None,
                         session: None,
                     });
                 }
@@ -272,13 +303,17 @@ impl FfmpegEncoder {
         out: &mut Vec<EncodedFrame>,
     ) -> Result<(), CodecError> {
         let scale = self.bitrate_scale_pct;
+        let floor = self.qp_floor.map(|i| QP_FLOORS[i]);
         if let Some(s) = self.session.as_mut() {
             let same_source =
                 s.src_w == frame.width && s.src_h == frame.height && s.src_format == frame.format;
-            if same_source && s.bitrate_scale_pct == scale {
+            if same_source && s.bitrate_scale_pct == scale && s.qp_floor == floor {
                 return Ok(());
             }
-            let reason = if same_source {
+            let reason = if same_source && s.bitrate_scale_pct == scale {
+                let qp = |f: Option<u32>| f.map_or_else(|| "none".to_string(), |q| q.to_string());
+                format!("quantizer floor {} → {}", qp(s.qp_floor), qp(floor))
+            } else if same_source {
                 format!(
                     "bitrate scale {}% → {}% ({} → {} kbit/s)",
                     s.bitrate_scale_pct,
@@ -310,11 +345,26 @@ impl FfmpegEncoder {
             self.enc_name,
             self.quality,
             scale,
+            floor,
             frame.width,
             frame.height,
             frame.format,
         )?;
-        log::info!(
+        let shape = (
+            frame.width,
+            frame.height,
+            session.out_w,
+            session.out_h,
+            scale,
+        );
+        let level = if self.logged_session == Some(shape) {
+            log::Level::Debug
+        } else {
+            self.logged_session = Some(shape);
+            log::Level::Info
+        };
+        log::log!(
+            level,
             "encoder session: {}x{} → {}x{} ({}), {} kbit/s{}",
             frame.width,
             frame.height,
@@ -326,10 +376,11 @@ impl FfmpegEncoder {
                 "bicubic downscale + colorspace"
             },
             self.quality.scaled_bitrate(scale) / 1000,
-            if scale == 100 {
-                String::new()
-            } else {
-                format!(" ({scale}% of preset)")
+            match (scale, floor) {
+                (100, None) => String::new(),
+                (100, Some(q)) => format!(" (QP ≥ {q})"),
+                (_, None) => format!(" ({scale}% of preset)"),
+                (_, Some(q)) => format!(" ({scale}% of preset, QP ≥ {q})"),
             },
         );
 
@@ -370,7 +421,7 @@ impl FfmpegEncoder {
                 None => false,
             };
             if (self.force_next_keyframe || idr_overdue) && !recently_reopened {
-                log::info!(
+                log::debug!(
                     "encoder can't force IDRs — reopening session for one \
                      (viewer_forced={}, cadence_overdue={})",
                     self.force_next_keyframe,
@@ -395,6 +446,7 @@ impl FfmpegEncoder {
                 self.session = None;
             }
         }
+        self.relax_qp_floor(Instant::now());
         self.ensure_session(frame, &mut out)?;
 
         // Strictly increasing PTS in the 1/1000 time base. Capture
@@ -497,6 +549,32 @@ impl FfmpegEncoder {
         self.force_next_keyframe
     }
 
+    /// See [`VideoEncoder::frame_too_large`]: the next quantizer floor,
+    /// applied by the session [`Self::ensure_session`] opens next.
+    pub fn frame_too_large(&mut self) -> Option<u32> {
+        let next = qp_floor_after_oversize(self.qp_floor)?;
+        self.qp_floor = Some(next);
+        self.qp_floor_moved = Some(Instant::now());
+        Some(QP_FLOORS[next])
+    }
+
+    /// The quantizer floor in force, if any.
+    #[must_use]
+    pub fn qp_floor(&self) -> Option<u32> {
+        self.qp_floor.map(|i| QP_FLOORS[i])
+    }
+
+    /// One step back down after [`QP_FLOOR_RELAX_AFTER`] without a
+    /// frame too large.
+    fn relax_qp_floor(&mut self, now: Instant) {
+        if let (Some(i), Some(moved)) = (self.qp_floor, self.qp_floor_moved) {
+            if now.duration_since(moved) >= QP_FLOOR_RELAX_AFTER {
+                self.qp_floor = i.checked_sub(1);
+                self.qp_floor_moved = Some(now);
+            }
+        }
+    }
+
     /// See [`VideoEncoder::supports_forced_keyframes`]: everything we
     /// use honors `pict_type=I` except `FFmpeg`'s AMF wrapper (<= 7.1).
     #[must_use]
@@ -562,6 +640,24 @@ impl VideoEncoder for FfmpegEncoder {
     fn bitrate_scale_pct(&self) -> u32 {
         self.bitrate_scale_pct()
     }
+
+    fn frame_too_large(&mut self) -> Option<u32> {
+        self.frame_too_large()
+    }
+
+    fn qp_floor(&self) -> Option<u32> {
+        self.qp_floor()
+    }
+}
+
+/// The floor index after a frame too large: the first, the next, or
+/// `None` when the highest is already in force.
+fn qp_floor_after_oversize(current: Option<usize>) -> Option<usize> {
+    match current {
+        None => Some(0),
+        Some(i) if i + 1 < QP_FLOORS.len() => Some(i + 1),
+        Some(_) => None,
+    }
 }
 
 // SAFETY: These types own raw FFmpeg pointers (AVCodecContext, SwsContext,
@@ -602,8 +698,8 @@ pub struct FfmpegDecoder {
     scratch_frame: VideoFrame,
     /// Reusable `FFmpeg` frame for RGBA conversion output.
     rgba_frame: Option<VideoFrame>,
-    /// Recycled output buffer (from `return_buffer`). Empty when none.
-    rgba_buf: Vec<u8>,
+    /// The split of the last call that produced a picture.
+    last_timing: Option<crate::DecodeTiming>,
 }
 
 /// The scaler plus the source parameters it was built for.
@@ -635,7 +731,7 @@ impl FfmpegDecoder {
             decoded_frame: VideoFrame::empty(),
             scratch_frame: VideoFrame::empty(),
             rgba_frame: None,
-            rgba_buf: Vec::new(),
+            last_timing: None,
         })
     }
 
@@ -649,6 +745,7 @@ impl FfmpegDecoder {
         if encoded.data.is_empty() {
             return Ok(None);
         }
+        let started = std::time::Instant::now();
 
         let mut pkt = Packet::copy(&encoded.data);
         pkt.set_pts(Some(encoded.timestamp_ms as i64));
@@ -676,6 +773,7 @@ impl FfmpegDecoder {
         if !got_frame {
             return Ok(None);
         }
+        let decoded = started.elapsed();
 
         let w = self.decoded_frame.width();
         let h = self.decoded_frame.height();
@@ -727,8 +825,8 @@ impl FfmpegDecoder {
             .run(&self.decoded_frame, rgba_frame)
             .map_err(|e| CodecError::ColorConversion(e.to_string()))?;
 
-        // Stride-aware copy into the output buffer. Reuses a returned
-        // buffer's allocation when available; rows are appended with
+        // Stride-aware copy into the output buffer. Reuses a recycled
+        // buffer's allocation (`crate::pool`); rows are appended with
         // `extend_from_slice` so the buffer is never redundantly
         // zero-filled first (resize(n, 0) would memset multiple MB per
         // frame just to immediately overwrite every byte).
@@ -737,27 +835,28 @@ impl FfmpegDecoder {
         let row_bytes = w as usize * 4;
         let rgba_size = row_bytes * h as usize;
 
-        let mut data = std::mem::take(&mut self.rgba_buf);
-        data.clear();
-        data.reserve(rgba_size);
+        let mut data = crate::pool::take(rgba_size);
         for row in 0..h as usize {
             let src_start = row * stride;
             data.extend_from_slice(&src[src_start..src_start + row_bytes]);
         }
+        self.last_timing = Some(crate::DecodeTiming {
+            codec: decoded,
+            output: started.elapsed().saturating_sub(decoded),
+        });
 
         Ok(Some(DecodedFrame {
             data,
             width: w,
             height: h,
             timestamp_ms: encoded.timestamp_ms,
+            format: crate::PictureFormat::Rgba,
         }))
     }
 
-    /// Return a previously-decoded RGBA buffer so its allocation can be
-    /// reused by the next `decode()` call.
+    /// Return a previously-decoded buffer for reuse (`crate::pool`).
     pub fn return_buffer(&mut self, buf: Vec<u8>) {
-        // Deliberately not cleared here — decode() clears before writing.
-        self.rgba_buf = buf;
+        crate::pool::recycle(buf);
     }
 }
 
@@ -768,6 +867,10 @@ impl VideoDecoder for FfmpegDecoder {
 
     fn return_buffer(&mut self, buf: Vec<u8>) {
         self.return_buffer(buf);
+    }
+
+    fn last_timing(&self) -> Option<crate::DecodeTiming> {
+        self.last_timing
     }
 
     fn flush(&mut self) {
@@ -831,12 +934,15 @@ fn encoder_pix_fmt(name: &str) -> Pixel {
 
 /// Open one encoding session. `quality` sets the resolution bound and
 /// frame rate; the bitrate is the preset's scaled to `bitrate_scale_pct`
-/// (see [`RateControl`] for everything derived from it).
+/// (see [`RateControl`] for everything derived from it); `qp_floor` is
+/// the minimum quantizer after frames came out too large ([`QP_FLOORS`]).
+#[allow(clippy::too_many_arguments)] // one session's whole shape
 fn open_session(
     codec: ffmpeg::Codec,
     name: &str,
     quality: Quality,
     bitrate_scale_pct: u32,
+    qp_floor: Option<u32>,
     src_w: u32,
     src_h: u32,
     src_format: PixelFormat,
@@ -899,7 +1005,13 @@ fn open_session(
         (*p).color_range = ffmpeg::ffi::AVColorRange::AVCOL_RANGE_MPEG;
     }
 
-    let opts = codec_options(name, rc);
+    let mut opts = codec_options(name, rc);
+    if let Some(q) = qp_floor {
+        // `qmin` is the context's own option; avcodec_open2 applies it
+        // and every backend maps it to its minimum QP (AMF:
+        // AMF_VIDEO_ENCODER_MIN_QP, bound from the first frame).
+        opts.set("qmin", &q.to_string());
+    }
     let encoder = ctx
         .open_with(opts)
         .map_err(|e| CodecError::EncoderInit(format!("{name}: {e}")))?;
@@ -941,6 +1053,7 @@ fn open_session(
         out_w,
         out_h,
         bitrate_scale_pct,
+        qp_floor,
         rgba_frame,
         yuv_frame,
         pkt: Packet::empty(),

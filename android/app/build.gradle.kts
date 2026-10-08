@@ -85,8 +85,10 @@ android {
         // versionName is the crates' version (spec §11, D39). The
         // release workflow passes both (-PbaucordVersionCode=<run
         // number> -PbaucordVersionName=<tag>, after checking the tag
-        // is that version); local builds take the defaults, which
-        // install over anything (same or lower code).
+        // is that version). Local builds default to 1; run.ps1 passes
+        // the code already installed on the target instead, since an
+        // APK from CI or the website has a higher one and Android
+        // refuses a lower code (INSTALL_FAILED_VERSION_DOWNGRADE).
         versionCode = (project.findProperty("baucordVersionCode") as String?)
             ?.trim()?.toIntOrNull() ?: 1
         versionName = (project.findProperty("baucordVersionName") as String?)
@@ -104,7 +106,9 @@ android {
     //   BAUCORD_KEY_ALIAS=baucord
     //   BAUCORD_KEY_PASSWORD=…
     // Without them the release APK is built unsigned (adb refuses it;
-    // debug builds use the SDK's debug key automatically).
+    // debug builds use the SDK's debug key automatically). CI never sets
+    // them: android-release.yml builds unsigned and signs afterwards,
+    // the APK and the Play bundle both with this key (D62).
     val keystorePath = providers.gradleProperty("BAUCORD_KEYSTORE").orNull
     signingConfigs {
         if (keystorePath != null) {
@@ -130,6 +134,15 @@ android {
             isMinifyEnabled = false
             isShrinkResources = false
             signingConfig = signingConfigs.findByName("release")
+            // The library's symbol table (function names), taken before
+            // AGP strips it, goes into the app bundle's metadata: Play
+            // then shows crash and ANR stacks with Rust function names
+            // (D62). Not FULL: the release profile has no DWARF to give.
+            // An APK build leaves it beside the APK instead
+            // (build/outputs/native-debug-symbols/), never inside.
+            ndk {
+                debugSymbolLevel = "SYMBOL_TABLE"
+            }
         }
     }
 
