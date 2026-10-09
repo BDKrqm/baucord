@@ -4,12 +4,10 @@ on:
     branches: [main]
     paths:
       - "web/**"
-      # Published under /deploy/ for the hosting guide (web/deploy.html).
       - "docker-compose.yaml"
       - "config/baucord.example.yaml"
       - "scripts/setup.sh"
       - "scripts/monitor-net.sh"
-      # web/licenses.html follows the dependencies (licenses.yml).
       - "Cargo.lock"
       - "about.toml"
       - "licenses/**"
@@ -19,8 +17,6 @@ on:
     types: [completed]
 
 jobs:
-  # web/licenses.html, refreshed from the same commit's Cargo.lock as
-  # the apps' list (licenses.yml).
   licenses:
     if: >-
       github.event_name == 'push' ||
@@ -32,28 +28,24 @@ jobs:
   deploy:
     needs: licenses
     runs-on: ubuntu-latest
-    # Only run if: push to main OR the build workflow succeeded
     if: >-
       github.event_name == 'push' ||
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
     steps:
-      - uses: actions/checkout@v7
+      - name: Check out source
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.ref }}
-      - name: The licenses page, refreshed
+      - name: Download license files
         uses: actions/download-artifact@v8
         with:
           name: licenses
           path: .
-      - name: Stamp version into the page and its translations
+      - name: Stamp version into pages
         run: |
           VERSION=$(grep '^version' crates/desktop/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           sed -i "s/__VERSION__/$VERSION/g" web/index.html web/i18n/*.json
-      # The hosting guide's files, from the repository as they are: a
-      # Docker host downloads them from baucord.com/deploy/ (the layout
-      # setup.sh expects is in web/deploy.html). The compose file is
-      # also shown in the guide itself, in place of __COMPOSE__.
-      - name: Deploy files for the hosting guide
+      - name: Stage hosting guide files
         run: |
           set -eu
           mkdir -p web/deploy
@@ -69,7 +61,7 @@ jobs:
           page.write_text(text.replace("__COMPOSE__", html.escape(compose.rstrip("\n"))), encoding="utf-8")
           PY
           ls -la web/deploy
-      - name: Upload to R2
+      - name: Upload website to R2
         uses: jakejarvis/s3-sync-action@v0.5.1
         with:
           args: --exclude '*.zip' --exclude '*.apk' --exclude 'version' --exclude 'deploy/*'
@@ -79,9 +71,7 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_S3_ENDPOINT: https://6bcc35de83e46a771896026baf11b4ac.r2.cloudflarestorage.com
           SOURCE_DIR: web
-      # As text, so a browser shows them (read a script before running
-      # it as root) and curl saves them as they are.
-      - name: Upload the deploy files to R2
+      - name: Upload hosting guide files to R2
         uses: jakejarvis/s3-sync-action@v0.5.1
         with:
           args: --content-type 'text/plain; charset=utf-8'

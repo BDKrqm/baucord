@@ -709,6 +709,13 @@ Memory-mode servers (persistence off) still use the legacy
   `[patch.crates-io]` and kept out of the workspace (`exclude`): never
   `cargo fmt` or edit it beyond the patch, and re-apply the patch if
   the crate is upgraded (`third_party/wasapi/BAUCORD-PATCH.md`).
+- **Whatever the root `Cargo.toml` names by path must be in the
+  Dockerfile.** Cargo reads every `[patch]` while it resolves, even for
+  a crate that never uses it: the server image did not copy
+  `third_party/`, and no image was published from 1.1.8 to 1.2.0
+  (`failed to read /app/third_party/wasapi/Cargo.toml`). A new vendored
+  crate or path dependency outside `crates/` gets a `COPY` line in both
+  stages.
 - **Off screen, a phone notifies instead of chiming** (`app::alerts`):
   a DM is a notification whose tap opens the conversation; the first
   voice into empty rooms is "X joined Y". Notifications exist only while

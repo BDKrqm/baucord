@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-
 # Keep in sync with rust-toolchain.toml. The chef image ships rustup,
 # so copying rust-toolchain.toml below makes a mismatch self-correct
 # (rustup fetches the pinned version) instead of silently building
@@ -16,11 +14,15 @@ WORKDIR /app
 FROM chef AS planner
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates crates
+COPY third_party third_party
 RUN cargo chef prepare --recipe-path recipe.json
 
 # ── Build ───────────────────────────────────────────────────────────────
 FROM chef AS builder
 COPY rust-toolchain.toml ./
+# Cargo resolves every [patch] path in the workspace, so the vendored
+# crates must be present even though the server doesn't build them.
+COPY third_party third_party
 COPY --from=planner /app/recipe.json recipe.json
 # Dependencies: the cached layer. `deploy` = release + stripped symbols
 # (see the workspace profiles), the same profile the desktop ships with.

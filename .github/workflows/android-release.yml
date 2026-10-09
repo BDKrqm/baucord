@@ -1,39 +1,8 @@
-# The Android release (ANDROID-SPEC.md §11, D55, D62), built when a
-# GitHub Release is published:
-# - the APK, signed with the release key, attached to that release and
-#   put on the website's bucket (R2, beside the desktop zips) as
-#   baucord-<tag>-android-arm64.apk, the name web/index.html links to;
-# - the app bundle for Google Play, baucord-<tag>-android.aab, signed
-#   with the same key, with the native debug symbols inside. It is a
-#   workflow artifact only: download it from the run and upload it in
-#   Play Console (PLAY-STORE.md §4).
-# Both come out of one Gradle run, unsigned, and are signed in steps of
-# their own afterwards (the APK first, and published before the bundle
-# is signed), so no key or password is in the environment while cargo
-# and every build.rs run. Same runner, though: a separate signing job
-# is what would put the keys out of a build script's reach entirely
-# (PRODUCTION-PLAN REL-3).
-# Day-to-day builds are local (android/README.md); there is no push/PR
-# build on purpose.
-#
-# Secrets (repo Settings → Secrets and variables → Actions):
-#   BAUCORD_KEYSTORE_BASE64   the release keystore, base64 of the .jks
-#   BAUCORD_KEYSTORE_PASSWORD
-#   BAUCORD_KEY_PASSWORD      (empty: the keystore password)
-# One key for everything (PLAY-STORE.md §4): it signs the APK, it is
-# the app signing key Play holds a copy of, and it is the upload key
-# Play checks the bundle against.
-#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY   R2, as release.yml uses
-# Without the key both stay unsigned and are only workflow artifacts:
-# the APK is never attached to a release or put on the website, and
-# Play refuses an unsigned bundle.
-#
-# Run workflow (Actions tab) with a release tag (v1.1.9) rebuilds that
-# release: the tag's code, this branch's workflow, the APK attached to
-# the existing release. That is the way out when a release's own run
-# broke on CI itself — re-running it would not help, because a release
-# run always uses the workflow file as it was at the tag. Any other
-# input is a dry run of the selected branch (workflow artifacts only).
+# Builds the Android APK and Play bundle on release, or on a manual run with a
+# release tag. The signed APK is attached to the release and uploaded to R2;
+# the bundle is a workflow artifact for Play Console.
+# Secrets: BAUCORD_KEYSTORE_BASE64, BAUCORD_KEYSTORE_PASSWORD,
+#          BAUCORD_KEY_PASSWORD, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY.
 name: android-release
 
 on:
@@ -49,9 +18,6 @@ permissions:
   contents: write   # gh release upload
 
 jobs:
-  # The third-party notices, refreshed from this commit's Cargo.lock
-  # before the build; every platform embeds the same list
-  # (licenses.yml).
   licenses:
     uses: ./.github/workflows/licenses.yml
     with:
@@ -59,38 +25,26 @@ jobs:
 
   android:
     needs: licenses
-    # Pinned: `ubuntu-latest` moves to Ubuntu 26 on 2026-10-19; a build
-    # this toolchain-heavy should change images on purpose.
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
       TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
-      # The release key's alias. Not a secret: as one, every "baucord"
-      # in the log (file names included) was masked as ***.
+      # Not a secret: GitHub masks secret values everywhere in the log.
       KEY_ALIAS: baucord
     steps:
-      - uses: actions/checkout@v7
+      - name: Check out source
+        uses: actions/checkout@v7
         with:
-          # The release upload uses GH_TOKEN; nothing needs the token in
-          # .git/config, where every build script could read it.
           persist-credentials: false
-          # A dispatch naming a release tag builds that tag's code; else
-          # the event's own commit (the release's tag, the chosen branch).
           ref: ${{ github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.tag, 'v') && github.event.inputs.tag || '' }}
 
-      # Settings → Licenses as of this commit (the licenses job): the
-      # committed copy may lag behind Cargo.lock.
-      - name: Third-party notices, refreshed
+      - name: Download license files
         uses: actions/download-artifact@v8
         with:
           name: licenses
           path: .
 
-      # A release tag is the crates' version: every platform ships the
-      # number in its crate (SESSION-GUIDE.md §4), so a v1.1.9 tag on
-      # 1.1.8 crates would label the APK with a version the app itself
-      # does not report. Manual dry runs (no "v" tag) skip the check.
-      - name: Tag matches the crates' version
+      - name: Check tag matches crate version
         if: startsWith(env.TAG, 'v')
         run: |
           set -eu
@@ -101,19 +55,14 @@ jobs:
           fi
           echo "version $CRATE"
 
-      # Gradle 8.14 and Slint's build.rs (javac + d8) run on 17–24; never
-      # 25 (spec §3).
-      - uses: actions/setup-java@v5
+      - name: Set up Java 21
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "21"
 
-      # cmdline-tools + sdkmanager on PATH, ANDROID_HOME/ANDROID_SDK_ROOT
-      # exported, licences accepted. The packages themselves next. v3
-      # installed the obsolete `tools` package by default, which Google's
-      # repository no longer lists ("Failed to find package 'tools'",
-      # 2026-10-07); v4 does not, and the list is spelled out anyway.
-      - uses: android-actions/setup-android@v4
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
         with:
           packages: platform-tools
 
@@ -122,8 +71,6 @@ jobs:
           set -eux
           yes | sdkmanager --licenses >/dev/null || true
           LIST=$(sdkmanager --list 2>/dev/null)
-          # Newest of each: NDK r29, Build-Tools 36 (plus 35.0.0, AGP
-          # 8.13's own default), the SDK's cmake (brings ninja).
           NDK=$(echo "$LIST" | grep -oE 'ndk;29\.[0-9.]+' | sort -V | tail -1)
           BT=$(echo "$LIST"  | grep -oE 'build-tools;36\.[0-9.]+' | sort -V | tail -1)
           CM=$(echo "$LIST"  | grep -oE 'cmake;[0-9.]+' | sort -V | tail -1)
@@ -131,35 +78,28 @@ jobs:
           sdkmanager "platforms;android-36" "$BT" "build-tools;35.0.0" "$NDK" "$CM" "platform-tools"
           NDK_DIR="$ANDROID_HOME/ndk/${NDK#ndk;}"
           echo "ANDROID_NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
-          # skia-bindings reads this name, only if it ever builds Skia
-          # from source instead of downloading the prebuilt.
           echo "ANDROID_NDK=$NDK_DIR" >> "$GITHUB_ENV"
           echo "$ANDROID_HOME/${CM/;//}/bin" >> "$GITHUB_PATH"
 
-      # rust-toolchain.toml picks the Rust version; only the Android
-      # target is added to it.
-      - name: Rust toolchain + target
+      - name: Install Rust toolchain and Android target
         run: |
           set -eux
           rustup toolchain install
           rustup target add aarch64-linux-android
           rustup show active-toolchain
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
         with:
           key: android-release-arm64
 
-      - name: cargo-ndk
+      - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
 
-      # One Gradle run: the APK for the website and GitHub, the bundle
-      # for Play — the same native library, versionCode and versionName.
-      # No signing properties here: both come out unsigned.
-      - name: Build the release APK and bundle (arm64-v8a)
+      - name: Build release APK and bundle (arm64-v8a)
         working-directory: android
         run: |
           set -eux
-          # Git on Windows commits scripts without the executable bit.
           chmod +x gradlew
           cargo ndk --version
           ./gradlew --no-daemon assembleRelease bundleRelease \
@@ -168,27 +108,17 @@ jobs:
             -PbaucordVersionName="${TAG#v}"
           ls -la app/build/outputs/apk/release/ app/build/outputs/bundle/release/
 
-      - name: 16 KB page-size check (spec §11)
+      - name: Check 16 KB page alignment
         run: |
           set -eux
           SO=android/app/src/main/jniLibs/arm64-v8a/libbaucord_android.so
           READELF="$ANDROID_NDK_HOME"/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf
           "$READELF" -l "$SO" | grep LOAD
-          # Every LOAD segment's alignment column must read 0x4000.
           if "$READELF" -l "$SO" | grep LOAD | grep -v 0x4000; then
             echo "a LOAD segment is not 16 KB aligned"; exit 1
           fi
 
-      # Signing: each key exists only in its own step, as a file in
-      # RUNNER_TEMP deleted on exit. The APK first, and published before
-      # the bundle is touched, so a problem with the bundle never holds
-      # back the website and the GitHub release.
-      #
-      # The APK: page-aligned (16 KB, the uncompressed .so) and signed
-      # with the release key — the key every sideloaded install has, so
-      # they keep updating. Dry runs are signed too, so they install
-      # over a release for testing.
-      - name: Sign the APK
+      - name: Sign APK
         id: apk
         env:
           RELEASE_KS_B64: ${{ secrets.BAUCORD_KEYSTORE_BASE64 }}
@@ -200,20 +130,15 @@ jobs:
           APK_IN=android/app/build/outputs/apk/release/app-release-unsigned.apk
           KS="$RUNNER_TEMP/release.jks"
           trap 'rm -f "$KS"' EXIT
-          # An empty key password: the key shares the keystore's.
           RELEASE_KEY_PASS="${RELEASE_KEY_PASS:-$RELEASE_KS_PASS}"
           export RELEASE_KS_PASS RELEASE_KEY_PASS
           "$BT/zipalign" -P 16 -f 4 "$APK_IN" aligned.apk
-          # The desktop zips' pattern (baucord-v1.1.7-win-x64.zip): the
-          # website builds this name from its version.
           if [ -n "$RELEASE_KS_B64" ]; then
-            # Whitespace and CRs a pasted secret may carry break base64 -d.
             printf '%s' "$RELEASE_KS_B64" | tr -d ' \r\n' | base64 -d > "$KS"
             APK="baucord-${TAG}-android-arm64.apk"
             "$BT/apksigner" sign --ks "$KS" --ks-key-alias "$KEY_ALIAS" \
               --ks-pass env:RELEASE_KS_PASS --key-pass env:RELEASE_KEY_PASS \
               --v4-signing-enabled false --out "$APK" aligned.apk
-            # The certificate's SHA-256 the way Play Console prints it.
             "$BT/apksigner" verify --print-certs "$APK" \
               | awk '/certificate SHA-256 digest/ { d = toupper($NF); gsub(/../, "&:", d); sub(/:$/, "", d); print "release key SHA-256: " d }'
             echo "SIGNED=1" >> "$GITHUB_ENV"
@@ -226,29 +151,21 @@ jobs:
           "$BT/zipalign" -c -P 16 4 "$APK"
           echo "name=$APK" >> "$GITHUB_OUTPUT"
 
-      # Dry runs and unsigned builds: an artifact to download. Not
-      # zipped, so it downloads as the .apk itself.
-      - uses: actions/upload-artifact@v7
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v7
         with:
           path: ${{ steps.apk.outputs.name }}
           archive: false
           if-no-files-found: error
 
-      # A published release (or a rebuild of one) with a signing key: the
-      # APK joins its assets. A rebuild of a tag with no release fails
-      # here, after the artifact is safe.
-      - name: Attach to the release
+      - name: Attach APK to release
         if: ${{ env.SIGNED == '1' && (github.event_name == 'release' || startsWith(env.TAG, 'v')) }}
         env:
           GH_TOKEN: ${{ github.token }}
           APK: ${{ steps.apk.outputs.name }}
         run: gh release upload "$TAG" "$APK" --clobber --repo "$GITHUB_REPOSITORY"
 
-      # The same APK on the website: R2's bucket root, where release.yml
-      # puts the desktop zips and web.yaml the page. Explicit content
-      # type: browsers then save it as an .apk the phone offers to
-      # install.
-      - name: Stage for the website
+      - name: Stage APK for website
         if: ${{ env.SIGNED == '1' && (github.event_name == 'release' || startsWith(env.TAG, 'v')) }}
         env:
           APK: ${{ steps.apk.outputs.name }}
@@ -256,7 +173,7 @@ jobs:
           set -eux
           mkdir -p r2-upload
           cp "$APK" r2-upload/
-      - name: Upload to R2
+      - name: Upload APK to R2
         if: ${{ env.SIGNED == '1' && (github.event_name == 'release' || startsWith(env.TAG, 'v')) }}
         uses: jakejarvis/s3-sync-action@v0.5.1
         with:
@@ -268,12 +185,7 @@ jobs:
           AWS_S3_ENDPOINT: https://6bcc35de83e46a771896026baf11b4ac.r2.cloudflarestorage.com
           SOURCE_DIR: r2-upload
 
-      # The bundle for Play, signed with the same release key (jarsigner,
-      # as Play asks): Play checks it against the upload key registered
-      # in Play Console — this key — and signs what it installs with its
-      # copy of the same key (PLAY-STORE.md §4). The certificate's
-      # SHA-256 is printed to compare with Play Console.
-      - name: Sign the bundle
+      - name: Sign app bundle
         id: aab
         env:
           RELEASE_KS_B64: ${{ secrets.BAUCORD_KEYSTORE_BASE64 }}
@@ -284,7 +196,6 @@ jobs:
           AAB_IN=android/app/build/outputs/bundle/release/app-release.aab
           KS="$RUNNER_TEMP/release.jks"
           trap 'rm -f "$KS"' EXIT
-          # An empty key password: the key shares the keystore's.
           RELEASE_KEY_PASS="${RELEASE_KEY_PASS:-$RELEASE_KS_PASS}"
           export RELEASE_KS_PASS RELEASE_KEY_PASS
           if [ -n "$RELEASE_KS_B64" ]; then
@@ -301,15 +212,13 @@ jobs:
             cp "$AAB_IN" "$AAB"
             echo "::warning::no release key: the bundle is unsigned (Play refuses it)"
           fi
-          # The debug symbols Play shows crash frames with.
           if ! unzip -l "$AAB" | grep -q "BUNDLE-METADATA/com.android.tools.build.debugsymbols/"; then
             echo "::warning::no native debug symbols in the bundle"
           fi
           echo "name=$AAB" >> "$GITHUB_OUTPUT"
 
-      # Always an artifact: it is what gets uploaded to Play by hand.
-      # Not zipped, so it downloads as the .aab itself.
-      - uses: actions/upload-artifact@v7
+      - name: Upload app bundle artifact
+        uses: actions/upload-artifact@v7
         with:
           path: ${{ steps.aab.outputs.name }}
           archive: false

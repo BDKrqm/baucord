@@ -1,37 +1,20 @@
+# Builds the desktop app (Windows, macOS, Linux) with the bundled server on
+# release, attaches the zips to the release and uploads them to R2 with the
+# version file. Pushes to the default branch only build, to warm the caches.
 name: Build and Release
 on:
   release:
     types: [published]
-  # Cache seeding: release runs execute on a tag ref, and tag runs can only
-  # restore GitHub Actions caches that were created on the repository's
-  # DEFAULT branch. Without a trigger on the default branch, every release
-  # starts cold (this run: 0% sccache hits on all 4 platforms, and
-  # rust-cache logged "No cache found"). Point this at your default branch.
   push:
     branches:
-      - "chunk" # ← must be the repo's default branch for releases to see the caches
+      - "chunk" # the default branch: tag builds can only restore its caches
 env:
-  # FFmpeg comes from vcpkg PINNED to the last ffmpeg 7.1.2 port. vcpkg
-  # HEAD ships FFmpeg 9.x, which ffmpeg-next 8.1 cannot build against
-  # (FFmpeg 8 deleted the deprecated AVCodec field API the crate's
-  # fallback path uses, and its version detection is unreliable under
-  # vcpkg). Do NOT bump this without re-testing the full Windows build
-  # AND a real stream — encoder options are validated at runtime, not
-  # compile time. macOS builds a pinned STATIC FFmpeg 7.1.1 from source
-  # (see the macOS steps) for the same reason — and so released binaries
-  # don't require users to have brewed FFmpeg dylibs at all.
+  # FFmpeg stays on 7.1.x: ffmpeg-next 8.1 does not build against FFmpeg 8+.
   VCPKG_COMMIT: 34823ada10080ddca99b60e85f80f55e18a44eea # ffmpeg 7.1.2
-  # x264 for the Linux and macOS static FFmpeg: the stable-branch commit
-  # the pinned vcpkg builds on Windows (0.164.3108). The desktop builds
-  # are GPL because of it, and their notices (Settings → Licenses,
-  # web/licenses.html; the `x264` entry in scripts/licenses.py) name this
-  # exact source: change both together, and the cache keys below with it.
+  # Must match the x264 entry in scripts/licenses.py.
   X264_COMMIT: 31e19f92f00c7003fa115047ce50978bc98c3a0d
 
 jobs:
-  # The third-party notices, refreshed from this commit's Cargo.lock
-  # before anything builds; every platform embeds the same list
-  # (licenses.yml).
   licenses:
     uses: ./.github/workflows/licenses.yml
 
@@ -40,22 +23,11 @@ jobs:
     strategy:
       matrix:
         include:
-          # Linux builds run INSIDE an ubuntu:22.04 container (see the
-          # job-level `container:`) to decouple two conflicting floors:
-          # release binaries inherit the build environment's glibc as a
-          # hard runtime floor (22.04 = glibc 2.35, covering Debian 12 /
-          # Mint 21 era distros; building on 24.04 produced binaries
-          # demanding GLIBC_2.39 that failed to even load elsewhere) —
-          # but libspa/pipewire-rs needs PipeWire headers NEWER than
-          # 22.04 ships (0.3.48 predates spa_meta_first), so PipeWire
-          # 1.0 is built from source inside the container, headers-deep
-          # only. The host runner version is irrelevant to the binary.
           - os: ubuntu-24.04
+            # Built in 22.04 so the binary needs glibc 2.35 at most.
             container: ubuntu:22.04
             target: x86_64-unknown-linux-gnu
             suffix: linux-x64
-            # x86-64-v2: SSE4.2, SSSE3, POPCNT — supported since Nehalem (2008).
-            # Safe baseline for any x86_64 machine from the last ~15 years.
             rustflags: "-C target-cpu=x86-64-v2"
           - os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -72,27 +44,18 @@ jobs:
     container: ${{ matrix.container }}
     defaults:
       run:
-        # Containers default `run:` to plain sh (dash) — VM runners use
-        # bash. Restore bash everywhere so bashisms (pipefail etc.)
-        # behave identically in and out of the container. Steps that
-        # declare `shell: pwsh` explicitly are unaffected.
-        shell: bash
+        shell: bash # containers default to sh
     steps:
-      - uses: actions/checkout@v7
-      # Settings → Licenses as of this commit (the licenses job): the
-      # committed copy may lag behind Cargo.lock.
-      - name: Third-party notices, refreshed
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Download license files
         uses: actions/download-artifact@v8
         with:
           name: licenses
           path: .
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
-        # No sudo: the ubuntu:22.04 container runs as root. The bare
-        # image also lacks the toolchain the VM images preinstall, hence
-        # build-essential/curl/git/etc. libpipewire-0.3-dev is absent on
-        # purpose — 22.04's is the too-old one; headers come from the
-        # source build below.
         run: |
           apt-get update
           apt-get install -y \
@@ -108,20 +71,15 @@ jobs:
             libudev-dev \
             libwayland-dev libegl-dev
 
-      - name: Install Rust
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - name: Cache Rust
+      - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-          # Release runs are on tag refs; caches saved there can never be
-          # restored by other refs, so saving is pure wasted time/quota.
-          # Only the default-branch (push) runs should save.
           save-if: ${{ github.event_name != 'release' }}
-
-      # ── System dependencies ─────────────────────────────────────────
 
       - name: Cache PipeWire headers (Linux)
         if: runner.os == 'Linux'
@@ -133,12 +91,6 @@ jobs:
 
       - name: Build PipeWire 1.0.7 headers + client lib (Linux)
         if: runner.os == 'Linux' && steps.pipewire-cache.outputs.cache-hit != 'true'
-        # Only for BUILDING: libspa-sys binds against these headers (its
-        # static-inline shims are compiled into the binary), and the
-        # linker uses this libpipewire-0.3.so. At RUNTIME the binary
-        # loads the user's distro libpipewire-0.3.so.0 — same soname
-        # across 0.3.x and 1.x. Feature-heavy parts auto-disable since
-        # their deps aren't installed.
         run: |
           set -euo pipefail
           cd /tmp
@@ -156,19 +108,10 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/ffmpeg-static
-          # -container suffix: the previous cache was compiled against
-          # the 24.04 VM's glibc 2.39 headers — its objects EMBED
-          # 2.38+ versioned symbol refs and would re-poison the
-          # container build if restored.
           key: ffmpeg-static-7.1.1-x264-${{ env.X264_COMMIT }}-${{ runner.os }}-${{ runner.arch }}-ubuntu2204-container-v4
 
       - name: Build static FFmpeg 7.1.1 + x264 (Linux)
         if: runner.os == 'Linux' && steps.ffmpeg-static-linux-cache.outputs.cache-hit != 'true'
-        # Same pin + rationale as macOS: released binaries must not
-        # depend on distro FFmpeg (sonames differ per distro/release —
-        # libavcodec.so.60 vs .61 vs Fedora's patent-stripped builds —
-        # so a dynamically linked binary launches only on distros
-        # matching the runner's FFmpeg, and ubuntu's moves every LTS).
         run: |
           set -euo pipefail
           PREFIX="$HOME/ffmpeg-static"
@@ -184,11 +127,6 @@ jobs:
           curl -LO https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.xz
           tar xf ffmpeg-7.1.1.tar.xz
           cd ffmpeg-7.1.1
-          # --disable-autodetect: configure would otherwise enable every
-          # optional dependency it finds on the runner (libxcb, xlib,
-          # sdl2, lzma…) and link it *dynamically*, baking a runner-only
-          # path into the shipped binary. Only what is named after it
-          # is compiled in.
           PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig" ./configure \
             --prefix="$PREFIX" \
             --disable-shared --enable-static --enable-pic \
@@ -206,11 +144,6 @@ jobs:
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
-        # No brew ffmpeg: released binaries must not depend on dylibs the
-        # user has to install (a Mac without `brew install ffmpeg@7` gets
-        # a dyld launch crash, and plain `ffmpeg` is v8/9 — the same
-        # ffmpeg-next breakage the vcpkg pin exists for). FFmpeg is
-        # built statically below, pinned, like the Windows vcpkg build.
         run: |
           brew install opus pkg-config nasm
 
@@ -222,21 +155,12 @@ jobs:
           path: ~/ffmpeg-static
           key: ffmpeg-static-7.1.1-x264-${{ env.X264_COMMIT }}-${{ runner.os }}-${{ runner.arch }}-v3
 
-      # Every macOS compile — x264, FFmpeg, and cargo's own C/ObjC
-      # dependencies — targets 11.0. Without it clang defaults to the
-      # runner's OS (Sequoia), symbols newer than the user's macOS get
-      # hard-linked, and 1.1.5 died on Ventura with "Symbol not found:
-      # _AVCaptureDeviceTypeContinuityCamera" (a macOS 14 symbol).
-      - name: Set the macOS deployment target
+      - name: Set macOS deployment target (11.0)
         if: runner.os == 'macOS'
         run: echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
 
       - name: Build static FFmpeg 7.1.1 + x264 (macOS)
         if: runner.os == 'macOS' && steps.ffmpeg-static-cache.outputs.cache-hit != 'true'
-        # 7.1.1 matches the Windows pin's FFmpeg version (7.1.x): the
-        # newest line ffmpeg-next 8.1 reliably builds against. x264 is
-        # the software encoder the macOS sharer path uses. videotoolbox
-        # is compiled in (free) for a future hardware-decode path.
         run: |
           set -euo pipefail
           PREFIX="$HOME/ffmpeg-static"
@@ -252,11 +176,6 @@ jobs:
           curl -LO https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.xz
           tar xf ffmpeg-7.1.1.tar.xz
           cd ffmpeg-7.1.1
-          # --disable-autodetect: the 1.1.5 Intel build linked Homebrew's
-          # libxcb (an X11 library!) because configure found it on the
-          # runner and enabled xcbgrab; users without that formula got
-          # "Library not loaded: /usr/local/opt/libxcb/…" at launch.
-          # Only what is named after it is compiled in.
           PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig" ./configure \
             --prefix="$PREFIX" \
             --disable-shared --enable-static \
@@ -272,17 +191,6 @@ jobs:
           echo "PKG_CONFIG_PATH=$HOME/ffmpeg-static/lib/pkgconfig" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_ALL_STATIC=1" >> "$GITHUB_ENV"
 
-      # ── Windows FFmpeg: prebuilt static tree from R2 ────────────────
-      # FFmpeg 7.1.2 built once by .github/workflows/build-ffmpeg-windows.yml
-      # from vcpkg pinned to VCPKG_COMMIT (34823ada…, the last ffmpeg 7.1.2
-      # port) with ffmpeg[x264,gpl,nvcodec,amf]:x64-windows-static-md, then
-      # stored in R2 under the pin-derived name below. vcpkg HEAD ships
-      # FFmpeg 9.x, which ffmpeg-next 8.1 cannot build against. To change
-      # the FFmpeg version or feature set: edit that workflow, run it, and
-      # update VCPKG_COMMIT here so the object name matches. A missing
-      # object fails this step loudly — it means the builder workflow
-      # hasn't produced a zip for the current pin yet.
-
       - name: Download prebuilt FFmpeg (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -295,29 +203,19 @@ jobs:
           7z x ffmpeg-prebuilt.zip -oC:\ffmpeg-prebuilt
           echo "FFMPEG_DIR=C:\ffmpeg-prebuilt\x64-windows-static-md" >> $env:GITHUB_ENV
 
-      # ── Build ───────────────────────────────────────────────────────
-
-      # sccache v0.17.0 (PR #2782) can PARSE the @argfile that cargo passes
-      # when a rustc command line exceeds the Windows 32,767-char limit, but
-      # it still RE-SPAWNS rustc with all arguments flattened back onto the
-      # command line (dep-info, --print file-names, and the compile itself in
-      # src/compiler/rust.rs). ffmpeg-sys-next's build script emits ~680
-      # --cfg flags (~40K chars), so that spawn dies with os error 206.
-      # The shim below routes @argfile invocations straight to rustc (which
-      # supports @argfile natively) and everything else through sccache, so
-      # only ffmpeg-sys-next skips the cache. Remove the shim once sccache
-      # writes argfiles when spawning rustc on Windows.
-      - name: Setup sccache
+      - name: Set up sccache
         uses: mozilla-actions/sccache-action@v0.0.11
         with:
           version: "v0.17.0"
 
+      # sccache can't pass rustc @argfiles through on Windows; the shim
+      # sends those calls (ffmpeg-sys-next) straight to rustc.
       - name: Build rustc shim (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: rustc -O ci/rustc-shim.rs -o C:\rustc-shim.exe
 
-      - name: Build
+      - name: Build desktop app and server
         env:
           SCCACHE_GHA_ENABLED: "true"
           RUSTC_WRAPPER: ${{ runner.os == 'Windows' && 'C:\rustc-shim.exe' || 'sccache' }}
@@ -335,16 +233,10 @@ jobs:
             echo "::error::baucord still links FFmpeg/x264 shared objects — the static build was not picked up"
             exit 1
           fi
-          # Every shared object must come from the system: a path under
-          # /home, /opt or /usr/local means a runner dependency leaked
-          # into the binary (the macOS libxcb incident, 1.1.5).
           if ldd "$BIN" | grep -E "=> (/home|/opt|/usr/local)/"; then
             echo "::error::baucord links a library from outside the system paths — a runner dependency leaked"
             exit 1
           fi
-          # Release binaries must load on glibc 2.35 (Ubuntu 22.04 /
-          # Debian 12 era). This caught us once: a 24.04-built binary
-          # demanded GLIBC_2.39 and refused to even start elsewhere.
           MAX=$(objdump -T "$BIN" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
           echo "highest glibc symbol version required: $MAX"
           if [ "$(printf '%s\n' "$MAX" GLIBC_2.35 | sort -V | tail -1)" != "GLIBC_2.35" ]; then
@@ -362,17 +254,10 @@ jobs:
             echo "::error::baucord still links FFmpeg dylibs — the static build was not picked up"
             exit 1
           fi
-          # A shipped Mac binary may reference system frameworks and
-          # /usr/lib only. A Homebrew path (/usr/local/opt on Intel,
-          # /opt/homebrew on Apple Silicon) is a runner dependency
-          # that users will not have — 1.1.5 shipped with libxcb.
           if otool -L "$BIN" | grep -E "/usr/local/|/opt/homebrew/"; then
             echo "::error::baucord links a Homebrew library — the static FFmpeg picked up a runner dependency"
             exit 1
           fi
-          # The binary must declare the deployment floor it was built
-          # for; a higher `minos` means some object was compiled without
-          # MACOSX_DEPLOYMENT_TARGET and may reference newer symbols.
           MINOS=$(otool -l "$BIN" | awk '/LC_BUILD_VERSION/{f=1} f && /minos/{print $2; exit}')
           echo "minos: $MINOS"
           if [ "$(printf '%s\n' "$MINOS" 11.0 | sort -V | tail -1)" != "11.0" ]; then
@@ -384,20 +269,13 @@ jobs:
         shell: bash
         run: sccache --show-stats
 
-      # ── Package ─────────────────────────────────────────────────────
-      # Packaging/upload only matter for release runs; push runs on the
-      # default branch exist purely to build and warm the caches.
-
-      - name: Get version
+      - name: Read version from crates/desktop
         id: version
         shell: bash
         run: grep '^version' crates/desktop/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/' | xargs -I{} echo "version={}" >> "$GITHUB_OUTPUT"
 
-      - name: Package (Unix)
+      - name: Package zip (Linux/macOS)
         if: runner.os != 'Windows' && github.event_name == 'release'
-        # The desktop crate pins `[[bin]] name = "baucord"` (the updater
-        # and release zips expect that exact name), so cargo's output is
-        # `baucord`, not `desktop`.
         run: |
           mkdir -p staging
           cp target/${{ matrix.target }}/deploy/baucord staging/baucord
@@ -405,13 +283,8 @@ jobs:
           cd staging
           zip -r ../baucord-v${{ steps.version.outputs.version }}-${{ matrix.suffix }}.zip baucord dedicated-server
 
-      - name: Package (Windows)
+      - name: Package zip (Windows)
         if: runner.os == 'Windows' && github.event_name == 'release'
-        # Same as Unix: the binary is already named baucord.exe.
-        # Explicit pwsh: copy/mkdir/Compress-Archive are PowerShell-isms
-        # that previously rode Windows' implicit pwsh default — the
-        # job-level bash default (needed for the Linux container) would
-        # otherwise route them into Git-Bash ("copy: command not found").
         shell: pwsh
         run: |
           mkdir staging
@@ -420,12 +293,13 @@ jobs:
           cd staging
           Compress-Archive -Path baucord.exe,dedicated-server.exe -DestinationPath ..\baucord-v${{ steps.version.outputs.version }}-${{ matrix.suffix }}.zip
 
-      - name: Upload artifacts
+      - name: Upload zip artifact
         if: github.event_name == 'release'
         uses: actions/upload-artifact@v7
         with:
           name: baucord-v${{ steps.version.outputs.version }}-${{ matrix.suffix }}
           path: baucord-v${{ steps.version.outputs.version }}-${{ matrix.suffix }}.zip
+
   release:
     needs: build
     if: github.event_name == 'release'
@@ -433,19 +307,15 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
-      - name: Download all artifacts
+      - name: Check out source
+        uses: actions/checkout@v7
+      - name: Download build zips
         uses: actions/download-artifact@v8
         with:
           path: artifacts
-          # The builds' zips (not the licenses job's notices).
           pattern: baucord-v*
           merge-multiple: true
-      - name: Guard — release tag must match crate version
-        # The R2 `version` file and asset names come from Cargo.toml; a
-        # mismatched tag ships a release whose name disagrees with what
-        # the in-app updater announces. Fail here, before anything is
-        # published.
+      - name: Check tag matches crate version
         run: |
           VERSION=$(grep '^version' crates/desktop/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           TAG="${{ github.event.release.tag_name }}"
@@ -453,18 +323,18 @@ jobs:
             echo "::error::Release tag $TAG != crates/desktop version v$VERSION — retag or bump the crate."
             exit 1
           fi
-      - name: Upload to Release
+      - name: Attach zips to release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.release.tag_name }}
           files: artifacts/*.zip
-      - name: Prepare release files for R2
+      - name: Stage zips and version file for R2
         run: |
           VERSION=$(grep '^version' crates/desktop/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           mkdir -p r2-upload
           cp artifacts/*.zip r2-upload/
           echo "$VERSION" > r2-upload/version
-      - name: Upload to R2
+      - name: Upload release to R2
         uses: jakejarvis/s3-sync-action@v0.5.1
         env:
           AWS_S3_BUCKET: baucord

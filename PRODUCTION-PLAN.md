@@ -250,9 +250,9 @@ What stands between this and "production for strangers":
   temp file + rename; the companion binary is replaced after the main
   one, so a failure leaves a half-update.
 - [ ] **UPD-3 [P1][S] Pre-releases reach every user**: every workflow
-  fires on `release: published`, which includes pre-releases; the R2
-  `version` file and Docker `latest` move too. Guard on
-  `github.event.release.prerelease`.
+  fires on `release: published`, which includes pre-releases, and the
+  R2 `version` file moves too (the Docker image no longer moves
+  `latest` for one, §7). Guard on `github.event.release.prerelease`.
 
 ## 3. Milestone B — release integrity, licensing, operations
 
@@ -585,6 +585,15 @@ One line each; the spec decision named holds the detail.
   Settings → Licenses and `web/licenses.html`, refreshed by CI before
   every build and deploy (`licenses.yml`); every crate declares
   `license = "Apache-2.0"`.
+- **2026-10-09 — the server image**: no image had been published since
+  1.1.7. The Dockerfile did not copy `third_party/`, where the
+  workspace's `[patch.crates-io]` points since 1.1.8 (the vendored
+  `wasapi`), so `cargo chef cook` failed on every release; it copies it
+  now. Also in `docker.yaml`: *Run workflow* with a tag rebuilds a
+  release's image with the current Dockerfile (it used to skip every
+  manual run), a pre-release leaves `latest` alone, the tag must match
+  the server crate's version; and the Dockerfile no longer fetches its
+  syntax frontend from Docker Hub.
 - **2026-10-09 — 1.2.0, the rest**: `Authors` (a lobby poster's name,
   offline authors' looks), the chat's stickiness by input with an
   "N new messages" pill (ANDROID-SPEC D66), General's Activity view
@@ -605,7 +614,7 @@ One line each; the spec decision named holds the detail.
   | platform | trigger | build | signing | users update by |
   |---|---|---|---|---|
   | desktop (win-x64, macOS arm64/intel, linux-x64) | release published | GitHub matrix, static FFmpeg 7.1, `--profile deploy --features tray`, link checks | none | in-app updater (unsigned zip from R2) |
-  | server image | release published | buildx, amd64, distroless, uid 10000 | none | `docker compose pull` |
+  | server image | release published / manual (a tag) | buildx, amd64, distroless, uid 10000 | none | `docker compose pull` |
   | Android | release published / manual | cargo-ndk + Gradle `assembleRelease bundleRelease`, arm64, 16 KB check | the release key, after the build (APK and AAB) | sideloading the APK; Play once listed |
   | iOS | release published / manual | macos-26, Xcode, xcodegen, archive | Ad Hoc profile + certificate | reinstalling the `.ipa` |
   | website | `web/**` or the notices' inputs on main, or after any build | stamps the desktop version | — | — |

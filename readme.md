@@ -251,7 +251,10 @@ website: [baucord.com/deploy.html](https://baucord.com/deploy.html)
 
 The compose file runs the published image `mpwsh/baucord:latest`,
 which `docker.yaml` builds from the `Dockerfile` and pushes on every
-release (amd64 only; tagged with the version too). For another
+release (amd64 only; also tagged with the version and the commit; a
+pre-release does not move `latest`). If a release's image build fails,
+*Run workflow* on the `docker` workflow with the release's tag rebuilds
+and pushes it. For another
 architecture or unreleased code, replace `image:` with `build: .`.
 `web.yaml` publishes `docker-compose.yaml`, `scripts/setup.sh`,
 `scripts/monitor-net.sh` and `config/baucord.example.yaml` (as

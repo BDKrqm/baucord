@@ -1,52 +1,102 @@
-name: CI
+# Builds the server image and pushes it to Docker Hub on release.
+# Manual run with a tag rebuilds that release using this branch's Dockerfile;
+# without a tag it only builds.
+# Needs: variable DOCKERHUB_USER, secret DOCKERHUB_TOKEN.
+name: docker
 
 on:
-  #push:
-  #  branches: [main]
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to rebuild and push (e.g. v1.2.0); empty = build only"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: docker-${{ github.event.release.tag_name || inputs.tag || github.ref }}
+  cancel-in-progress: false
 
 env:
   DOCKERHUB_REPO: ${{ vars.DOCKERHUB_USER }}/baucord
 
 jobs:
   build-and-push:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'release' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      PRERELEASE: ${{ github.event.release.prerelease == true }}
     steps:
-      - uses: actions/checkout@v7
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.tag || '' }}
+
+      - name: Check out Dockerfile from current branch
+        if: inputs.tag != ''
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          path: .ci
+          sparse-checkout: Dockerfile
+          sparse-checkout-cone-mode: false
+
+      - name: Resolve image tags
+        id: plan
+        run: |
+          set -euo pipefail
+          SHA=$(git rev-parse --short=7 HEAD)
+          if [ -z "$TAG" ]; then
+            echo "push=false" >> "$GITHUB_OUTPUT"
+            echo "tags=" >> "$GITHUB_OUTPUT"
+            echo "Build only: ${GITHUB_REF_NAME} (${SHA})"
+            exit 0
+          fi
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::'$TAG' is not a release tag (vX.Y.Z)"
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          CRATE=$(awk -F'"' '/^version *=/ { print $2; exit }' crates/server/Cargo.toml)
+          if [ "$CRATE" != "$VERSION" ]; then
+            echo "::error::$TAG does not match crates/server version ($CRATE)"
+            exit 1
+          fi
+          LATEST=true
+          if [ "$PRERELEASE" = "true" ] || [[ "$VERSION" == *-* ]]; then
+            LATEST=false
+          fi
+          {
+            echo "push=true"
+            echo "tags<<EOF"
+            echo "${DOCKERHUB_REPO}:${VERSION}"
+            echo "${DOCKERHUB_REPO}:${SHA}"
+            if [ "$LATEST" = "true" ]; then echo "${DOCKERHUB_REPO}:latest"; fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Login to Docker Hub
+      - name: Log in to Docker Hub
         uses: docker/login-action@v4
         with:
           username: ${{ vars.DOCKERHUB_USER }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Generate tags
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ${{ env.DOCKERHUB_REPO }}
-          tags: |
-            type=sha,prefix=
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=raw,value=latest,enable=${{ github.event_name == 'release' }}
-
-      - name: Build and push
+      - name: Build and push image
         uses: docker/build-push-action@v7
         with:
           context: .
-          push: true
+          file: ${{ inputs.tag != '' && '.ci/Dockerfile' || 'Dockerfile' }}
           platforms: linux/amd64
-          tags: ${{ steps.meta.outputs.tags }}
+          push: ${{ steps.plan.outputs.push == 'true' }}
+          tags: ${{ steps.plan.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
