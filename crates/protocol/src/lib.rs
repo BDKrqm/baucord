@@ -25,6 +25,7 @@ pub mod messages;
 pub mod permissions;
 pub mod progress;
 pub mod relayed;
+pub mod safety;
 pub mod system_audio;
 pub mod username;
 pub mod video;
@@ -43,7 +44,7 @@ pub use lanes::{
 pub use messages::{
     decode_client_message, decode_server_message, decode_telemetry_event, decode_telemetry_sample,
     encode_client_message, encode_server_message, encode_telemetry_event, encode_telemetry_sample,
-    Attachment, AudioSample, Auth, BlobId, ChannelDenyReason, ChannelInfo, ChannelSpec,
+    Attachment, AudioSample, Auth, AuthorInfo, BlobId, ChannelDenyReason, ChannelInfo, ChannelSpec,
     ChannelUiDenyReason, ChatMessage, ClientId, ClientInfo, ClientKeyProof, ClientMessage, ConvRef,
     DenyReason, DmFailReason, DmSummary, HistoryMessage, InviteDenyReason, InviteInvalidReason,
     NameStyle, NeedInviteReason, PathSample, Profile, ProfileDenyReason, RefusedReason,
@@ -56,6 +57,10 @@ pub use messages::{
 pub use permissions::{Rank, RoleId};
 pub use progress::{cost_of_level, level_for_xp, xp_for_level};
 pub use relayed::{split_sender, wrap_sender, RELAY_SENDER_BYTES};
+pub use safety::{
+    BlockedUser, DeleteRefusal, ReportReason, ReportRefusal, ReportSummary, ReportTarget,
+    MAX_REPORT_EXCERPT_BYTES, MAX_REPORT_NOTE_BYTES,
+};
 pub use system_audio::{
     pack_system_audio, parse_system_audio, SystemAudioHeader, SYSTEM_AUDIO_HEADER_SIZE,
     SYSTEM_AUDIO_MTU_BUDGET,

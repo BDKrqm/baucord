@@ -1,12 +1,14 @@
 # baucord 1.1 — persistence: accounts, roles, history, DMs, files
 
-> **Status (2026-10-07):** all of it shipped, 1.1.0–1.1.4 (§11); §12
-> holds every decision taken since. This is the design record for
+> **Status (2026-10-09):** all of it shipped, 1.1.0–1.1.4 (§11); §12
+> holds every decision taken since — the lobby (1.1.5), blocks,
+> reports and account deletion (S1, 1.2) among them — and wins where
+> the text before it differs. This is the design record for
 > admission, roles, history, DMs, files and profiles; what is left is
 > `PRODUCTION-PLAN.md`. Start from `START-HERE.md`.
 
-**Status when written:** proposal. Builds on the 1.0 line as shipped (Part C seams:
-`Hello.auth` enum, feature bits, client keys sent on every connect,
+Written as the 1.1 proposal, on the 1.0 line's seams (the `Hello.auth`
+enum, feature bits, client keys sent on every connect,
 server-assigned chat `id`/`ts`, content-hashed images, telemetry).
 Identity follows TeamSpeak 3: a key on the device, roles on the key,
 invite codes as privilege keys, no registration. Nothing here changes
@@ -101,7 +103,7 @@ refuses to start rather than guess.
 | channels from the UI               | ✔ temporary only (vanish when empty, or with the process) | ✔ temporary or permanent       |
 | general chat                       | ✔ live only                                        | ✔ with history replay                 |
 | DMs                                | ✔ online recipients only, no history               | ✔ offline delivery, unread, history   |
-| files                              | ✔ live relay to online users (how images work today), nothing stored | ✔ stored, dedup, retention, cards in history |
+| files                              | pictures only, relayed live to online users, nothing stored; other files refused | ✔ stored, dedup, retention, cards in history |
 | profiles (color, style, avatar)    | ✔ client-held, sent on connect, broadcast          | ✔ also stored on the user row         |
 | telemetry queries, audit, purge                      | –                                | ✔                                     |
 | progress (xp / level)              | ✔ for the session                                  | ✔ kept                                |
@@ -117,8 +119,8 @@ save changes. Roles, bans and invites last until it restarts."*
 **Bootstrap, both modes:** when the server starts with no admin —
 always, with persistence off; only on an empty database with it on —
 it prints a one-shot bootstrap invite in the startup log next to the
-identity fingerprint: `Bootstrap invite (admin, 1 use, 1 h):
-baucord://…/CODE#SHA256:…`. Whoever runs the server has the log;
+identity fingerprint: `No admin yet. Bootstrap invite (admin, 1 use,
+1 h): code …`. Whoever runs the server has the log;
 nobody else does. This replaces "the first key to connect is admin",
 which is unsafe the moment clients auto-reconnect after a restart
 (whichever friend's laptop reconnects first would win). `server
@@ -242,15 +244,12 @@ grants and recorded against the user it admitted. You join once with a
 code; from then on your key *is* your membership. Nothing to rotate
 when someone leaves — you ban them. There is no other door.
 
-```
-baucord://203.0.113.5:5000/k7Fq2mX9#SHA256:ECfs43…     # join: address, code, fingerprint
-203.0.113.5:5000#SHA256:ECfs43…                         # 1.0 form, still parsed (verify only)
-```
-
-The URL form is registered as a scheme by the desktop app so a link
-click opens the connect screen prefilled. The client stores the address
-and fingerprint on the server entry as today; the code is used once and
-forgotten.
+People are told an address, a port and a code (a `baucord://` link
+form was planned and dropped, §12). The invite string
+`203.0.113.5:51000#SHA256:ECfs43…` — the address plus the server's
+fingerprint — is still parsed, to pin a server up front. The client
+stores the address and fingerprint on the server entry; the code is
+used once and forgotten.
 
 ```
 invites: code PK (12 chars, unambiguous alphabet: no 0/O/1/l/I, case-insensitive on
@@ -331,10 +330,10 @@ device key hash and source address, before anything else:
 **Never lost on your own:** a user stays a user until kicked or banned.
 Nothing expires a person — only codes expire.
 
-Client side: the connect screen accepts a pasted invite (or arrives
-prefilled from a link) and a name; a device the server already knows
-skips straight to the roster. Settings gains "Export identity",
-"Import identity" and "Forget this device".
+Client side: the connect screen takes an invite code and a name; a
+device the server already knows skips straight to the roster.
+Settings has "Export identity", "Import identity" and "Forget this
+device".
 
 **Later, if ever:** `Auth::Account { username, password }` for servers
 that want people rather than devices. Nothing above depends on it.
@@ -355,16 +354,10 @@ screen:
 
 A known, unbanned key never sees any of these: `Key` → `Welcome`.
 
-### 3.4 Rollout from 1.0
+### 3.4 From 1.0
 
-The 1.0 server only *logged* client keys; nothing migrates by itself,
-and there is no transition period: the 1.1 server admits by invite
-only. Day one: the operator redeems the bootstrap code from the
-startup log (that key is now the admin), mints a member code in the
-panel, and posts the link in the group. Everyone updates, joins once
-with the code, and is a member by key from then on — permanently with
-persistence on, for the run without it. Anyone still on 1.0 sees
-"update baucord" until they do.
+There was no transition period: the 1.1 server admits by invite only,
+and a 1.0 client sees "update baucord" (§10).
 
 ## 4. Roles and permissions
 
@@ -407,14 +400,15 @@ Three ways to remove someone from a session, with different aftermath:
 | action         | connection                          | access afterwards                                              | user row                               |
 | -------------- | ----------------------------------- | -------------------------------------------------------------- | -------------------------------------- |
 | **Disconnect** | closed, with a reason               | unchanged — rejoining is one click, the key is the login       | kept                                   |
-| **Kick**       | closed                              | join revoked until an admin lifts it (`restrictions(server)`, no `until`) | kept: name reserved, history intact |
+| **Kick**       | closed                              | the device keys and roles are deleted: back only with a new invite, as whatever it grants (§12) | kept: name reserved, history intact |
 | **Ban**        | closed                              | join revoked *and* the device key hash and source address are blocked under any identity; optional `until` | kept |
 | Purge (§8)     | —                                   | —                                                              | deleted                                |
 
 Disconnect exists for the deafened friend you cannot reach any other
 way: the disconnect sound and the message get through when nothing
-else does, and they are back in seconds. Kick is "out until we talk".
-Ban is the one a fresh invite and a fresh key do not get around.
+else does, and they are back in seconds. Kick is "start over with a
+new invite". Ban is the one a fresh invite and a fresh key do not get
+around.
 
 All three are delivered the way a refusal is: `ServerMessage::Removed
 { kind: Disconnected | Kicked | Banned { until }, reason, by }` on the
@@ -557,10 +551,9 @@ ServerMessage::Blob… on a Media stream (existing paced relay), sha verified by
 
 - **Dedup by content:** `UploadBegin` carries the hash; a known blob is
   acknowledged without transfer (`needed: false`), then referenced.
-- **Without persistence** the same messages relay the file live to
-  everyone online through the paced Media path — exactly how images
-  work in 1.0 — and nothing is stored: no dedup, no later download,
-  no card in history. The caps still apply.
+- **Without persistence** a memory-mode server relays pictures live
+  to everyone online through the paced Media path (the 1.0
+  `ImageMessage` relay) and refuses other files; nothing is stored.
 - **Caps, server-enforced:** `files.max_mb` (50) per file,
   `per_user_daily_mb` (500), `total_cap_gb` (20; oldest unreferenced
   blobs evicted first, then a hard refusal). These replace the 1.0
@@ -616,11 +609,10 @@ ServerMessage::ProfileUpdated { user_id, profile: Profile }
   change. Shown in the roster and next to the name in chat at the size
   the UI decides.
 - **Other than gold, colors never mean roles.** A name color is only a
-  name color. The role markers 1.1.0 ships are the guest icon (§4) and
-  the server-enforced gold band above; badges for organizer and admin
-  are a later addition, and when they come they are icons derived from
-  the key's roles. That is what keeps "I picked admin red" from meaning
-  anything.
+  name color. Roles show as the guest icon (§4), the server-enforced
+  gold band above, and since 1.1.3 role badges — icons and colours
+  derived from the key's roles, assigned by admins (§12). That is what
+  keeps "I picked admin red" from meaning anything.
 - **Rate limit:** one profile change per 30 s per user; over it,
   `ProfileDenied { RateLimited }`.
 - **Admin:** `ResetProfile { user_id, lock: bool }` clears it and,
@@ -647,7 +639,7 @@ There is no path by which a client asserts a role.
 and they ship on the wire in 1.1.0: with persistence off there is no
 CLI, so this is the only way to administer a memory-mode server. The
 first front end is slash commands typed in the admin channel
-(`/mute @name 30m reason`); the panel comes in 1.1.3.
+(`/mute @name 30m reason`); the panel came in 1.1.3.
 
 ```rust
 ClientMessage::Admin(AdminCommand)
@@ -786,39 +778,12 @@ simulator's fake `Instant` advances wall time for free and an
 
 ## 11. Delivery plan — status
 
-Each step was independently releasable and left the media path
-untouched. All of it is shipped; the versions are the client's and
-server's (they move together).
-
-1. **1.1.0 — foundation.** Persistence thread, schema, migrations,
-   `backup`. Invites (privilege keys) as the only door, key identity,
-   export/import. Roles with the four built-ins and the restriction
-   family. General-chat history replay, edit/delete, rate limit.
-   Channels from the UI. Telemetry rows and the admin roster tooltip.
-   The admin CLI. The first test written: "persistence thread stalled
-   for 10 s — voice and video unaffected, writes counted as dropped,
-   history answers empty with a retry hint."
-2. **1.1.1 — DMs.** Direct messages with offline delivery, unread
-   counts, `FetchHistory` paging, the conversation list.
-3. **1.1.2 — profiles.** Name color and style, avatars over the blob
-   path, the contrast check, admin reset/lock; the app's own context
-   menus with the volume slider, the collapsible Messages section,
-   the invite dialog, the XP bar (`UserProgress`), the share sounds,
-   one instance per profile.
-4. **1.1.3 — roles, files, the admin panel.** Custom roles with
-   derived ranks and badges (`server role`, `RoleList`), `panel`,
-   `gold` and `admin-channel` as permissions, files on the blob path
-   in General and DMs (cards with a transfer ring and cancel), the
-   admin panel (users, roles, restrictions, invites, channels, files,
-   audit, server), a resizable sidebar.
-5. **1.1.4 — the rest of this document.** Blob retention in the hourly
-   prune, purge dropping the person's files, chat xp, pictures as
-   files wherever the server keeps files (only a memory-mode server
-   still gets the live `ImageMessage` relay, and refuses files), the
-   transfer budget in place of the image one, `server restore` and
-   `server db prune`, the admin channel (the audit as it happens over
-   `AuditLine`, commands at hand), keybinds watched rather than
-   grabbed.
+All of it shipped, one release at a time, none touching the media
+path: 1.1.0 the foundation (persistence, invites and keys, roles and
+restrictions, history, channels from the UI, telemetry, the admin
+CLI), 1.1.1 DMs, 1.1.2 profiles, 1.1.3 custom roles, files and the
+admin panel, 1.1.4 the rest (retention, purge, restore, the admin
+channel). SESSION-GUIDE.md §3 lists what each one carried.
 
 **Later, if ever:** channel topics, reserved names, a manual away
 toggle shown in the roster, animated avatars, anything built on
@@ -903,9 +868,10 @@ voice unaffected, writes counted as dropped".
   64² small control messages a minute. The client derives the
   fraction with `progress::xp_for_level` / `cost_of_level`, so the
   curve stays a server-side formula.
-- **Chat earns no xp.** Presence, talking with someone there, watching
-  and sharing to a viewer do; a message does not, so there is nothing
-  to spam for. `user_progress.messages` still counts them.
+- **Chat earns xp again (1.1.4).** The first cut gave none for a
+  message, so there was nothing to spam for; 1.1.4 brought back
+  §9.1's 1 xp per message, counted after the chat rate limit and added
+  at the minute flush (`XP_MESSAGE`), which bounds what spam can earn.
 - **The replay ring serves memory mode too.** With persistence off a
   joiner still gets the last `history.replay` of this run from the
   ring; only paging beyond it is empty. The "server forgets" notice
@@ -976,6 +942,80 @@ voice unaffected, writes counted as dropped".
   through `log::set_max_level` with env_logger's filter left open;
   `RUST_LOG` in the environment overrides the setting entirely. The
   echo-cancellation design is in `AEC-SPEC.md`.
+- **S1. Blocks, reports, deleting one's account (1.2, bit `SAFETY`
+  17; `protocol::safety`, migration 0004, `server/safety.rs`).** What
+  the stores require of an app where people talk to each other
+  (PRODUCTION-PLAN MOB-4, MOB-14).
+  - *Block* is per account, on every device of it, until undone:
+    `Block`/`Unblock { user }` → the whole list back as `Blocks`
+    (also on join, after `RoleList`), at most 1,000. The relay skips
+    the blocked person's voice to the blocker's sessions
+    (`blocked_pairs`, recomputed with the rest of enforcement); DMs
+    and files between the two are refused both ways with
+    `DmFailReason::Unavailable` ("You can't message this person",
+    `NoPermission` for a client without the bit). Their General posts,
+    pictures, files and edits are not sent to the blocker's sessions
+    (`audience_of`). A `SAFETY` session gets General text as
+    `ChatFrom { from, msg }` — the author's account, which a lobby
+    poster's `UserDetails` would not give — and the client hides the
+    rest by account: history pages, their DM conversation, a block
+    made with their rows on screen (rows carry `Meta.author`), their
+    stream, speaking ring and LIVE chip. The blocked person is not
+    told. Unblocking shows new messages; the hidden ones come back on
+    the next connect. Block changes: 30 a minute per account.
+  - *Authors* (`ServerMessage::Authors`, `AuthorInfo`; `SAFETY`
+    sessions): a session in the lobby is named to nobody, so its post
+    used to arrive from "User…" with no picture, and a history row by
+    someone offline had a name but no look. Now a name and a look go
+    first: before a post, picture, file or DM from a session nobody
+    was told about (in the lobby, or gone before a stored DM is
+    delivered; with its `client_id`, which the client's name table
+    takes), before every history page (its authors but the reader) and
+    before the DM list (the other ends). Nothing about presence. The
+    client keeps looks by account for the session (`author_looks`,
+    everyone seen online included, so a picture outlives its owner's
+    leaving); the pictures themselves were already on disk by hash
+    (`avatar_cache_dir`), fetched once per picture.
+  - *Report* a message (General, or a DM the reporter is in — checked
+    against the stored conversation, so a guessed id does not expose
+    someone else's) or a person, with a reason (`ReportReason`, eight,
+    append-only) and a note ≤ 500 bytes; ten per ten minutes. The
+    server copies the text as it was (≤ 2,000 bytes; a file's name),
+    stores the report, sends the moderators online (`ADMIN_CHANNEL` and
+    `RESTRICT`) an `AuditLine` with a 160-character excerpt, and keeps
+    only the reason in the on-disk audit. `ReportAck` answers the
+    reporter. The panel's Reports tab (`ListReports`, `ResolveReport`;
+    `RESTRICT`) lists them, as many of the newest as fit one control
+    message; `/reports` and `/resolve` are the same on a phone.
+    Resolved reports go with the history window. A report whose store
+    lookup lands after either account was deleted is dropped.
+  - *Delete my account* (`DeleteAccount` → `AccountDeleted`, then the
+    session ends; `AccountDeleteRefused::LastAdmin` for the only admin)
+    is the purge, at once: the user, keys, roles, profile, progress,
+    the messages they posted, their DM conversations whole (both sides,
+    files included), read
+    marks, telemetry, invites, blocks either way, reports about them,
+    uploaded logs (named `<name>-<user id>-<session>-<time>.log` since
+    1.2). Files are shared by content, so the purge counts references:
+    what the account's posts, conversations and avatar held is
+    released (`Notice::RefsReleased` to the running server), a file
+    nothing points at any more goes, and their own upload that someone
+    else's post or avatar is also using stays, without an uploader.
+    Reports they filed stay without the reporter; audit lines they
+    made stay without the actor; restrictions on them go with the
+    account (FK cascade). Left as is: channels they created keep their
+    id as owner, so the same key back with a new invite owns them
+    again. A DM the store accepted after the
+    purge is not delivered and the purge runs again. The client keeps
+    the server entry (a new invite gets back in) and drops its channel
+    passwords.
+  - Terms of use are the app's, not a server's: connecting is
+    agreeing, and the connect card says so under Settings/Quit with a
+    link (`web/terms.html`; `terms-notice`, `terms-link`). Nothing is
+    stored; a settings file with the test builds' `terms_version`
+    still loads. A server's own rules go in its greeting.
+
+The first draft's decisions, in short (the entries above refine them):
 
 - Chat is general + DMs; no per-channel text (schema leaves the door open).
 - Guests: icon + tooltip from `UserJoined { kind }`; the name is never altered.
@@ -997,12 +1037,11 @@ voice unaffected, writes counted as dropped".
   avatar; colors pass a contrast check. The gold band is reserved for
   the `GOLD_NAME` permission (the admin role's, grantable to custom
   roles) and enforced by the server; apart from that, colors never
-  signify a role. The guest icon and gold are the role markers in
-  1.1.0; other badges come later as icons from the key's roles.
+  signify a role. Role badges are icons from the key's roles (1.1.3).
 - Disconnect, kick and ban are three actions: disconnect keeps access
-  (rejoin in one click), kick revokes it until lifted, ban also blocks
-  the device and address. None of them auto-reconnects; all keep the
-  user row.
+  (rejoin in one click), kick deletes the keys and roles (a new invite
+  gets back in), ban also blocks the device and address. None of them
+  auto-reconnects; all keep the user row.
 
 - Wire changes are new variants only (postcard is positional); 1.0
   clients are refused with "update baucord"; a legacy `authentication:`

@@ -67,7 +67,7 @@ removed-disconnected = Disconnected by { $by }: { $reason }
 removed-kicked = Kicked by { $by }: { $reason } — you'll need a new invite to come back.
 removed-banned = Banned by { $by }{ $until }{ $reason }
 removed-replaced = You signed in from another device or connection; this one was closed.
-chat-server-not-persistent = This server keeps nothing between restarts: roles, invites and bans last until it stops.
+banner-not-persistent = This server keeps nothing between restarts: roles, invites and bans last until it stops.
 
 # ── Invites (/invite in the composer) ───────────────────────────────────
 chat-invite-created = Invite code { $code } (copied) — { $role }, { $expiry }, { $uses }. Give it together with the server's address and port.
@@ -123,7 +123,7 @@ identity-regenerate = Regenerate
 identity-note = This device's key is who you are on every server. Export it to be the same user on another machine; Import replaces this device's key; Regenerate makes a new one (a new user — you'll need an invite).
 identity-missing = no identity key
 identity-exported = Identity exported.
-identity-imported = Identity imported — you are now this key. Reconnect to use it.
+identity-imported = Identity imported. Reconnect to use it.
 identity-regenerated = New identity created. The next connection needs an invite.
 
 # ── Sidebar ─────────────────────────────────────────────────────────────
@@ -415,6 +415,10 @@ duration-forever = Until lifted
 menu-edit-message = Edit message
 menu-delete-message = Delete message
 chat-editing = Editing your message — Enter saves, Esc cancels
+chat-new-messages = { $count ->
+    [one] 1 new message
+   *[other] { $count } new messages
+}
 chat-load-earlier = Load earlier messages
 chat-loading = Loading…
 chat-no-earlier = No earlier messages.
@@ -497,7 +501,7 @@ debug-log-header = Log
 debug-send-log = Send log to server
 debug-copy-log = Copy log
 debug-clear-log = Clear log
-debug-send-hint = Copy puts the end of the log on the clipboard, to paste anywhere. Send gives up to 2 MB of it to the server you're connected to, once every 10 minutes; its admin finds it in the server's logs folder.
+debug-send-hint = Copy puts the end of the log on the clipboard. Send gives up to 2 MB of it to the server you're connected to, once every 10 minutes; its admin finds it in the server's logs folder.
 debug-tail-label = Last 100 lines
 debug-tail-empty = The log is empty.
 debug-no-log-file = This build writes its log to the terminal, not to a file.
@@ -509,7 +513,7 @@ debug-send-empty = Nothing to send: the log is empty.
 debug-read-failed = Couldn't read the log: { $error }
 debug-cleared = Log cleared.
 debug-clear-failed = Couldn't clear the log: { $error }
-debug-copied = Copied the end of the log ({ $size }) — paste it anywhere.
+debug-copied = Copied the end of the log ({ $size }).
 debug-copy-empty = Nothing to copy: the log is empty.
 debug-copy-failed = Couldn't copy the log: { $error }
 text-size-small = Small
@@ -517,21 +521,21 @@ text-size-default = Default
 text-size-large = Large
 text-size-larger = Larger
 sounds-header = Sounds
-sounds-lead = What makes a sound, and when. Ordinary messages never do.
+sounds-lead = Which events play a sound.
 sounds-share-started = Someone in your channel starts sharing
 sounds-viewer-joined = Someone starts watching your stream
 sounds-viewer-joined-hint = Softer, and only you hear it.
 sounds-enabled = Enable sounds
-sounds-enabled-hint = The global switch: off silences every sound.
+sounds-enabled-hint = Off silences all sounds.
 sounds-join-leave = Someone joins or leaves your channel
 files-header = Files
 files-note = Settings, the identity key and the avatar live in this folder.
 servers-lead = Saved servers; the default is the one the connect screen starts on.
-audio-lead = Devices, input gate and output level — every change applies live.
+audio-lead = Changes apply immediately.
 
 # ── Settings: startup, notifications, chat, privacy, transmission ─────
 sounds-mention = A message names you
-sounds-mention-hint = Your nickname as a word, or @nickname. Off by default: the general chat can be busy. Ordinary messages never make a sound.
+sounds-mention-hint = Matches your nickname as a whole word, or @nickname.
 startup-header = Startup
 startup-auto-connect = Connect to the default server on launch
 startup-auto-connect-hint = Needs a nickname; the connect screen is skipped.
@@ -546,7 +550,7 @@ chat-image-size = Images you send
 chat-image-size-hint = Larger pictures are shrunk to fit. Servers cap uploads at 10 MB.
 image-size-max = Largest (10 MB)
 privacy-header = Privacy
-privacy-note = While connected, a server sees your nickname, your key's id, your roles and level, which channel you are in, and every 10 seconds a telemetry line: round-trip time, packet loss, the names of your audio and video devices, your app version and operating system. Admins on that server can read the last line in the roster. Nothing goes anywhere else.
+privacy-note = While connected, a server sees your nickname, your key's id, your roles and level, which channel you are in, and every 10 seconds a telemetry line: round-trip time, packet loss, the names of your audio and video devices, your app version and operating system. Admins on that server can read the last line in the roster.
 audio-transmission = Transmission
 audio-vad = Voice activity
 audio-ptt = Push to talk
@@ -828,3 +832,87 @@ quit-ios = On iPhone, apps close from the app switcher: swipe up from the bottom
 # The attach sheet on iOS: where to pick from.
 pick-from-photos = Photos
 pick-from-files = Files
+
+# ── 1.2: blocking, reporting, deleting your account ───────────────────
+menu-block = Block
+menu-unblock = Unblock
+menu-report = Report…
+menu-report-message = Report message…
+menu-block-author = Block sender
+dm-failed-unavailable = You can't message this person.
+toast-blocked = Blocked { $name }. You won't see their messages or hear them.
+toast-unblocked = Unblocked { $name }. Their new messages show; earlier ones come back when you reconnect.
+report-title-user = Report { $name }
+report-title-message = Report a message from { $name }
+report-hint = The server's moderators see this report and the message as it is now. The person is not told who reported them.
+report-reason = Reason
+report-reason-placeholder = Pick a reason
+report-reason-spam = Spam or scam
+report-reason-harassment = Harassment or bullying
+report-reason-hate = Hate speech
+report-reason-sexual = Sexual content
+report-reason-violence = Violence or threats
+report-reason-self-harm = Self-harm or suicide
+report-reason-illegal = Something illegal
+report-reason-other = Something else
+report-note = Anything to add
+report-note-placeholder = Optional
+report-also-block = Also block them
+report-also-block-hint = Stop seeing their messages and hearing them.
+report-send = Send report
+report-sent = Report sent to the moderators.
+report-refused-no-message = That message isn't on the server anymore.
+report-refused-no-user = That account isn't on the server anymore.
+report-refused-yourself = You can't report yourself.
+report-refused-too-many = Too many reports in a short time. Try again in a few minutes.
+blocked-header = Blocked people
+blocked-not-connected = Connect to a server to see who you blocked there.
+blocked-lead = You don't see their messages or hear them, and they can't send you direct messages. They aren't told.
+blocked-none = Nobody
+unblock = Unblock
+account-delete-header = Delete your account
+account-delete-lead = Your account on { $server }.
+account-delete-note = Removes your account on this server and everything you posted there: messages, files, direct messages. It can't be undone. Joining again needs a new invite.
+account-delete = Delete my account
+account-delete-confirm = Delete everything — are you sure?
+account-deleting = Deleting…
+account-delete-last-admin = You're this server's only admin. Make someone else admin first, then delete your account.
+account-deleted = Your account on { $server } was deleted, with everything you posted there. Joining again needs a new invite.
+admin-reports = Reports
+admin-reports-lead = What people reported to the moderators, newest first.
+admin-reports-show-resolved = Show handled reports
+admin-reports-none = No open reports.
+admin-reports-by = Reported by
+admin-reports-by-gone = Reported by a deleted account
+admin-reports-resolve = Mark handled
+admin-reports-delete-message = Delete message
+admin-reports-what-general = a message in General
+admin-reports-what-dm = a direct message
+admin-reports-what-person = the person
+admin-act-report-message = reported a message by
+admin-act-report-user = reported
+admin-act-report-resolve = handled report
+admin-act-user-delete = deleted, at its owner's request, the account
+chat-admin-reports-header = { $count } reports, newest first
+chat-command-usage-resolve = Usage: /resolve <report number> (see /reports)
+# ── The connect card's terms line (1.2): the lead-in, then the link ──
+terms-notice = By connecting you agree to the
+terms-link = terms and conditions
+
+# ── General's activity view (1.2): the header toggle, the empty state ─
+activity-show = Activity
+activity-hide = Back to messages
+activity-empty-title = No activity yet
+activity-empty = Joins, leaves, channel moves and screen shares appear here while you're connected.
+
+# ── Settings → Licenses (1.2) ──────────────────────────────
+tab-licenses = Licenses
+licenses-title = Open-source licenses
+licenses-lead = baucord is free software under the Apache License 2.0, built on the open-source work below. Each part keeps its own license; open one to read it.
+licenses-section-components = Components
+licenses-section-crates = Rust crates ({ $count })
+licenses-crates-count = { $count ->
+    [one] 1 crate
+   *[other] { $count } crates
+}
+licenses-used-by = Used by: { $crates }

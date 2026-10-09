@@ -25,10 +25,24 @@ impl AppState {
             let row = self.chat_row_at(i);
             self.chat_model.push(row);
         }
-        if delta.appended > 0 {
-            // A reader at the bottom follows the new rows once the
-            // list has measured them (see `ChatPane.follow-appended`).
-            self.main.invoke_chat_follow_appended();
+        if delta.appended == 0 || self.borrowed_conversation {
+            return;
+        }
+        // A reader at the bottom follows the new rows once the list has
+        // measured them (`ChatPane.follow-appended`); one scrolled up
+        // is told how many messages from others they have not seen.
+        let following = self.main.invoke_chat_follow_appended();
+        let fresh: HashSet<u64> = self.history.rows()[len - delta.appended..]
+            .iter()
+            .filter_map(app_core::chat::ChatItem::meta)
+            .filter(|m| !m.own && !m.pending)
+            .map(|m| m.id)
+            .collect();
+        if !following && !fresh.is_empty() && !self.activity_shown() {
+            let s = self.main.global::<State>();
+            let count = usize::try_from(s.get_chat_new_count()).unwrap_or(0) + fresh.len();
+            s.set_chat_new_count(i32::try_from(count).unwrap_or(i32::MAX));
+            s.set_chat_new_label(t!("chat-new-messages", "count" => count).into());
         }
     }
 
@@ -45,6 +59,14 @@ impl AppState {
         if let Some(first) = messages.first() {
             self.oldest_history_id = Some(first.id);
         }
+        // A blocked person's messages stay out of every page; their ids
+        // are kept so later edits and deletions of them say nothing.
+        let hidden: Vec<u64> = messages
+            .iter()
+            .filter(|m| self.is_blocked(&m.user_id))
+            .map(|m| m.id)
+            .collect();
+        self.hidden_messages.extend(hidden);
         if key.is_none() {
             for m in messages {
                 if Some(m.user_id) == self.our_user_id {
@@ -54,6 +76,7 @@ impl AppState {
         }
         let prepared: Vec<(Meta, String, bool)> = messages
             .iter()
+            .filter(|m| !self.is_blocked(&m.user_id))
             .map(|m| {
                 let meta = Meta {
                     id: m.id,
@@ -61,6 +84,7 @@ impl AppState {
                     ts_ms: m.ts,
                     day: local_day(m.ts),
                     user: m.name.clone(),
+                    author: Some(m.user_id),
                     own: Some(m.user_id) == self.our_user_id,
                     pending: false,
                 };
@@ -141,9 +165,11 @@ impl AppState {
             return f(self);
         }
         let active = self.active_dm;
+        let borrowed = std::mem::replace(&mut self.borrowed_conversation, true);
         self.swap_in(key);
         let out = f(self);
         self.swap_in(active);
+        self.borrowed_conversation = borrowed;
         out
     }
 
@@ -172,6 +198,8 @@ impl AppState {
     /// DM with `user`. A DM opens with its history fetched once and
     /// its unread cleared (`MarkRead`).
     pub(super) fn switch_conversation(&mut self, key: Option<client::UserId>) {
+        // Any switch lands on a conversation, not General's activity.
+        self.leave_activity_view();
         if key != self.active_dm {
             self.freeze_chat_gifs();
             self.swap_in(key);
@@ -352,8 +380,11 @@ impl AppState {
                     tile_tint: ui::convert::tint(&name),
                     admin: *user == ADMIN_CHANNEL_KEY,
                 };
+                // Online: their session's look; offline: what the server
+                // said of them with the list (`Authors`).
                 if let Some(image) = client
                     .and_then(|c| self.profiles.get(&c))
+                    .or_else(|| self.author_looks.get(user).map(|l| &l.profile))
                     .and_then(|p| p.avatar)
                     .and_then(|blob| self.avatar_images.get(&blob))
                 {
@@ -383,6 +414,12 @@ impl AppState {
         ts: u64,
         body: Incoming<'_>,
     ) {
+        // The server refuses DMs between blocked people both ways; a
+        // stray one (sent just before the block) stays out.
+        if self.is_blocked(&from) {
+            self.hide_message(id);
+            return;
+        }
         // A new message brings a closed conversation back.
         self.set_dm_hidden(from, false);
         let is_open = self.active_dm == Some(from);
@@ -414,6 +451,7 @@ impl AppState {
                 ts_ms: ts,
                 day: local_day(ts),
                 user: username.to_string(),
+                author: Some(from),
                 own: false,
                 pending: false,
             };
@@ -466,6 +504,7 @@ impl AppState {
             ts_ms: now,
             day: local_day(now),
             user: self.settings.user.nickname.clone(),
+            author: self.our_user_id,
             own: true,
             pending: true,
         };
@@ -578,7 +617,8 @@ impl AppState {
         if row.kind != 1 && row.kind != 4 {
             let own = row.own;
             let name = row.user.to_string();
-            self.apply_profile_look(&name, own, &mut row);
+            let author = self.history.rows()[index].meta().and_then(|m| m.author);
+            self.apply_profile_look(&name, own, author.as_ref(), &mut row);
         }
         // Message rows carrying WhatsApp-style markup (*bold*,
         // _italic_, `code`) get a pre-parsed StyledText; plain

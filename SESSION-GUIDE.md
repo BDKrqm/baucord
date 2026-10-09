@@ -53,8 +53,8 @@ Check with `which cargo` and `df -h /` first.
   workspace denies `clippy::all`; compare the pedantic warnings with a
   run before the change — new ones are yours), `cargo check -p frontend
   --no-default-features` (the phones' build of it), and the tests:
-  `cargo test -p protocol -p transport -p server` (85, 45 and 49 + 76
-  e2e on 2026-10-07, all green), plus `-p audio`, `-p client`,
+  `cargo test -p protocol -p transport -p server` (86, 45 and 51 + 88
+  e2e on 2026-10-09, all green), plus `-p audio`, `-p client`,
   `-p app-core`, `-p i18n` as touched.
 - **Android, Rust:** `RUSTC_BOOTSTRAP=1 cargo clippy -p audio --target
   aarch64-linux-android -Zbuild-std=std,panic_abort` checks the AAudio
@@ -144,6 +144,10 @@ wheel events dispatched before the frame is taken (§4 has the
 details). Its renders cannot show `transform-rotation` (the software
 renderer ignores it; the phones use Skia, which does not). Read PNGs
 back cropped to the region of interest — a full frame costs tokens.
+One such harness lives in the repository: `tools/chat-scroll-sim`
+(its own workspace; `CARGO_TARGET_DIR` outside the tree), which drives
+the real chat pane through the scrolling cases and writes screenshots
+with `SHOT=<dir>`.
 
 ### Handing over
 
@@ -166,9 +170,25 @@ the root `Cargo.toml`), rustfmt at 100 columns with the repo's
 everything but the imports: write new imports the nightly way (one
 `use` per crate, std / external / crate groups) and the user's
 `cargo +nightly fmt --all` settles the rest. Markdown wraps at 80.
-Every new string goes into all three Fluent catalogs (en, es-AR, pt-BR)
-**and** every `Tr` property in `tr.slint` is filled in `fill_tr` — a
-ten-line parity script over the `.ftl` keys is worth re-running.
+Third-party notices: `scripts/licenses.py` (cargo-about plus
+`licenses/native/`; see licenses/README.md) writes
+`crates/frontend/licenses.json` and `web/licenses.html`. CI runs it
+(`.github/workflows/licenses.yml`) before every release build and site
+deploy, so a Cargo.lock change needs nothing by hand; only a new native
+library needs an entry in its `COMPONENTS`. Slint is taken under its
+royalty-free license (the AboutSlint widget in Settings → About is its
+condition); the desktop builds are GPL-3.0 as a whole because of FFmpeg
+and x264, whose exact sources the notices name (x264 pinned as
+`X264_COMMIT` in release.yml).
+
+Every new string goes into all three Fluent catalogs (en, es-AR, pt-BR).
+A string the Slint side shows is also declared in `tr.slint` — the name
+only, never the English (the .ftl has it; copies there drifted from what
+the app showed, 32 of them by 1.2). `frontend/build.rs` turns the names
+into `fill_tr_from_ftl` and fails the build when a catalog lacks one;
+`fill_tr` adds only the per-platform variants. Renders get the English
+from `en.ftl` as `--load-data` (slint-viewer shows the names empty
+otherwise).
 
 ## 2. Map
 
@@ -243,6 +263,7 @@ ten-line parity script over the `.ftl` keys is worth re-running.
 | 1.1.7 | the Android client (sideloaded; voice, chat, DMs, files, stream viewing through MediaCodec, the in-window Settings and stream pages), the iPhone client (Ad Hoc; the same, VideoToolbox), echo cancellation (Windows, Android, iOS VPIO), Slint 1.18.1, the battery work (no polling workers, nothing drawn in the background), the stream page (zoom, fill, rotate), Settings → Debug (log upload), the one-row sidebar header, notifications on the phones |
 | 1.1.8 | Windows asks not to lower other apps while in voice (AEC-SPEC E11, the vendored `wasapi`); the phones open the microphone only in a voice room and unmuted (ANDROID-SPEC D53, IOS-SPEC D51); the APK on the website, named like the desktop zips (D55); the Android release workflow on maintained actions, with *Run workflow* able to rebuild a release (D54) |
 | 1.1.9 | phones keep up with a 60 fps stream (MOB-18: only the shown picture is converted, on several cores, into reused buffers; MediaCodec's pictures paced instead of dropped; a jitter buffer that holds a keyframe interval); stream audio through the call path on phones (MOB-12); the `viewing …` / `sharing …` stream logs; Settings → Debug → *Copy log*, and a clipboard on the phones; Windows audio that recovers from a device that came back (CLI-12, CLI-9); the video ladder reading a collapsed uplink (CLI-13); a quantizer floor after AMD keyframes too large to send (CLI-15); a stream's stereo mixed to mono on the phones without cancelling out-of-phase sound (ANDROID-SPEC D60) |
+| 1.2.0 | what the stores require of a chat app (bit `SAFETY` 17; PERSISTENCE-SPEC §12 S1): block (hidden messages and DMs, no voice, DMs refused both ways; Settings → Profile lists them), report a message or a person (the admin channel at once, the panel's Reports tab, `/reports`), delete my account (everything it posted, at once), the terms linked on the connect card ("by connecting you agree"), `Authors` (a lobby poster's name, and the looks of history authors and DM partners offline), the chat's stickiness by input with an "N new messages" pill (ANDROID-SPEC D66, `tools/chat-scroll-sim`), third-party notices (Settings → Licenses, `web/licenses.html`, `scripts/licenses.py`, refreshed by CI before every build and deploy; AboutSlint in About), long press for a chat row's menu on the phones; General's **Activity** view behind a header toggle, beside clear-chat (joins, leaves, moves, shares and device notices out of the conversation; memory only, this session, 200 lines — `app/activity.rs`); Android's foreground service `microphone` in a room and `specialUse` in the lobby (ANDROID-SPEC D63); files of a deleted account's DM conversations released; `web/terms.html`, `web/delete-account.html` |
 
 Memory-mode servers (persistence off) still use the legacy
 `ImageMessage` relay for pictures and refuse files.
@@ -345,7 +366,8 @@ Memory-mode servers (persistence off) still use the legacy
   handler on the chat ListView stacked into it while scrolling (every
   virtualization refinement is a round, and the `if`-gated delegates
   add a nested one per row). The owed follow is now a bounded 16 ms
-  `Timer` (`follow-ticks` ≤ 60) instead. Rule: no `changed` handler
+  `Timer` (at most 90 ticks; it stops after 8 frames at the end,
+  ANDROID-SPEC D66) instead. Rule: no `changed` handler
   on a property the ListView rewrites while scrolling.
 - **The horizontal scroll, found by bisecting renders:** a
   `ListView` sets its `viewport-width` to the max of its rows'
@@ -642,18 +664,15 @@ Memory-mode servers (persistence off) still use the legacy
   Slint's `DropArea` is for in-app drags on this backend. The hook
   may be set once per window, so new event kinds join the existing
   closure in `repaint_on_reveal`.
-- The DM ✕ does nothing because `dm-t` (the whole-row TouchArea) is
-  declared after the layout holding the button and sits on top of it;
-  the scrollbar collision is the `ScrollView`'s 14 px bar over a row
-  with 4 px right padding.
-- The chat scrollbar "sticks at the bottom": `changed viewport-height
-  => scroll-to-end` while pinned; dragging the thumb near the bottom
-  instantiates virtualized rows, the height refines, the pin snaps
-  back. The fix is a host-driven follow (set on append) rather than a
-  reaction to every geometry change.
-- An XP bar needed a wire change: `UserDetails` carries `level`
-  only, and `ProgressUpdate { xp, level }` goes to the user themself
-  on level-up. `UserProgress` (spec §12) now carries everyone's xp.
+- **The chat keeps to the newest message by the reader's input, never
+  by the scroll position** (ANDROID-SPEC D66). A `ListView` rewrites
+  its own `content-y` whenever its estimate of the rows it has not
+  laid out moves — up as often as down — so a position-based rule
+  lets go on its own. Only the list's `scrolled` and the pane's own
+  scrollbar (the stock one is off: it moved the list without
+  reporting it) count as the reader. Any change to the chat's
+  scrolling runs `tools/chat-scroll-sim` (48 checks against the real
+  pane).
 
 - **A phone's alert chime asks the host first** (ANDROID-SPEC.md D52,
   IOS-SPEC.md D50): the voice call's audio ignores the ringer and the
@@ -713,10 +732,10 @@ the next one) — both clear it now; chat preview textures follow the
 window's scale factor (`preview_max_edge`: 360² on a 1× display,
 720² only at 2×, a quarter of the memory per picture for most
 Windows users); avatars from other clients are clamped to 128² at
-decode (ours already are at pick time). Not done, and why: pooling
-`SharedPixelBuffer`s for the stream viewer needs the buffer back
-from a `slint::Image`, which the API does not give — the one 8 MB
-allocation per 1080p frame stays. Left to measure: the `StyledText`
+decode (ours already are at pick time). Since 1.1.9 the stream
+viewer reuses a ring of three `SharedPixelBuffer`s per stream and the
+decoders' buffers go round `video::pool` (ANDROID-SPEC D57), so the
+8 MB allocation per 1080p frame is gone too. Left to measure: the `StyledText`
 layouts of visible rows and Skia's glyph cache with color emoji,
 both only visible from a heap profile.
 
@@ -824,23 +843,44 @@ is in the repository's git history (the user's clone; uploads leave
 `.git` out); every decision in it is in the specs' decision logs.
 
 **Waiting on the phones** (the next logs should show these; record the
-outcome in the spec's decision log):
+outcome in the spec's decision log, then take the line out):
 
-- iPhone: `safe area: top 20 … (status bar 20)`; `VPIO voice
-  processing on` and `aec: platform (speakers)`, with nobody hearing
-  themselves (IOS-SPEC D46–D47).
+- iPhone: `safe area: top 20 … (status bar 20)` and the main page
+  below the status bar (IOS-SPEC D46); in voice on the loudspeaker
+  `VPIO voice processing on: 48000 Hz mono both ways, route Speaker`,
+  the voice-chat mode in `audio session: mode`, `aec: platform
+  (speakers)` and nobody hearing themselves — with headphones under
+  Automatic, `aec: none (headphones)` (D47); a phone call in the
+  middle, then `voice processing: interruption over; reopening`;
+  `lifecycle: background` and `host: app hidden` on leaving the app,
+  with voice carrying on (D42); whether the half-drawn glyphs come back
+  under `run.sh --renderer skia-software` (D40); on a stream, mute and
+  deafen from its bar, a pinch that follows the fingers (D44) and
+  `screen kept on (watching a stream)` (D45).
 - Android: `call routed to device N after M ms` (ANDROID-SPEC D51);
-  typing a word and sending it without a space (D48). The echo
-  canceller itself is confirmed (`echo canceller on`, a Galaxy S24 FE,
-  2026-10-07; D46).
+  typing a word and sending it without a space (D48); the service's
+  type following the room — `microphone` in it, `specialUse` in the
+  lobby — and a rejoin from the background falling back to the lobby's
+  type until the app is shown (D63). The echo canceller itself is
+  confirmed (`echo canceller on`, a Galaxy S24 FE, 2026-10-07; D46).
 - Both: a DM with the app in the background → a notification with the
   dog icon, a tap opens the conversation; on silent, no chime with the
   app open; someone joining empty rooms → "X joined Y" (ANDROID-SPEC
-  D52, IOS-SPEC D50).
+  D52, IOS-SPEC D50); on iOS, the permission prompt on the first
+  connect of a launch.
 - Both: no microphone indicator in the lobby; in a room it goes off on
-  mute and comes back on unmute, and the first words after unmuting
-  are heard (ANDROID-SPEC D53, IOS-SPEC D51); the battery over an hour
-  in the lobby with the screen off.
+  mute (iOS: `VPIO microphone muted on the unit`) and comes back on
+  unmute, and the first words after unmuting are heard (ANDROID-SPEC
+  D53, IOS-SPEC D51); the battery over an hour in the lobby with the
+  screen off.
+- Both, on speakers: a watched stream is heard and the volume buttons
+  change it (`Stream audio: playing through the voice output (call
+  path)`), the others hear no stream audio through the phone's
+  microphone, and headphones move it back (`back on its own output`;
+  ANDROID-SPEC D56, IOS-SPEC D52).
+- Both: a long press on a chat row opens its menu, and Block, Report
+  and Delete my account work from there and from Settings → Profile
+  (ANDROID-SPEC D64, IOS-SPEC D56).
 
 ## 6. Site screenshots
 

@@ -1318,6 +1318,17 @@ mod tests {
         );
     }
 
+    /// A 1.2 test build kept which terms had been accepted
+    /// (`terms_version`); the connect card says it now. A file that
+    /// still has the field loads all the same.
+    #[test]
+    fn a_file_from_the_terms_dialog_builds_still_loads() {
+        let s = parse(
+            r#"{ "terms_version": 1, "servers": [ { "name": "x", "address": "1.2.3.4:5" } ] }"#,
+        );
+        assert_eq!(s.servers[0].name, "x");
+    }
+
     #[test]
     fn legacy_object_is_not_duplicated_when_servers_list_also_present() {
         // A half-migrated / hand-edited file: legacy object AND a list

@@ -16,12 +16,18 @@
 // optional hint — with one spacing token between groups and a smaller
 // one inside them, so the eye reads label→control→hint as one unit.
 
-import { ScrollView } from "std-widgets.slint";
+import { ScrollView, ListView, AboutSlint, Palette } from "std-widgets.slint";
 import { Icon, IconSet, IconDisplay } from "@lucide";
 import { Theme } from "theme.slint";
 import { Tr } from "tr.slint";
-import { State, KeybindRow, ServerRow } from "globals.slint";
+import { State, KeybindRow, ServerRow, LicenseRow } from "globals.slint";
 import { Btn, IconBtn, Field, FieldLabel, Hint, SectionHeader, Sep, HSlider, VuMeter, GateMeter, Dropdown, CheckRow } from "widgets.slint";
+
+/// Someone this account blocked on the connected server (1.2).
+export struct BlockedRow {
+    user-id: string,        // hex, for Unblock
+    name: string,
+}
 
 export global SettingsState {
     // ── Profile (spec §7.1: kept here, sent to servers in 1.1.2) ──
@@ -49,6 +55,15 @@ export global SettingsState {
     in property <string> identity-status;
     /// Regenerate asks twice: the first click arms, the second acts.
     in property <bool> identity-regenerate-armed: false;
+    // ── This server (1.2, a server that takes them): who this account
+    // blocked there, and deleting the account there for good.
+    in property <bool> safety: false;
+    in property <[BlockedRow]> blocked;
+    /// The connected server's name, for the delete button's line.
+    in property <string> account-server;
+    /// Delete asks twice, like Regenerate.
+    in property <bool> account-delete-armed: false;
+    in property <string> account-status;    // "" hides the line
 
     // ── General ──
     in property <[string]> languages;         // ["System", "English", …]
@@ -139,6 +154,9 @@ export global SettingsState {
     in property <[string]> credits-testers;
     in property <string> about-head;      // version, url, paths
     in property <string> about-tech;      // "built with" roster
+
+    // ── Licenses (1.2): the rows, opened ones expanded ──
+    in property <[LicenseRow]> licenses;
 }
 
 export global SettingsLogic {
@@ -153,6 +171,10 @@ export global SettingsLogic {
     callback identity-import();
     callback identity-regenerate();
     callback identity-regenerate-disarm();
+    // This server (1.2)
+    callback unblock(user-id: string);
+    callback account-delete();
+    callback account-delete-disarm();
 
     // General
     callback language-selected(int);
@@ -213,6 +235,9 @@ export global SettingsLogic {
     callback save-and-close();
     callback reset-defaults();
     callback closed();
+    /// Licenses: a component or license group opened or
+    /// closed (`LicenseRow.entry`).
+    callback license-toggled(int);
 }
 
 // ── Building blocks ────────────────────────────────────────────────────
@@ -514,6 +539,66 @@ component ProfilePanel inherits VerticalLayout {
         color: Theme.text-secondary;
         font-size: Theme.font-sm;
         wrap: word-wrap;
+    }
+
+    // Blocked people, on the server this session is on: what you see
+    // of them comes back the moment you unblock.
+    Sep { }
+    SectionHeader { text: Tr.blocked-header; }
+    if !SettingsState.safety : Hint { text: Tr.blocked-not-connected; }
+    if SettingsState.safety : VerticalLayout {
+        spacing: Theme.gap-xs;
+        Hint { text: Tr.blocked-lead; }
+        if SettingsState.blocked.length == 0 : Text {
+            text: Tr.blocked-none;
+            color: Theme.text-muted;
+            font-size: Theme.font-sm;
+        }
+        for b in SettingsState.blocked : HorizontalLayout {
+            spacing: Theme.gap-sm;
+            height: 36px;
+            Text {
+                text: b.name;
+                color: Theme.text-primary;
+                font-size: Theme.font-body;
+                vertical-alignment: center;
+                overflow: elide;
+                horizontal-stretch: 1;
+            }
+            Btn {
+                text: Tr.unblock;
+                clicked => { SettingsLogic.unblock(b.user-id); }
+            }
+        }
+    }
+
+    // Leaving a server for good: the account there and everything it
+    // posted. Armed on the first click, done on the second.
+    if SettingsState.safety : VerticalLayout {
+        spacing: Theme.gap-sm;
+        Sep { }
+        SectionHeader { text: Tr.account-delete-header; }
+        Hint { text: SettingsState.account-server; }
+        Hint { text: Tr.account-delete-note; }
+        HorizontalLayout {
+            spacing: Theme.gap-sm;
+            Btn {
+                text: SettingsState.account-delete-armed ? Tr.account-delete-confirm : Tr.account-delete;
+                danger: true;
+                clicked => { SettingsLogic.account-delete(); }
+            }
+            if SettingsState.account-delete-armed : Btn {
+                text: Tr.cancel;
+                clicked => { SettingsLogic.account-delete-disarm(); }
+            }
+            Rectangle { }
+        }
+        if SettingsState.account-status != "" : Text {
+            text: SettingsState.account-status;
+            color: Theme.danger-text;
+            font-size: Theme.font-sm;
+            wrap: word-wrap;
+        }
     }
     Rectangle { }
 }
@@ -1152,7 +1237,131 @@ component AboutPanel inherits VerticalLayout {
         font-size: Theme.font-body;
         wrap: word-wrap;
     }
+    // Slint's royalty-free license asks for this widget in the About
+    // screen (Settings → Licenses has the license). It
+    // draws itself from the style's palette: the windows set it dark.
+    HorizontalLayout {
+        alignment: start;
+        AboutSlint {
+            width: 260px;
+            height: self.min-height;
+        }
+    }
     Rectangle { }
+}
+
+/// A line of the licenses list: text that wraps, and the row exactly as
+/// tall as it (sized from the text itself — a layout here reports one
+/// line's height inside a ListView, and the rows overlapped).
+component LicenseLine inherits Rectangle {
+    in property <string> text;
+    in property <color> tint: Theme.text-muted;
+    in property <length> indent: 32px;
+    in property <length> above: 0px;
+    in property <length> below: Theme.gap-sm;
+    in property <int> weight: 400;
+    height: root.above + body.preferred-height + root.below;
+    body := Text {
+        x: root.indent;
+        y: root.above;
+        // Clear of the scrollbar.
+        width: parent.width - root.indent - 14px;
+        text: root.text;
+        color: root.tint;
+        font-size: Theme.font-sm;
+        font-weight: root.weight;
+        wrap: word-wrap;
+    }
+}
+
+/// A component or a license group: tap to open or close its text.
+component LicenseEntry inherits Rectangle {
+    in property <LicenseRow> data;
+    height: Theme.gap-sm + name.preferred-height + 1px + detail.preferred-height + Theme.gap-sm;
+    border-radius: Theme.radius-sm;
+    background: touch.has-hover ? Theme.hover : transparent;
+    IconDisplay {
+        x: Theme.gap-sm;
+        y: Theme.gap-sm + 3px;
+        icon: root.data.open ? IconSet.ChevronDown : IconSet.ChevronRight;
+        size: 16px;
+        stroke: Theme.text-muted;
+    }
+    name := Text {
+        x: 32px;
+        y: Theme.gap-sm;
+        width: parent.width - 32px - 14px;
+        text: root.data.text;
+        color: Theme.text-primary;
+        font-size: Theme.font-body;
+        font-weight: 600;
+        wrap: word-wrap;
+    }
+    detail := Text {
+        x: 32px;
+        y: name.y + name.preferred-height + 1px;
+        width: name.width;
+        text: root.data.detail;
+        color: Theme.text-secondary;
+        font-size: Theme.font-sm;
+        wrap: word-wrap;
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { SettingsLogic.license-toggled(root.data.entry); }
+    }
+}
+
+/// Licenses (1.2): what baucord is built on, each part with
+/// its license; a row opens to the full text. A list of its own, not
+/// the scrolling column: an open group is thousands of paragraphs.
+component LicensesView inherits VerticalLayout {
+    in property <length> pad;
+    vertical-stretch: 1;
+    padding: root.pad;
+    padding-bottom: 0;
+    spacing: Theme.gap-md;
+    HorizontalLayout {
+        VerticalLayout {
+            max-width: 560px;
+            horizontal-stretch: 100;
+            PanelHeader {
+                title: Tr.licenses-title;
+                lead: Tr.licenses-lead;
+            }
+        }
+        Rectangle { horizontal-stretch: 1; }
+    }
+    HorizontalLayout {
+        vertical-stretch: 1;
+        ListView {
+            max-width: 574px;
+            horizontal-stretch: 100;
+            mouse-drag-pan-enabled: State.touch-host;
+            for row in SettingsState.licenses : Rectangle {
+                // Each kind is as tall as its own text says (fixed
+                // heights, which a layout passes through as they are).
+                height: cell.preferred-height;
+                cell := VerticalLayout {
+                    if row.kind == 0 : LicenseLine {
+                        text: row.text;
+                        indent: Theme.gap-sm;
+                        above: Theme.gap-md;
+                        below: Theme.gap-xs;
+                        weight: 600;
+                    }
+                    if row.kind == 1 : LicenseEntry { data: row; }
+                    if row.kind == 2 : LicenseLine {
+                        text: row.text;
+                        tint: Theme.text-secondary;
+                        above: Theme.gap-xs;
+                    }
+                    if row.kind == 3 : LicenseLine { text: row.text; }
+                }
+            }
+        }
+        Rectangle { horizontal-stretch: 1; }
+    }
 }
 
 component CreditsPanel inherits VerticalLayout {
@@ -1220,6 +1429,7 @@ component SettingsNav inherits VerticalLayout {
     if root.narrow : Rectangle { height: Theme.gap-lg; }
     NavItem { text: Tr.tab-credits;   icon: IconSet.Heart;             tall: root.narrow; active: !root.narrow && root.tab == 6; clicked => { root.picked(6); } }
     NavItem { text: Tr.tab-about;     icon: IconSet.Info;              tall: root.narrow; active: !root.narrow && root.tab == 7; clicked => { root.picked(7); } }
+    NavItem { text: Tr.tab-licenses;  icon: IconSet.Scale;             tall: root.narrow; active: !root.narrow && root.tab == 9; clicked => { root.picked(9); } }
     if root.narrow : Rectangle { }
 }
 
@@ -1304,7 +1514,8 @@ component SettingsFooter inherits Rectangle {
 
 export component SettingsPanel inherits FocusScope {
     /// 0 profile, 1 general, 2 audio, 3 sounds, 4 keyboard, 5 servers,
-    /// 6 credits, 7 about, 8 debug. Mirrored by `settingsui::TAB_*`.
+    /// 6 credits, 7 about, 8 debug, 9 open-source licenses. Mirrored by
+    /// `settingsui::TAB_*`.
     in-out property <int> tab: 0;
     /// The narrow layout (a phone held upright; ANDROID-SPEC.md D28):
     /// the section list and the open section are two pages, as the
@@ -1349,7 +1560,8 @@ export component SettingsPanel inherits FocusScope {
             }
         }
         VerticalLayout {
-            SettingsContent { tab: root.tab; }
+            if root.tab != 9 : SettingsContent { tab: root.tab; }
+            if root.tab == 9 : LicensesView { pad: Theme.gap-xl; }
             SettingsFooter { }
         }
     }
@@ -1395,10 +1607,11 @@ export component SettingsPanel inherits FocusScope {
                 root.section-open = true;
             }
         }
-        if root.section-open : SettingsContent {
+        if root.section-open && root.tab != 9 : SettingsContent {
             tab: root.tab;
             pad: Theme.gap-lg;
         }
+        if root.section-open && root.tab == 9 : LicensesView { pad: Theme.gap-lg; }
         SettingsFooter { }
     }
 }
@@ -1412,6 +1625,11 @@ export component SettingsWindow inherits Window {
     min-height: 580px;
 
     in-out property <int> tab <=> panel.tab;
+
+    // The app is dark whatever the OS is: the stock widgets drawn from
+    // the style's palette (scrollbars, Settings → About's AboutSlint)
+    // follow.
+    init => { Palette.color-scheme = ColorScheme.dark; }
 
     // Same Windows minimize→restore workaround as MainWindow: the OS
     // clears the surface while damage tracking trusts the back buffer;

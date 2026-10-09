@@ -64,6 +64,12 @@ impl ChatServer {
             self.fail_dm(client, client_ref, DmFailReason::NoSuchUser);
             return;
         }
+        // Either of them blocked the other (protocol::safety): said the
+        // same way both ways, so a blocked sender learns nothing more.
+        if self.blocked_either(&from, &to) {
+            self.fail_dm(client, client_ref, DmFailReason::Unavailable);
+            return;
+        }
         if !permissions::has(self.effective_permissions(&to), permissions::DM) {
             self.fail_dm(client, client_ref, DmFailReason::NoPermission);
             return;
@@ -136,6 +142,20 @@ impl ChatServer {
         };
         match outcome {
             Outcome::Answered(Answer::Stored) => {
+                // Stored after one of the two deleted their account: not
+                // delivered, and the purge runs again for what the store
+                // just put back (it deletes nothing else twice).
+                let gone: Vec<UserId> = [pending.from, pending.to]
+                    .into_iter()
+                    .filter(|u| !self.policy.users.contains_key(u))
+                    .collect();
+                if !gone.is_empty() {
+                    for user_id in gone {
+                        self.persist.send(Command::PurgeUser { user_id });
+                    }
+                    self.fail_dm(pending.sender, pending.client_ref, DmFailReason::NoSuchUser);
+                    return;
+                }
                 if let Some(attachment) = pending.attachment.as_ref() {
                     self.stats.messages_count += 1;
                     self.send_msg(
@@ -201,7 +221,9 @@ impl ChatServer {
             from: *from,
             msg: msg.clone(),
         };
-        for session in self.sessions_of(to) {
+        let sessions = self.sessions_of(to);
+        self.introduce_author(sender, from, &sessions);
+        for session in sessions {
             if self.has_feature(session, features::DM) {
                 self.send_msg(session, &direct);
             }
@@ -209,6 +231,7 @@ impl ChatServer {
     }
 
     fn fail_dm(&mut self, client: ClientId, client_ref: u32, reason: DmFailReason) {
+        let reason = self.dm_refusal_for(client, reason);
         self.send_msg(client, &ServerMessage::MessageFailed { client_ref, reason });
     }
 
@@ -253,6 +276,7 @@ impl ChatServer {
             return;
         };
         if let Outcome::Answered(Answer::Conversations(dms)) = outcome {
+            self.send_authors(client, dms.iter().map(|d| d.user_id));
             self.send_msg(client, &ServerMessage::Conversations { dms });
         }
     }

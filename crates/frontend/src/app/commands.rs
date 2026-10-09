@@ -43,6 +43,9 @@ impl AppState {
             self.show_error(&t!("error-invalid-address"));
             return;
         };
+        // Which entry this session is: the default may change while
+        // it runs, and an account deletion clears this one.
+        self.session_server = Some(server.name.clone());
 
         self.network
             .tx
@@ -89,6 +92,17 @@ impl AppState {
                 self.send_admin(AdminCommand::ListRestrictions, PendingAdmin::Show);
             }
             "invites" => self.send_admin(AdminCommand::ListInvites, PendingAdmin::Show),
+            // 1.2: the open reports, where the panel is not (phones).
+            "reports" => self.send_admin(
+                AdminCommand::ListReports {
+                    resolved: args.trim() == "all",
+                },
+                PendingAdmin::Show,
+            ),
+            "resolve" => match args.trim().trim_start_matches('#').parse::<u64>() {
+                Ok(id) => self.send_admin(AdminCommand::ResolveReport { id }, PendingAdmin::Show),
+                Err(_) => self.push_command_output(&t!("chat-command-usage-resolve")),
+            },
             "telemetry" => {
                 let target = self.target_for(args.trim());
                 self.send_admin(AdminCommand::LastTelemetry { target }, PendingAdmin::Show);
@@ -277,6 +291,10 @@ impl AppState {
             out.push("/mute [voice|text] <user> [30m] [reason]");
             out.push("/unmute [voice|text] <user>");
             out.push("/bans");
+        }
+        if has(p::RESTRICT) && self.safety {
+            out.push("/reports [all]");
+            out.push("/resolve <id>");
         }
         if has(p::DISCONNECT) {
             out.push("/disconnect <user> [reason]");
@@ -833,6 +851,37 @@ impl AppState {
                         b.created_by.as_deref().unwrap_or("?"),
                         b.refs
                     );
+                    self.push_command_output(&line);
+                }
+            }
+            client::AdminOutcome::Reports(list) => {
+                self.push_command_output(&t!("chat-admin-reports-header", "count" => list.len()));
+                for r in list {
+                    let mut line = format!(
+                        "#{} {} — {} — {}",
+                        r.id,
+                        format_wall_stamp(r.ts),
+                        r.target_name,
+                        report_reason_text(r.reason)
+                    );
+                    if !r.excerpt.is_empty() {
+                        let short: String = r.excerpt.chars().take(120).collect();
+                        line.push_str(" — “");
+                        line.push_str(&short);
+                        line.push('”');
+                    }
+                    if !r.note.is_empty() {
+                        line.push_str(" — ");
+                        line.push_str(&r.note);
+                    }
+                    if let Some(by) = &r.reporter {
+                        line.push_str(" (");
+                        line.push_str(by);
+                        line.push(')');
+                    }
+                    if r.resolved {
+                        line.push_str(" ✓");
+                    }
                     self.push_command_output(&line);
                 }
             }

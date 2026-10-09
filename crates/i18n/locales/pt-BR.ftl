@@ -67,7 +67,7 @@ removed-disconnected = Desconectado por { $by }: { $reason }
 removed-kicked = Expulso por { $by }: { $reason } — você vai precisar de um novo convite para voltar.
 removed-banned = Banido por { $by }{ $until }{ $reason }
 removed-replaced = Você entrou de outro dispositivo ou conexão; esta foi encerrada.
-chat-server-not-persistent = Este servidor não guarda nada entre reinícios: cargos, convites e banimentos duram até ele parar.
+banner-not-persistent = Este servidor não guarda nada entre reinícios: cargos, convites e banimentos duram até ele parar.
 
 # ── Convites (/invite no compositor) ────────────────────────────────────
 chat-invite-created = Código de convite { $code } (copiado) — { $role }, { $expiry }, { $uses }. Passe-o junto com o endereço e a porta do servidor.
@@ -123,7 +123,7 @@ identity-regenerate = Regenerar
 identity-note = A chave deste dispositivo é quem você é em todos os servidores. Exporte-a para ser o mesmo usuário em outra máquina; Importar substitui a chave deste dispositivo; Regenerar cria uma nova (novo usuário — você vai precisar de um convite).
 identity-missing = sem chave de identidade
 identity-exported = Identidade exportada.
-identity-imported = Identidade importada — agora você é esta chave. Reconecte para usá-la.
+identity-imported = Identidade importada. Reconecte para usá-la.
 identity-regenerated = Nova identidade criada. A próxima conexão precisa de um convite.
 
 # ── Sidebar ─────────────────────────────────────────────────────────────
@@ -415,6 +415,10 @@ duration-forever = Até ser removido
 menu-edit-message = Editar mensagem
 menu-delete-message = Apagar mensagem
 chat-editing = Editando sua mensagem — Enter salva, Esc cancela
+chat-new-messages = { $count ->
+    [one] 1 mensagem nova
+   *[other] { $count } mensagens novas
+}
 chat-load-earlier = Carregar mensagens anteriores
 chat-loading = Carregando…
 chat-no-earlier = Não há mensagens anteriores.
@@ -497,7 +501,7 @@ debug-log-header = Registro
 debug-send-log = Enviar registro ao servidor
 debug-copy-log = Copiar registro
 debug-clear-log = Limpar registro
-debug-send-hint = Copiar coloca o final do registro na área de transferência, para colar onde quiser. Enviar manda até 2 MB dele ao servidor em que você está conectado, uma vez a cada 10 minutos; o admin dele o encontra na pasta logs do servidor.
+debug-send-hint = Copiar coloca o final do registro na área de transferência. Enviar manda até 2 MB dele ao servidor em que você está conectado, uma vez a cada 10 minutos; o admin dele o encontra na pasta logs do servidor.
 debug-tail-label = Últimas 100 linhas
 debug-tail-empty = O registro está vazio.
 debug-no-log-file = Esta versão escreve o registro no terminal, não em um arquivo.
@@ -509,7 +513,7 @@ debug-send-empty = Nada para enviar: o registro está vazio.
 debug-read-failed = Não foi possível ler o registro: { $error }
 debug-cleared = Registro limpo.
 debug-clear-failed = Não foi possível limpar o registro: { $error }
-debug-copied = Final do registro copiado ({ $size }): cole onde quiser.
+debug-copied = Final do registro copiado ({ $size }).
 debug-copy-empty = Nada para copiar: o registro está vazio.
 debug-copy-failed = Não foi possível copiar o registro: { $error }
 text-size-small = Pequeno
@@ -517,21 +521,21 @@ text-size-default = Padrão
 text-size-large = Grande
 text-size-larger = Maior
 sounds-header = Sons
-sounds-lead = O que faz som, e quando. Mensagens comuns nunca fazem.
+sounds-lead = Quais eventos tocam um som.
 sounds-share-started = Alguém no seu canal começa a compartilhar
 sounds-viewer-joined = Alguém começa a assistir sua transmissão
 sounds-viewer-joined-hint = Mais suave, e só você ouve.
 sounds-enabled = Ativar sons
-sounds-enabled-hint = A chave geral: desligada, silencia todos os sons.
+sounds-enabled-hint = Desligado, silencia todos os sons.
 sounds-join-leave = Alguém entra ou sai do seu canal
 files-header = Arquivos
 files-note = As configurações, a chave de identidade e o avatar ficam nesta pasta.
 servers-lead = Servidores salvos; o padrão é o que a tela de conexão abre.
-audio-lead = Dispositivos, gate de entrada e nível de saída — cada mudança vale na hora.
+audio-lead = As mudanças valem na hora.
 
 # ── Configurações: inicialização, notificações, chat, privacidade, transmissão ─
 sounds-mention = Uma mensagem cita você
-sounds-mention-hint = Seu apelido como palavra, ou @apelido. Desligado por padrão: o chat geral pode ficar movimentado. Mensagens comuns nunca tocam som.
+sounds-mention-hint = Seu apelido como palavra inteira, ou @apelido.
 startup-header = Inicialização
 startup-auto-connect = Conectar ao servidor padrão ao abrir
 startup-auto-connect-hint = Precisa de um apelido; a tela de conexão é pulada.
@@ -546,7 +550,7 @@ chat-image-size = Imagens que você envia
 chat-image-size-hint = Imagens maiores são reduzidas para caber. Os servidores limitam uploads a 10 MB.
 image-size-max = Máximo (10 MB)
 privacy-header = Privacidade
-privacy-note = Enquanto conectado, um servidor vê seu apelido, o id da sua chave, seus papéis e nível, em qual canal você está e, a cada 10 segundos, uma linha de telemetria: tempo de ida e volta, perda de pacotes, os nomes dos seus dispositivos de áudio e vídeo, a versão do app e o sistema operacional. Admins desse servidor podem ler a última linha na lista. Nada vai para outro lugar.
+privacy-note = Enquanto conectado, um servidor vê seu apelido, o id da sua chave, seus papéis e nível, em qual canal você está e, a cada 10 segundos, uma linha de telemetria: tempo de ida e volta, perda de pacotes, os nomes dos seus dispositivos de áudio e vídeo, a versão do app e o sistema operacional. Admins desse servidor podem ler a última linha na lista.
 audio-transmission = Transmissão
 audio-vad = Detecção de voz
 audio-ptt = Apertar para falar
@@ -826,3 +830,87 @@ host-single-window = Ainda não disponível no celular — no desktop isto abre 
 quit-ios = No iPhone, os apps são fechados pelo seletor de apps: deslize para cima a partir da borda inferior, pare um instante e deslize o baucord para cima.
 pick-from-photos = Fotos
 pick-from-files = Arquivos
+
+# ── 1.2: bloquear, denunciar, excluir sua conta ───────────────────────
+menu-block = Bloquear
+menu-unblock = Desbloquear
+menu-report = Denunciar…
+menu-report-message = Denunciar mensagem…
+menu-block-author = Bloquear quem enviou
+dm-failed-unavailable = Você não pode enviar mensagens para esta pessoa.
+toast-blocked = Você bloqueou { $name }. Você não vai ver as mensagens nem ouvir essa pessoa.
+toast-unblocked = Você desbloqueou { $name }. As mensagens novas aparecem; as anteriores voltam quando você reconectar.
+report-title-user = Denunciar { $name }
+report-title-message = Denunciar uma mensagem de { $name }
+report-hint = Os moderadores do servidor veem esta denúncia e a mensagem como está agora. A pessoa não fica sabendo quem a denunciou.
+report-reason = Motivo
+report-reason-placeholder = Escolha um motivo
+report-reason-spam = Spam ou golpe
+report-reason-harassment = Assédio ou bullying
+report-reason-hate = Discurso de ódio
+report-reason-sexual = Conteúdo sexual
+report-reason-violence = Violência ou ameaças
+report-reason-self-harm = Automutilação ou suicídio
+report-reason-illegal = Algo ilegal
+report-reason-other = Outra coisa
+report-note = Algo a acrescentar
+report-note-placeholder = Opcional
+report-also-block = Bloquear também
+report-also-block-hint = Deixar de ver as mensagens e de ouvir essa pessoa.
+report-send = Enviar denúncia
+report-sent = Denúncia enviada aos moderadores.
+report-refused-no-message = Essa mensagem não está mais no servidor.
+report-refused-no-user = Essa conta não está mais no servidor.
+report-refused-yourself = Você não pode denunciar a si mesmo.
+report-refused-too-many = Denúncias demais em pouco tempo. Tente de novo em alguns minutos.
+blocked-header = Pessoas bloqueadas
+blocked-not-connected = Conecte-se a um servidor para ver quem você bloqueou lá.
+blocked-lead = Você não vê as mensagens nem ouve essas pessoas, e elas não podem lhe enviar mensagens diretas. Elas não são avisadas.
+blocked-none = Ninguém
+unblock = Desbloquear
+account-delete-header = Excluir sua conta
+account-delete-lead = Sua conta em { $server }.
+account-delete-note = Remove sua conta neste servidor e tudo o que você publicou nele: mensagens, arquivos, mensagens diretas. Não dá para desfazer. Para entrar de novo você vai precisar de um convite novo.
+account-delete = Excluir minha conta
+account-delete-confirm = Excluir tudo — tem certeza?
+account-deleting = Excluindo…
+account-delete-last-admin = Você é o único admin deste servidor. Torne outra pessoa admin primeiro e depois exclua sua conta.
+account-deleted = Sua conta em { $server } foi excluída, com tudo o que você publicou nele. Para entrar de novo você vai precisar de um convite novo.
+admin-reports = Denúncias
+admin-reports-lead = O que as pessoas denunciaram aos moderadores, mais recentes primeiro.
+admin-reports-show-resolved = Mostrar denúncias tratadas
+admin-reports-none = Nenhuma denúncia aberta.
+admin-reports-by = Denunciado por
+admin-reports-by-gone = Denunciado por uma conta excluída
+admin-reports-resolve = Marcar como tratada
+admin-reports-delete-message = Excluir mensagem
+admin-reports-what-general = uma mensagem no General
+admin-reports-what-dm = uma mensagem direta
+admin-reports-what-person = a pessoa
+admin-act-report-message = denunciou uma mensagem de
+admin-act-report-user = denunciou
+admin-act-report-resolve = tratou a denúncia
+admin-act-user-delete = excluiu, a pedido do dono, a conta
+chat-admin-reports-header = { $count } denúncias, mais recentes primeiro
+chat-command-usage-resolve = Uso: /resolve <número da denúncia> (veja /reports)
+# ── A linha de termos do cartão de conexão (1.2) ─────────────────────
+terms-notice = Ao conectar, você concorda com os
+terms-link = termos e condições
+
+# ── Atividade do Geral (1.2): o botão do cabeçalho, o vazio ──────────
+activity-show = Atividade
+activity-hide = Voltar às mensagens
+activity-empty-title = Nenhuma atividade ainda
+activity-empty = Entradas, saídas, mudanças de sala e telas compartilhadas aparecem aqui enquanto você está conectado.
+
+# ── Configurações → Licenças de código aberto (1.2) ────────────────────
+tab-licenses = Licenças
+licenses-title = Licenças de código aberto
+licenses-lead = baucord é software livre sob a Apache License 2.0, feito sobre o software de código aberto abaixo. Cada parte mantém sua própria licença; abra uma para lê-la.
+licenses-section-components = Componentes
+licenses-section-crates = Crates do Rust ({ $count })
+licenses-crates-count = { $count ->
+    [one] 1 crate
+   *[other] { $count } crates
+}
+licenses-used-by = Usado por: { $crates }
