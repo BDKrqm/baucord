@@ -24,140 +24,48 @@ pub mod convert {
         roster::{split_id, ChannelRow, RosterItem, RosterRow},
     };
 
-    use super::{ChatRow, MenuAction, MenuEntry, UserRow};
+    use super::{ChatRow, MenuEntry, UserRow};
 
     /// Menu entries → the overlay's rows: the main column and, in
     /// order of appearance, one column per submenu (`MenuEntry.submenu`
     /// indexes it). `label` localizes; the shell owns the catalog.
+    ///
+    /// The third part is what each row does, by `MenuEntry.id`: the
+    /// overlay hands that id back on a pick and never learns what an
+    /// action is (review P2-57 — it used to carry a Slint copy of
+    /// app-core's enum, with a converter each way).
     #[must_use]
     pub fn menu_entries(
         entries: &[menu::Entry],
         label: &dyn Fn(&menu::Label) -> slint::SharedString,
-    ) -> (Vec<MenuEntry>, Vec<Vec<MenuEntry>>) {
+    ) -> (Vec<MenuEntry>, Vec<Vec<MenuEntry>>, Vec<menu::Action>) {
         let mut submenus: Vec<Vec<MenuEntry>> = Vec::new();
+        let mut actions: Vec<menu::Action> = Vec::new();
+        let mut row = |e: &menu::Entry, submenu: i32| {
+            actions.push(e.action);
+            MenuEntry {
+                label: label(&e.label),
+                id: i32::try_from(actions.len() - 1).unwrap_or(-1),
+                slider: matches!(e.action, menu::Action::Volume),
+                enabled: e.enabled,
+                separator: e.separator,
+                danger: e.danger,
+                submenu,
+            }
+        };
         let main = entries
             .iter()
             .map(|e| {
                 let submenu = if e.submenu.is_empty() {
                     -1
                 } else {
-                    submenus.push(
-                        e.submenu
-                            .iter()
-                            .map(|sub| menu_entry(sub, -1, label))
-                            .collect(),
-                    );
+                    submenus.push(e.submenu.iter().map(|sub| row(sub, -1)).collect());
                     i32::try_from(submenus.len() - 1).unwrap_or(-1)
                 };
-                menu_entry(e, submenu, label)
+                row(e, submenu)
             })
             .collect();
-        (main, submenus)
-    }
-
-    fn menu_entry(
-        e: &menu::Entry,
-        submenu: i32,
-        label: &dyn Fn(&menu::Label) -> slint::SharedString,
-    ) -> MenuEntry {
-        let (action, arg) = menu_action(e.action);
-        MenuEntry {
-            label: label(&e.label),
-            action,
-            arg,
-            enabled: e.enabled,
-            separator: e.separator,
-            danger: e.danger,
-            submenu,
-        }
-    }
-
-    /// An action and its parameter, as the Slint enum + `arg` carry
-    /// them; [`menu_action_back`] is the inverse.
-    #[must_use]
-    pub fn menu_action(action: menu::Action) -> (MenuAction, i32) {
-        use menu::Action as A;
-        match action {
-            A::None => (MenuAction::None, 0),
-            A::ChannelEdit(id) => (MenuAction::ChannelEdit, i32::from(id)),
-            A::ChannelDelete(id) => (MenuAction::ChannelDelete, i32::from(id)),
-            A::Volume => (MenuAction::Volume, 0),
-            A::MuteForMe => (MenuAction::MuteForMe, 0),
-            A::ResetAudio => (MenuAction::ResetAudio, 0),
-            A::Watch => (MenuAction::Watch, 0),
-            A::Message => (MenuAction::Message, 0),
-            A::SetRole(id) => (MenuAction::SetRole, i32::try_from(id).unwrap_or(-1)),
-            A::MoveTo(id) => (MenuAction::MoveTo, i32::from(id)),
-            A::ChannelKick => (MenuAction::ChannelKick, 0),
-            A::MuteVoice => (MenuAction::MuteVoice, 0),
-            A::MuteChat => (MenuAction::MuteChat, 0),
-            A::UnmuteVoice => (MenuAction::UnmuteVoice, 0),
-            A::UnmuteChat => (MenuAction::UnmuteChat, 0),
-            A::Disconnect => (MenuAction::Disconnect, 0),
-            A::Kick => (MenuAction::Kick, 0),
-            A::Ban => (MenuAction::Ban, 0),
-            A::CopyText => (MenuAction::CopyText, 0),
-            A::SelectText(on) => (MenuAction::SelectText, i32::from(on)),
-            A::EditMessage => (MenuAction::EditMessage, 0),
-            A::DeleteMessage => (MenuAction::DeleteMessage, 0),
-            A::OpenImage => (MenuAction::OpenImage, 0),
-            A::SaveImage => (MenuAction::SaveImage, 0),
-            A::SaveFile => (MenuAction::SaveFile, 0),
-            A::Cut => (MenuAction::Cut, 0),
-            A::Copy => (MenuAction::Copy, 0),
-            A::Paste => (MenuAction::Paste, 0),
-            A::CopyImage => (MenuAction::CopyImage, 0),
-            A::Block => (MenuAction::Block, 0),
-            A::Unblock => (MenuAction::Unblock, 0),
-            A::Report => (MenuAction::Report, 0),
-            A::ReportMessage => (MenuAction::ReportMessage, 0),
-            A::BlockAuthor => (MenuAction::BlockAuthor, 0),
-        }
-    }
-
-    /// The pick back into app-core's action. A parameter the UI could
-    /// not have produced (a role outside 1…4, a channel above `u16`)
-    /// yields `None`.
-    #[must_use]
-    pub fn menu_action_back(action: MenuAction, arg: i32) -> Option<menu::Action> {
-        use menu::Action as A;
-        let channel = || u16::try_from(arg).ok();
-        Some(match action {
-            MenuAction::None => A::None,
-            MenuAction::ChannelEdit => A::ChannelEdit(channel()?),
-            MenuAction::ChannelDelete => A::ChannelDelete(channel()?),
-            MenuAction::Volume => A::Volume,
-            MenuAction::MuteForMe => A::MuteForMe,
-            MenuAction::ResetAudio => A::ResetAudio,
-            MenuAction::Watch => A::Watch,
-            MenuAction::Message => A::Message,
-            MenuAction::SetRole => A::SetRole(u32::try_from(arg).ok()?),
-            MenuAction::MoveTo => A::MoveTo(channel()?),
-            MenuAction::ChannelKick => A::ChannelKick,
-            MenuAction::MuteVoice => A::MuteVoice,
-            MenuAction::MuteChat => A::MuteChat,
-            MenuAction::UnmuteVoice => A::UnmuteVoice,
-            MenuAction::UnmuteChat => A::UnmuteChat,
-            MenuAction::Disconnect => A::Disconnect,
-            MenuAction::Kick => A::Kick,
-            MenuAction::Ban => A::Ban,
-            MenuAction::CopyText => A::CopyText,
-            MenuAction::SelectText => A::SelectText(arg != 0),
-            MenuAction::EditMessage => A::EditMessage,
-            MenuAction::DeleteMessage => A::DeleteMessage,
-            MenuAction::OpenImage => A::OpenImage,
-            MenuAction::SaveImage => A::SaveImage,
-            MenuAction::SaveFile => A::SaveFile,
-            MenuAction::Cut => A::Cut,
-            MenuAction::Copy => A::Copy,
-            MenuAction::Paste => A::Paste,
-            MenuAction::CopyImage => A::CopyImage,
-            MenuAction::Block => A::Block,
-            MenuAction::Unblock => A::Unblock,
-            MenuAction::Report => A::Report,
-            MenuAction::ReportMessage => A::ReportMessage,
-            MenuAction::BlockAuthor => A::BlockAuthor,
-        })
+        (main, submenus, actions)
     }
 
     /// Roster row → sidebar model row.
@@ -175,38 +83,16 @@ pub mod convert {
             self_muted: r.self_muted,
             self_deafened: r.self_deafened,
             sharing: r.sharing,
-            is_channel: false,
             channel_id: i32::from(r.channel_id),
-            locked: false,
-            member_label: "".into(),
-            is_our_channel: false,
             role: r.role.as_int(),
-            level: i32::from(r.level),
-            // The shell fills these from what the session may do and
-            // from the profiles it knows.
-            level_label: "".into(),
-            role_label: "".into(),
-            role_icon: "".into(),
-            role_color: slint::Color::default(),
-            has_role_color: false,
-            xp_pct: -1,
-            xp_line: "".into(),
-            telemetry: "".into(),
-            avatar: slint::Image::default(),
-            has_avatar: false,
             initial: app_core::roster::initial_of(&r.name).into(),
             tile_tint: tint(&r.name),
-            name_color: slint::Color::default(),
-            has_name_color: false,
-            name_style: 0,
-            outranked: false,
-            role_editable: false,
-            channel_kickable: false,
-            members_only: false,
-            temporary: false,
-            is_afk: false,
-            owned: false,
-            from_config: false,
+            // No level known. That and everything left at its default
+            // — the labels, the role's and the profile's look, the
+            // telemetry — the shell fills from what the session may do
+            // and from the profiles it knows.
+            xp_pct: -1,
+            ..Default::default()
         }
     }
 
@@ -215,16 +101,8 @@ pub mod convert {
     #[must_use]
     pub fn channel_row(c: &ChannelRow) -> UserRow {
         UserRow {
-            client_id_lo: 0,
-            client_id_hi: 0,
             name: c.name.as_str().into(),
             volume_pct: 100,
-            is_us: false,
-            speaking: false,
-            local_muted: false,
-            self_muted: false,
-            self_deafened: false,
-            sharing: false,
             is_channel: true,
             channel_id: i32::from(c.id),
             locked: c.locked,
@@ -233,31 +111,10 @@ pub mod convert {
                 None => c.members.to_string().into(),
             },
             is_our_channel: c.is_ours,
-            role: 0,
-            level: 0,
-            level_label: "".into(),
-            role_label: "".into(),
-            role_icon: "".into(),
-            role_color: slint::Color::default(),
-            has_role_color: false,
             xp_pct: -1,
-            xp_line: "".into(),
-            telemetry: "".into(),
-            avatar: slint::Image::default(),
-            has_avatar: false,
-            initial: "".into(),
-            tile_tint: slint::Color::default(),
-            name_color: slint::Color::default(),
-            has_name_color: false,
-            name_style: 0,
-            outranked: false,
-            role_editable: false,
-            channel_kickable: false,
             members_only: c.members_only,
             temporary: c.temporary,
-            is_afk: c.is_afk,
-            owned: c.owned,
-            from_config: c.from_config,
+            ..Default::default()
         }
     }
 
@@ -389,13 +246,16 @@ pub mod convert {
         slint::Image::from_rgba8(buf)
     }
 
-    /// Decode PNG/GIF-first-frame bytes → `slint::Image` + dimensions.
-    /// Uses app-core's bounded decoder (bomb limits included).
+    /// Decode PNG/JPEG/GIF-first-frame bytes → `slint::Image` +
+    /// dimensions. Wire bytes only — a received picture, or one of ours
+    /// already through `load_image_bytes` — so it takes app-core's
+    /// received-picture decoder: bomb limits, and no other format
+    /// (review P1-20).
     pub fn decode_to_image(
         bytes: &[u8],
     ) -> Result<(slint::Image, u32, u32), app_core::images::ImageError> {
-        let decoded = app_core::images::decode_bounded(bytes)?;
-        let rgba = decoded.to_rgba8();
+        let decoded = app_core::images::decode_received(bytes)?;
+        let rgba = decoded.into_rgba8();
         let (w, h) = (rgba.width(), rgba.height());
         Ok((rgba_image(rgba.as_raw(), w, h), w, h))
     }
@@ -410,9 +270,26 @@ pub mod convert {
     /// old fixed 720 paid the hidpi price everywhere. Capped at 2×.
     #[must_use]
     pub fn preview_max_edge(scale_factor: f32) -> u32 {
+        scaled_edge(PREVIEW_BOX_EDGE, scale_factor)
+    }
+
+    /// The send preview's picture box at its widest (main.slint: a
+    /// 520 px card, 300 px tall inside its padding).
+    pub const SEND_PREVIEW_BOX_EDGE: u32 = 480;
+
+    /// Longest edge of the send preview's texture: its box at the
+    /// window's scale. The dialog used to hold the full-resolution
+    /// decode — up to 1280², 6.5 MB — to draw it at a third of that
+    /// (review P3-41).
+    #[must_use]
+    pub fn send_preview_max_edge(scale_factor: f32) -> u32 {
+        scaled_edge(SEND_PREVIEW_BOX_EDGE, scale_factor)
+    }
+
+    fn scaled_edge(logical: u32, scale_factor: f32) -> u32 {
         let scale = scale_factor.clamp(1.0, 2.0);
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let edge = (PREVIEW_BOX_EDGE as f32 * scale).ceil() as u32;
+        let edge = (logical as f32 * scale).ceil() as u32;
         edge
     }
 
@@ -422,17 +299,18 @@ pub mod convert {
     /// [`preview_max_edge`]) — a 1280² PNG is 6.5 MB of RGBA that
     /// would otherwise stay resident for the row's whole life just to
     /// be drawn at 360 px. The full-resolution decode happens only
-    /// while the gallery viewer is open.
+    /// while the gallery viewer is open. PNG, JPEG and GIF only, as
+    /// [`decode_to_image`].
     pub fn decode_to_preview(
         bytes: &[u8],
         max_edge: u32,
     ) -> Result<(slint::Image, u32, u32), app_core::images::ImageError> {
-        let decoded = app_core::images::decode_bounded(bytes)?;
+        let decoded = app_core::images::decode_received(bytes)?;
         let (w, h) = (decoded.width(), decoded.height());
         let rgba = if w.max(h) > max_edge {
-            decoded.thumbnail(max_edge, max_edge).to_rgba8()
+            decoded.thumbnail(max_edge, max_edge).into_rgba8()
         } else {
-            decoded.to_rgba8()
+            decoded.into_rgba8()
         };
         let (tw, th) = (rgba.width(), rgba.height());
         Ok((rgba_image(rgba.as_raw(), tw, th), w, h))

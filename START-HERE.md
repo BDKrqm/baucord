@@ -4,7 +4,8 @@ baucord is a voice, text and screen-sharing app in Rust: a self-hosted
 relay server (QUIC, no media mixing), a desktop client for Windows,
 macOS and Linux, and clients for Android and iPhone that run the same
 Rust engine and the same Slint UI. It is in daily use: 1.1.9 on every
-platform (1.2.0, the Play closed-testing release, is next), desktop
+platform (1.2.1, the Play closed-testing release with the 2026-10-10
+review's fixes, is next), desktop
 users on the in-app updater, Android as a sideloaded APK and on Play's
 internal test, iPhone as an Ad Hoc build, the official server in
 Docker.
@@ -44,7 +45,9 @@ for the work at hand (§3). Everything else is linked from here.
 
   (It leaves out build output, git history, signing material and logs.
   `assets/` must be in it: the build embeds `assets/sounds/*.wav` and
-  every platform's icon comes from `assets/icons/icon.png`.)
+  every platform's icon comes from `assets/icons/icon.png` — the
+  desktop's through `scripts/desktop-icons.py`, whose output
+  (`icon-256.png`, `icon.ico`, the website's favicon) is committed.)
 - **Work:** the assistant unpacks it into its sandbox, edits,
   compile-checks every platform it can (host, Android, iOS — see
   SESSION-GUIDE §1), runs the tests, renders every `.slint` change at
@@ -80,10 +83,10 @@ for the work at hand (§3). Everything else is linked from here.
 | `ARCHITECTURE.md` | the runtime: threads, lanes, transport, the server tick, persistence, the client, the hosts | before server, protocol or client-core work |
 | `PERSISTENCE-SPEC.md` | the 1.1 design (accounts by device key, invites, roles, history, DMs, files, profiles, admin) — all shipped; §12 is every later decision | before touching admission, roles, history, DMs, files |
 | `AEC-SPEC.md` | echo cancellation on every platform; §12 the decisions (E1…) | before audio-path work |
-| `LATENCY-SPEC.md` | the desktop voice latency budget and what could still be cut (LAT-1…9), parked 2026-10-08 | before latency work |
-| `ANDROID-SPEC.md` | the Android client as it is (§0–§13); decisions D1…D9 in §1, D10…D66 in §14 (from D23 on, newest first) | before Android work |
-| `IOS-SPEC.md` | the iPhone client as it is (§0–§13); decisions D1…D13 in §1, D14…D56 in §14 (in order) | before iOS work |
+| `ANDROID-SPEC.md` | the Android client as it is (§0–§13); decisions D1…D9 in §1, D10…D70 in §14 (from D23 on, newest first) | before Android work |
+| `IOS-SPEC.md` | the iPhone client as it is (§0–§13); decisions D1…D13 in §1, D14…D60 in §14 (in order) | before iOS work |
 | `android/README.md`, `ios/README.md` | building, running and releasing each phone app | when the user builds |
+| `DEVICE-CHECKLIST.md` | what has to be seen on a real Windows machine, Android phone and iPhone before a release: every change the sandbox could not run, as *do this → expect that* | when the user tests; add a line for every platform change made unrun |
 | `licenses/README.md` | the third-party notices: what writes them, what CI does | before adding a native library |
 | `tools/chat-scroll-sim/` | the chat pane's scrolling harness (ANDROID-SPEC D66) | before touching the chat's scrolling |
 
@@ -142,7 +145,8 @@ The full list is SESSION-GUIDE §4; these break things when forgotten:
 
 ## 5. Where things stand (2026-10-09)
 
-- **Version 1.2.0** in the crates (released: 1.1.9); the crate map is
+- **Version 1.2.1** in the crates (released: 1.1.9; 1.2.1 carries the
+  fixes of the 2026-10-10 review, PRODUCTION-PLAN.md §2a); the crate map is
   SESSION-GUIDE §2, the list of what it carries SESSION-GUIDE §3. 1.2
   adds what the stores require of a chat app — block, report, delete
   my account, the terms on the connect card (PERSISTENCE-SPEC §12 S1),

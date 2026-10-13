@@ -37,15 +37,17 @@
 use std::time::Duration;
 
 use cpal::{BufferSize, SupportedBufferSize};
-use crossbeam_channel::{Receiver, RecvTimeoutError};
 
 // ── High-resolution timer (process-wide) ────────────────────────────────
 
-/// Holds the Windows multimedia timer at 1 ms resolution while alive.
+/// Holds the Windows multimedia timer at 1 ms resolution while alive
+/// (nothing elsewhere).
 ///
 /// `timeBeginPeriod` requests nest per process and are balanced by the
-/// matching `timeEndPeriod` in `Drop`, so scoping this to the voice
-/// session keeps the (small) power cost bounded to active calls.
+/// matching `timeEndPeriod` in `Drop`, so each holder scopes its own:
+/// the voice engine in a room, the screen threads while a stream is
+/// shared or watched — whoever paces something by short timed waits.
+/// Nobody holds it while the app only sits connected (review P2-35).
 pub struct TimerResolutionGuard {
     #[cfg_attr(not(windows), allow(dead_code))]
     active: bool,
@@ -53,6 +55,7 @@ pub struct TimerResolutionGuard {
 
 #[cfg(windows)]
 impl TimerResolutionGuard {
+    #[must_use]
     pub fn acquire() -> Self {
         // TIMERR_NOERROR == 0
         let active = unsafe { timeBeginPeriod(1) } == 0;
@@ -65,6 +68,7 @@ impl TimerResolutionGuard {
 
 #[cfg(not(windows))]
 impl TimerResolutionGuard {
+    #[must_use]
     pub fn acquire() -> Self {
         Self { active: false }
     }
@@ -122,10 +126,10 @@ impl Drop for RtGuard {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 impl Drop for RtGuard {
     fn drop(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            if let Err(e) = audio_thread_priority::demote_current_thread_from_real_time(handle) {
-                log::debug!("real-time demotion failed: {e}");
-            }
+        if let Some(handle) = self.handle.take()
+            && let Err(e) = audio_thread_priority::demote_current_thread_from_real_time(handle)
+        {
+            log::debug!("real-time demotion failed: {e}");
         }
     }
 }
@@ -285,19 +289,12 @@ pub fn request_low_latency_buffer(supported: &SupportedBufferSize, sample_rate: 
 
 // ── Worker wakeups ──────────────────────────────────────────────────────
 
-/// Block until the audio callback pings the wake latch, or until
-/// `timeout` elapses — whichever comes first.
-///
-/// If the signaling side is gone (stream torn down while the worker is
-/// still running, e.g. a failed device start), fall back to a plain sleep
-/// so the loop degrades to the old polling behavior instead of busy-
-/// spinning on a disconnected channel.
-pub fn wait_for_wake(wake_rx: &Receiver<()>, timeout: Duration) {
-    match wake_rx.recv_timeout(timeout) {
-        Ok(()) | Err(RecvTimeoutError::Timeout) => {}
-        Err(RecvTimeoutError::Disconnected) => std::thread::sleep(timeout),
-    }
-}
+/// How long a worker blocked on its device latch waits before looking
+/// again on its own. Only a safety net: every backend rings the latch
+/// on each callback, and a stop rings it too, so this is not a tick
+/// (review P1-4: the 5 and 10 ms timers beside the latch woke the
+/// voice workers 100–200 times a second for no audio).
+pub(crate) const LATCH_SAFETY_WAIT: Duration = Duration::from_millis(200);
 
 /// `thread::spawn` with a name.
 ///
@@ -321,14 +318,14 @@ where
 
 #[cfg(windows)]
 #[link(name = "winmm")]
-extern "system" {
+unsafe extern "system" {
     fn timeBeginPeriod(u_period: u32) -> u32;
     fn timeEndPeriod(u_period: u32) -> u32;
 }
 
 #[cfg(windows)]
 #[link(name = "avrt")]
-extern "system" {
+unsafe extern "system" {
     fn AvSetMmThreadCharacteristicsW(
         task_name: *const u16,
         task_index: *mut u32,

@@ -16,14 +16,11 @@ use protocol::{
     features, permissions, ConvRef, HistoryMessage, RestrictionKind, ServerMessage, UserId,
 };
 
-use super::{hex, ChatServer};
+use super::{hex, ChatServer, Waiting};
 use crate::persistence::{
-    Answer, AskId, Command, ConvKey, MessageRow, Outcome, ProgressDelta, Query, RECENT_RING,
+    Answer, Command, ConvKey, MessageRow, Outcome, ProgressDelta, Query, RECENT_RING,
 };
 
-/// A history page stays under this many bytes of text (spec §10:
-/// pages ≤ 64 KiB).
-const HISTORY_PAGE_BYTES: usize = 60 * 1024;
 /// How long a history read may take before the client is told to retry.
 const HISTORY_DEADLINE: Duration = Duration::from_secs(2);
 const HISTORY_RETRY_SECS: u16 = 5;
@@ -65,11 +62,7 @@ impl ChatServer {
             "{} ({client:#x}) chat rate limited; retry in {retry_ms} ms",
             self.get_username(client)
         );
-        self.send_if(
-            client,
-            features::HISTORY,
-            &ServerMessage::ChatRateLimited { retry_ms },
-        );
+        self.send_msg(client, &ServerMessage::ChatRateLimited { retry_ms });
         false
     }
 
@@ -107,7 +100,7 @@ impl ChatServer {
         more: bool,
     ) {
         let rich = self.has_feature(client, features::FILES);
-        let page: Vec<HistoryMessage> = rows
+        let mut page: Vec<HistoryMessage> = rows
             .iter()
             .map(|r| {
                 let mut m = to_wire(r);
@@ -117,10 +110,27 @@ impl ChatServer {
                 m
             })
             .collect();
+        // One `History` per page, cut to fit one message: every shipped
+        // client takes exactly one per request (it prepends a page and
+        // appends the replay), so a page split in two came out in the
+        // wrong order, and anything over 17 KiB was dropped unread
+        // (review P0-1). The newest rows stay; the rest come back with
+        // the next "Load earlier".
+        let dropped = protocol::keep_suffix_that_fits(&mut page, protocol::LIST_ITEMS_BUDGET);
+        let rows = &rows[dropped..];
         self.send_authors(client, rows.iter().map(|r| r.user_id));
-        self.send_history_pages(client, conv, page, more);
-        if rich && let Some(attachments) = self.history_attachments(conv, rows) {
-            self.send_msg(client, &attachments);
+        self.send_msg(
+            client,
+            &ServerMessage::History {
+                conv,
+                messages: page,
+                more: more || dropped > 0,
+            },
+        );
+        if rich {
+            for attachments in self.history_attachments(conv, rows) {
+                self.send_msg(client, &attachments);
+            }
         }
     }
 
@@ -160,7 +170,14 @@ impl ChatServer {
                 },
                 self.now + HISTORY_DEADLINE,
             );
-            self.pending_history.insert(ask, (client, conv, limit));
+            self.waiting.insert(
+                ask,
+                Waiting::History {
+                    client,
+                    conv,
+                    limit,
+                },
+            );
             return;
         }
         let oldest_in_ring = self.recent.front().map(|m| m.msg_id);
@@ -204,15 +221,25 @@ impl ChatServer {
             },
             self.now + HISTORY_DEADLINE,
         );
-        self.pending_history.insert(ask, (client, conv, limit));
+        self.waiting.insert(
+            ask,
+            Waiting::History {
+                client,
+                conv,
+                limit,
+            },
+        );
     }
 
     /// One history read the persistence thread answered (or did not,
     /// in time).
-    pub(super) fn resolve_history_answer(&mut self, ask: AskId, outcome: Outcome) {
-        let Some((client, conv, limit)) = self.pending_history.remove(&ask) else {
-            return;
-        };
+    pub(super) fn resolve_history_answer(
+        &mut self,
+        client: protocol::ClientId,
+        conv: protocol::ConvRef,
+        limit: u16,
+        outcome: Outcome,
+    ) {
         match outcome {
             Outcome::Answered(Answer::Messages(rows)) => {
                 let more = rows.len() >= usize::from(limit);
@@ -259,39 +286,6 @@ impl ChatServer {
                     },
                 );
             }
-        }
-    }
-
-    /// Split a page so no single message exceeds the size budget;
-    /// every batch but the last says `more: true`.
-    fn send_history_pages(
-        &mut self,
-        client: protocol::ClientId,
-        conv: ConvRef,
-        page: Vec<HistoryMessage>,
-        more: bool,
-    ) {
-        let mut batches: Vec<Vec<HistoryMessage>> = vec![Vec::new()];
-        let mut bytes = 0usize;
-        for m in page {
-            let size = m.text.len() + m.name.len() + 64;
-            if bytes + size > HISTORY_PAGE_BYTES && !batches.last().is_some_and(Vec::is_empty) {
-                batches.push(Vec::new());
-                bytes = 0;
-            }
-            bytes += size;
-            batches.last_mut().expect("one batch").push(m);
-        }
-        let last = batches.len() - 1;
-        for (i, messages) in batches.into_iter().enumerate() {
-            self.send_msg(
-                client,
-                &ServerMessage::History {
-                    conv,
-                    messages,
-                    more: more || i < last,
-                },
-            );
         }
     }
 
@@ -435,25 +429,23 @@ impl ChatServer {
             let after = self.policy.level_of(&user);
             self.persist.send(Command::AddProgress(delta));
             // Everyone's bar moves once a minute: each of this user's
-            // sessions, to every peer that renders it.
+            // sessions, to every peer that renders it — which for a
+            // session in the lobby is itself alone (review P2-1: this
+            // told every client it was there, by its id).
             for session in self.sessions_of(&user) {
                 let msg = self.user_progress(session, &user);
-                for peer in self.clients() {
-                    self.send_if(peer, features::PROGRESS_ALL, &msg);
+                for peer in self.audience_about(session) {
+                    self.send_msg(peer, &msg);
                 }
             }
             if after > before {
                 let xp = self.policy.xp.get(&user).copied().unwrap_or(0);
                 info!("{} reached level {after}", hex(&user[..8]));
                 for session in self.sessions_of(&user) {
-                    self.send_if(
-                        session,
-                        features::PROGRESS,
-                        &ServerMessage::ProgressUpdate { xp, level: after },
-                    );
+                    self.send_msg(session, &ServerMessage::ProgressUpdate { xp, level: after });
                     let details = self.user_details(session, &user);
-                    for peer in self.clients() {
-                        self.send_if_roles(peer, &details);
+                    for peer in self.audience_about(session) {
+                        self.send_msg(peer, &details);
                     }
                 }
             }
@@ -468,13 +460,6 @@ impl ChatServer {
     /// Whether the session negotiated `bit`.
     pub(super) fn has_feature(&self, client: protocol::ClientId, bit: u64) -> bool {
         self.features_of.get(&client).is_some_and(|f| f & bit != 0)
-    }
-
-    /// Send only when the session negotiated `bit`.
-    pub(super) fn send_if(&mut self, client: protocol::ClientId, bit: u64, msg: &ServerMessage) {
-        if self.has_feature(client, bit) {
-            self.send_msg(client, msg);
-        }
     }
 
     /// Delete a person (spec §8): an admin's purge.
@@ -495,9 +480,51 @@ impl ChatServer {
         for (blob, count) in released {
             self.blob_ref(blob, -i32::try_from(*count).unwrap_or(i32::MAX));
             if self.policy.blobs.get(blob).is_some_and(|b| b.refs == 0) {
-                self.policy.blobs.remove(blob);
-                self.blob_bytes.remove(blob);
+                self.forget_blob(blob);
                 self.persist.send(Command::DeleteBlob { blob_id: *blob });
+            }
+        }
+    }
+
+    /// A retention pass ran (`Notice::Pruned`). Messages older than
+    /// `history_cutoff` left the store: they leave the replay ring too
+    /// (a quiet server's ring can reach back past the window, and
+    /// would replay what retention promised was gone), and the file
+    /// references they held come off the counts — the store has taken
+    /// them off its own (review P2-11). Then the files it deleted.
+    pub(super) fn apply_prune(
+        &mut self,
+        history_cutoff: Option<crate::clock::WallMs>,
+        released: &[(protocol::BlobId, u32)],
+        files: &[protocol::BlobId],
+    ) {
+        if let Some(cutoff) = history_cutoff {
+            // No count is touched here: `released` covers these rows.
+            self.recent.retain(|m| m.ts >= cutoff);
+        }
+        for (blob, count) in released {
+            self.blob_ref(blob, -i32::try_from(*count).unwrap_or(i32::MAX));
+        }
+        self.forget_pruned_files(files);
+    }
+
+    /// The retention prune deleted these files. An unreferenced file's
+    /// metadata stays here on purpose — a re-announce of the same bytes
+    /// is answered "already here" — so it must go with the file, or the
+    /// next post of it points at nothing (review P0-4). One referenced
+    /// again in the moment between the prune's read and this notice has
+    /// lost its file; say so.
+    fn forget_pruned_files(&mut self, files: &[protocol::BlobId]) {
+        for blob in files {
+            let Some(meta) = self.forget_blob(blob) else {
+                continue;
+            };
+            if meta.refs > 0 {
+                log::warn!(
+                    "file {} was pruned while {} post(s) took it up again; it must be re-sent",
+                    hex(&blob[..8]),
+                    meta.refs
+                );
             }
         }
     }
@@ -554,8 +581,7 @@ impl ChatServer {
             match self.policy.blobs.get_mut(&blob) {
                 Some(meta) if meta.refs > 0 => meta.created_by = None,
                 _ => {
-                    self.policy.blobs.remove(&blob);
-                    self.blob_bytes.remove(&blob);
+                    self.forget_blob(&blob);
                     self.persist.send(Command::DeleteBlob { blob_id: blob });
                 }
             }
@@ -578,6 +604,7 @@ impl ChatServer {
         self.profile_changed_at.remove(user_id);
         self.uploads_today.remove(user_id);
         self.report_times.remove(user_id);
+        self.proven_uploads.retain(|(user, _)| user != user_id);
         self.block_times.remove(user_id);
         self.policy
             .invites

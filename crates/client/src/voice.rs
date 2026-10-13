@@ -1,8 +1,10 @@
 // voice.rs — Owns VoiceChat on a dedicated thread.
 //
-// Receives VoiceControl commands, emits VoiceEvent notifications,
-// and forwards outgoing packets to the network thread.
-// All audio processing is handled by the core library.
+// Receives VoiceControl commands and emits VoiceEvent notifications.
+// Packets do not pass through here: at each start the engine's two
+// packet handles go to the network thread, which feeds and drains the
+// engine itself (review P1-5). All audio processing is handled by the
+// core library.
 //
 // This module has NO dependency on any UI toolkit.  The caller injects
 // a `WakeFn` callback that is called whenever the UI event loop should
@@ -10,7 +12,7 @@
 
 use std::{
     sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering, Ordering::Relaxed},
+        atomic::{AtomicBool, Ordering, Ordering::Relaxed},
         Arc, Mutex,
     },
     thread,
@@ -18,12 +20,16 @@ use std::{
 };
 
 use audio::{
-    AecMode, AecReport, AudioPacket, PeerAudioSettings, SoundType, VoiceChat, VoiceChatConfig,
+    AecMode, AecReport, AudioStats, PeerAudioSettings, SoundType, VoiceChat, VoiceChatConfig,
 };
 use crossbeam_channel::{bounded, select, Receiver, Sender};
 use log::info;
 
-use crate::{config::Settings, network::NetworkControl, WakeFn};
+use crate::{
+    config::Settings,
+    network::{NetworkControl, VoiceLink},
+    WakeFn,
+};
 
 // ── Channel messages ────────────────────────────────────────────────────
 
@@ -33,15 +39,24 @@ pub enum VoiceControl {
     /// and every other message would pay for it otherwise.
     Start {
         settings: Box<Settings>,
-        our_client_id: u64,
-        /// In a voice room (or testing the microphone). A phone opens
-        /// no microphone out of one (`audio::RELEASES_MIC`); the
-        /// desktop ignores it.
+        /// The session's client id. `None` is an engine with no session
+        /// behind it — Settings' meter or a microphone test while not
+        /// connected: nothing it hears can leave the device for as long
+        /// as it lives (`VoiceLink::local_only`), so mute and
+        /// push-to-talk have nothing to keep in and do not close its
+        /// microphone. A push-to-talk user's meter would stay dead
+        /// otherwise, with no session to hold the key in.
+        our_client_id: Option<u64>,
+        /// In a voice room (or testing the microphone). Out of one a
+        /// phone opens no microphone (`audio::RELEASES_MIC`), and the
+        /// desktop drops what its microphone hears (review P1-6).
         in_room: bool,
     },
     Stop,
-    /// Into a voice room (`true`) or out to the lobby. Phones only act
-    /// on it: the microphone and the call path go with the room.
+    /// Into a voice room (`true`) or out of one (the lobby, the AFK
+    /// room). On a phone the microphone and the call path go with the
+    /// room; on the desktop the streams stay open and capture drops its
+    /// samples (`VoiceChat::set_presence`).
     SetInRoom(bool),
     SetMuted(bool),
     /// Transmit only while the key is held (the gate still applies).
@@ -68,7 +83,6 @@ pub enum VoiceControl {
     /// Round-trip time in ms from the same report. Feeds the
     /// encoder's rate controller (congestion vs random loss).
     SetLinkRtt(u32),
-    IncomingVoicePacket(AudioPacket),
     PlaySound(SoundType),
     Shutdown,
 }
@@ -80,15 +94,14 @@ pub enum VoiceEvent {
     SpeakingChanged(bool),
 }
 
-// ── Shared levels (written here, read by UI) ────────────────────────────
+// ── Shared state (published here, read by the UI) ───────────────────────
 
 #[derive(Clone)]
 pub struct SharedAudioState {
-    pub input_level: Arc<AtomicU32>,
-    pub output_level: Arc<AtomicU32>,
-    pub denoised_level: Arc<AtomicU32>,
-    pub speaking: Arc<AtomicBool>,
-    pub jitter_buffer_ms: Arc<AtomicU32>,
+    /// The running engine's counters (`None` = no engine). The UI reads
+    /// its meters and the jitter depth straight from them, so nothing
+    /// copies them on a timer (review P1-5).
+    engine: Arc<Mutex<Option<Arc<AudioStats>>>>,
     /// What echo cancellation the open streams got (`None` = no voice
     /// session); refreshed when the engine's report changes.
     pub aec: Arc<Mutex<Option<AecReport>>>,
@@ -104,13 +117,40 @@ impl SharedAudioState {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            input_level: Arc::new(AtomicU32::new(0)),
-            output_level: Arc::new(AtomicU32::new(0)),
-            denoised_level: Arc::new(AtomicU32::new(0)),
-            speaking: Arc::new(AtomicBool::new(false)),
-            jitter_buffer_ms: Arc::new(AtomicU32::new(0)),
+            engine: Arc::new(Mutex::new(None)),
             aec: Arc::new(Mutex::new(None)),
         }
+    }
+
+    fn engine_stats(&self) -> Option<Arc<AudioStats>> {
+        self.engine.lock().ok()?.clone()
+    }
+
+    fn publish(&self, stats: Option<Arc<AudioStats>>) {
+        if let Ok(mut slot) = self.engine.lock() {
+            *slot = stats;
+        }
+    }
+
+    /// The meters: the microphone after denoising and the playback.
+    /// `None` without an engine, which is not the same as silence to
+    /// whoever is asking why a bar does not move.
+    #[must_use]
+    pub fn meters(&self) -> Option<(f32, f32)> {
+        self.engine_stats().map(|s| {
+            (
+                f32::from_bits(s.denoised_level.load(Relaxed)),
+                f32::from_bits(s.output_level.load(Relaxed)),
+            )
+        })
+    }
+
+    /// How much voice the jitter buffer holds, in ms.
+    #[must_use]
+    pub fn jitter_buffer_ms(&self) -> u32 {
+        self.engine_stats().map_or(0, |s| {
+            u32::try_from(s.jitter_buffer_occupancy_ms.load(Relaxed)).unwrap_or(u32::MAX)
+        })
     }
 }
 
@@ -198,31 +238,37 @@ impl Drop for VoiceThreadHandle {
 /// hint and jitter depth are recorded for after-the-fact diagnosis.
 const STATS_LOG_INTERVAL: Duration = Duration::from_secs(10);
 
-/// The voice loop's longest sleep while the engine runs (meters,
-/// speaking edges, device supervision); see the loop.
-const VOICE_TICK: Duration = Duration::from_millis(20);
-
-/// The same while no microphone is open (a phone in the lobby or
-/// muted, ANDROID-SPEC.md D53): no input meter or speaking edge to
-/// follow, only device supervision — four wakes a second, not fifty.
-const VOICE_TICK_NO_MIC: Duration = Duration::from_millis(250);
+/// The voice loop's longest sleep while an engine runs: device
+/// supervision (`VoiceChat::service`) and the stats line. Commands and
+/// the speaking light's edges wake it at once, and packets never pass
+/// through it, so nothing else waits on this (review P1-5). It ticked
+/// every 20 ms in a room — fifty wakes a second to copy meters nobody
+/// read between redraws and to poll the speaking light. A second also
+/// bounds how long a stream that failed (a device unplugged) waits for
+/// its reopen.
+const SERVICE_TICK: Duration = Duration::from_secs(1);
 
 // Mute, deafen, push-to-talk and the rest are independent switches
 // the loop reads every packet; their combinations are all valid.
 #[expect(clippy::struct_excessive_bools)]
 struct VoiceLoopState {
     vc: Option<VoiceChat>,
-    our_client_id: Option<u64>,
     was_speaking: bool,
     /// Explicit mute set by the user (independent of deafen).
     user_muted: bool,
     /// Push-to-talk mode: the mic is closed unless `ptt_held`.
     ptt_mode: bool,
     ptt_held: bool,
-    /// In a voice room (`SetInRoom`); a phone keeps its microphone
-    /// closed out of one.
+    /// In a voice room (`SetInRoom`); out of one a phone keeps its
+    /// microphone closed and the desktop drops the samples.
     in_room: bool,
+    /// The engine has no session behind it (`Start` without a client
+    /// id): what it hears stays here, and mute and push-to-talk wait.
+    sessionless: bool,
     running: bool,
+    /// The engine was started, replaced or stopped: the network thread
+    /// and the UI are told after this pass's commands.
+    relink: bool,
     last_stats_log: Instant,
     /// `aec_generation` of the engine whose report `shared.aec` holds
     /// (`None` = no engine).
@@ -233,13 +279,14 @@ impl VoiceLoopState {
     fn new() -> Self {
         Self {
             vc: None,
-            our_client_id: None,
             was_speaking: false,
             user_muted: false,
             ptt_mode: false,
             ptt_held: false,
             in_room: true,
+            sessionless: false,
             running: true,
+            relink: false,
             last_stats_log: Instant::now(),
             aec_published: None,
         }
@@ -261,10 +308,7 @@ impl VoiceLoopState {
         info!("audio stats: {}", voice.stats_summary());
         let s = voice.stats();
         let (input_device, output_device) = voice.opened_devices();
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
-        let report_age_ms = now_ms.saturating_sub(s.uplink_loss_updated_ms.load(Relaxed));
+        let report_age_ms = s.uplink_report_age_ms();
         #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
         let sample = protocol::AudioSample {
             bitrate_bps: s.send_bitrate_bps.load(Relaxed),
@@ -275,7 +319,7 @@ impl VoiceLoopState {
             smoothed_loss_pct: s.uplink_loss_pct.load(Relaxed) as f32,
             // A report younger than three intervals means the relay is
             // still telling us about our voice.
-            exercised: report_age_ms < 6_000,
+            exercised: report_age_ms.is_some_and(|age| age < 6_000),
             packets_sent: s.packets_sent.load(Relaxed),
             encode_us: s.last_encode_us.load(Relaxed),
             input_overruns: s.input_overruns.load(Relaxed),
@@ -295,8 +339,12 @@ impl VoiceLoopState {
     }
 
     /// Whether the mic should be muted: user-muted, deafened, or in
-    /// push-to-talk mode with the key up.
+    /// push-to-talk mode with the key up — and never without a
+    /// session, where nothing leaves the device.
     fn effective_mute(&self) -> bool {
+        if self.sessionless {
+            return false;
+        }
         let ptt_closed = self.ptt_mode && !self.ptt_held;
         if let Some(v) = &self.vc {
             self.user_muted || ptt_closed || v.is_deafened()
@@ -306,8 +354,9 @@ impl VoiceLoopState {
     }
 
     /// Hand the engine the effective mute — the samples are dropped —
-    /// and, on a phone, what to keep open: out of a room or muted, the
-    /// microphone closes (`VoiceChat::set_presence`).
+    /// and where we are: out of a room the desktop drops them too, and
+    /// on a phone, out of a room or muted, the microphone closes
+    /// (`VoiceChat::set_presence`).
     fn apply_mute(&mut self) {
         let mute = self.effective_mute();
         let in_room = self.in_room;
@@ -330,56 +379,50 @@ impl VoiceLoopState {
                 // session mode) is process-wide, and leaving it after the
                 // new one entered would undo the new one's.
                 self.vc.take();
+                self.relink = true;
                 // A fresh engine starts unmuted; push-to-talk closes it
                 // until the key is held. Known before `start()`, so a
                 // phone never opens a microphone it would close at once.
                 self.user_muted = false;
                 self.ptt_held = false;
                 self.in_room = in_room;
-                match VoiceChat::new(config) {
-                    Ok(mut voice) => {
-                        voice.set_presence(in_room, !self.effective_mute());
-                        if let Err(e) = voice.start() {
-                            if !voice.output_running() {
-                                // Nothing came up: no engine this time.
-                                event_tx
-                                    .send(VoiceEvent::Error(format!("Start failed: {e}")))
-                                    .ok();
-                                wake();
-                                return;
-                            }
-                            // Playback is up and only capture failed (no
-                            // microphone; on Android the permission not
-                            // granted yet). Keep the engine: the room stays
-                            // audible, and `service()` retries the input
-                            // every 2 s until it opens. Dropping it here
-                            // silenced everything (first phone test,
-                            // 2026-10-05).
-                            event_tx
-                                .send(VoiceEvent::Error(format!("Microphone unavailable: {e}")))
-                                .ok();
-                        }
-                        self.our_client_id = Some(id);
-                        self.vc = Some(voice);
-                        // Generations count per engine: republish.
-                        self.aec_published = None;
-                        self.was_speaking = false;
-                        self.apply_mute();
-                        event_tx.send(VoiceEvent::Started).ok();
-                        wake();
-                        info!("Voice started for client {id:?}");
-                    }
-                    Err(e) => {
+                self.sessionless = id.is_none();
+                let mut voice = VoiceChat::new(config);
+                voice.set_presence(in_room, !self.effective_mute());
+                match voice.start() {
+                    audio::StartOutcome::Started => {}
+                    // Nothing can be heard: no engine this time.
+                    audio::StartOutcome::NoPlayback(e) => {
                         event_tx
-                            .send(VoiceEvent::Error(format!("Init failed: {e}")))
+                            .send(VoiceEvent::Error(format!("Start failed: {e}")))
                             .ok();
                         wake();
+                        return;
+                    }
+                    // Playback is up and only capture failed (no
+                    // microphone; on Android the permission not granted
+                    // yet). Keep the engine: the room stays audible, and
+                    // `service()` retries the input every 2 s until it
+                    // opens. Dropping it here silenced everything
+                    // (first phone test, 2026-10-05).
+                    audio::StartOutcome::NoMicrophone(e) => {
+                        event_tx
+                            .send(VoiceEvent::Error(format!("Microphone unavailable: {e}")))
+                            .ok();
                     }
                 }
+                self.vc = Some(voice);
+                // Generations count per engine: republish.
+                self.aec_published = None;
+                self.was_speaking = false;
+                self.apply_mute();
+                event_tx.send(VoiceEvent::Started).ok();
+                wake();
+                info!("Voice started for client {id:?}");
             }
             VoiceControl::Stop => {
                 self.vc = None;
-                self.our_client_id = None;
+                self.relink = true;
                 self.was_speaking = false;
                 self.user_muted = false;
                 info!("Voice stopped");
@@ -479,11 +522,6 @@ impl VoiceLoopState {
                     v.set_link_rtt_ms(rtt_ms);
                 }
             }
-            VoiceControl::IncomingVoicePacket(packet) => {
-                if let Some(v) = &self.vc {
-                    v.receive_packet(packet);
-                }
-            }
             VoiceControl::PlaySound(sound) => {
                 if let Some(v) = &self.vc {
                     v.play_sound(sound);
@@ -498,14 +536,6 @@ impl VoiceLoopState {
 
 // ── Thread loop ─────────────────────────────────────────────────────────
 
-/// Stamp our client id on an outgoing packet and hand it to the network
-/// thread. Voice frames are droppable by design (`try_send`) — losing one
-/// under pressure is better than stalling the voice loop.
-fn forward_outgoing(network_tx: &Sender<NetworkControl>, our_id: u64, mut packet: AudioPacket) {
-    packet.header.ssrc = our_id;
-    let _ = network_tx.try_send(NetworkControl::SendVoicePacket(packet));
-}
-
 fn run_voice_loop(
     control_rx: Receiver<VoiceControl>,
     event_tx: Sender<VoiceEvent>,
@@ -515,55 +545,24 @@ fn run_voice_loop(
     wake: WakeFn,
 ) {
     let mut state = VoiceLoopState::new();
-    let (_dead_tx, dead_rx) = bounded::<audio::AudioPacket>(1);
 
     while state.running {
-        if state.vc.is_none() {
-            // Idle: no engine, so no meters to feed, no packets to
-            // forward, and no speaking edges to detect — block until a
-            // command arrives instead of spinning the 5 ms cadence
-            // below (which cost ~200 wakeups/s from app launch until
-            // the first connect).
-            match control_rx.recv() {
+        match state.vc.as_ref().map(VoiceChat::speaking_edges) {
+            // Idle: no engine, nothing to supervise — block until a
+            // command arrives.
+            None => match control_rx.recv() {
                 Ok(ctrl) => state.handle_control(ctrl, &event_tx, &wake),
-                Err(_) => {
-                    state.running = false;
-                }
-            }
-        } else {
-            let outgoing = state.vc.as_ref().map(audio::VoiceChat::outgoing_receiver);
-            let mic_open = state.vc.as_ref().is_some_and(VoiceChat::input_running);
-            let tick = if mic_open || !audio::RELEASES_MIC {
-                VOICE_TICK
-            } else {
-                VOICE_TICK_NO_MIC
-            };
-            select! {
+                Err(_) => state.running = false,
+            },
+            Some(edges) => select! {
                 recv(control_rx) -> msg => match msg {
                     Ok(ctrl) => state.handle_control(ctrl, &event_tx, &wake),
-                    Err(_) => { state.running = false; }
+                    Err(_) => state.running = false,
                 },
-                recv(outgoing.as_ref().unwrap_or(&dead_rx)) -> pkt => {
-                    // Low-latency path: forward the packet that woke us.
-                    // Anything queued behind it is drained below.
-                    if let (Ok(packet), Some(id)) = (pkt, state.our_client_id)
-                        && !is_testing_mic.load(Ordering::Relaxed)
-                    {
-                        forward_outgoing(&network_tx, id, packet);
-                    }
-                },
-                // Engine running: this cadence feeds the UI level
-                // meters even when the gate is closed (no packets),
-                // notices the gate closing (the speaking light), and
-                // supervises the devices. Packets and commands wake the
-                // loop at once, so nothing waits on it but those. It was
-                // 5 ms — 200 wakes a second for as long as a session
-                // lasted, a quiet channel included; the meters redraw
-                // every 125 ms and the speaking indicator holds for
-                // hundreds, so 20 ms is still far finer than anything
-                // reads it (IOS-SPEC.md §14 D41).
-                default(tick) => {}
-            }
+                // The speaking light changed: compared below.
+                recv(edges) -> _ => {},
+                default(SERVICE_TICK) => {},
+            },
         }
 
         // Drain any queued control messages
@@ -574,6 +573,20 @@ fn run_voice_loop(
             }
         }
 
+        // A new engine (or none): the network thread feeds and drains
+        // it directly, and the UI reads its meters (review P1-5). A
+        // blocking send: the network thread must not miss an engine.
+        if std::mem::take(&mut state.relink) {
+            let link = state.vc.as_ref().map(|v| VoiceLink {
+                incoming: v.incoming_sender(),
+                outgoing: v.outgoing_receiver(),
+                testing: is_testing_mic.clone(),
+                local_only: state.sessionless,
+            });
+            let _ = network_tx.send(NetworkControl::VoiceLink(link));
+            shared.publish(state.vc.as_ref().map(|v| v.stats().clone()));
+        }
+
         // Device supervision (audio 0.7): restart a side whose device
         // went away, follow the OS default when none is pinned. Cheap
         // when nothing changed; the engine logs what it did.
@@ -581,53 +594,23 @@ fn run_voice_loop(
             let _ = voice.service();
         }
 
-        // Poll outgoing packets and update shared state
         if let Some(voice) = state.vc.as_ref() {
-            // Forward encoded packets to network (or drain in test mode)
-            if let Some(id) = state.our_client_id {
-                if is_testing_mic.load(Ordering::Relaxed) {
-                    while voice.outgoing_receiver().try_recv().is_ok() {}
-                } else {
-                    for packet in voice.take_outgoing_packets() {
-                        forward_outgoing(&network_tx, id, packet);
-                    }
-                }
-            }
-
-            // Update shared levels for UI meters
-            shared
-                .input_level
-                .store(voice.input_level().to_bits(), Ordering::Relaxed);
-            shared
-                .output_level
-                .store(voice.output_level().to_bits(), Ordering::Relaxed);
-            shared
-                .denoised_level
-                .store(voice.denoised_level().to_bits(), Ordering::Relaxed);
-            shared
-                .speaking
-                .store(voice.is_speaking(), Ordering::Relaxed);
-            shared.jitter_buffer_ms.store(
-                voice
-                    .stats()
-                    .jitter_buffer_occupancy_ms
-                    .load(Ordering::Relaxed) as u32,
-                Ordering::Relaxed,
-            );
-
             // Edge-triggered speaking notification. Blocking sends on
             // purpose: there is no periodic refresh, so a dropped edge
             // means a speaking light stuck in the wrong state until the
             // next transition. Both channels are drained frequently.
             //
-            // While mic-testing we're in pure loopback — voice packets
-            // are already gated above, and effective speaking is forced
-            // false here so the test never lights us up (server-side or
-            // on our own sidebar). Treating it as `raw && !testing`
-            // makes the edges self-correcting: starting a test
-            // mid-sentence emits a clean false edge, stopping it while
-            // still talking emits a clean true edge.
-            let speaking = voice.is_speaking() && !is_testing_mic.load(Ordering::Relaxed);
+            // While mic-testing we're in pure loopback — the network
+            // thread drops our packets — and effective speaking is
+            // forced false here so the test never lights us up
+            // (server-side or on our own sidebar). Treating it as `raw
+            // && !testing` makes the edges self-correcting: starting a
+            // test mid-sentence emits a clean false edge, stopping it
+            // while still talking emits a clean true edge. A test starts
+            // and stops with a command, which wakes this loop.
+            let speaking = voice.is_speaking()
+                && !state.sessionless
+                && !is_testing_mic.load(Ordering::Relaxed);
             if speaking != state.was_speaking {
                 state.was_speaking = speaking;
                 let _ = network_tx.send(NetworkControl::SendSpeakingStatus(speaking));
@@ -651,5 +634,39 @@ fn run_voice_loop(
         }
 
         state.maybe_log_stats(&network_tx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tell(state: &mut VoiceLoopState, ctrl: VoiceControl) {
+        let (event_tx, _event_rx) = bounded::<VoiceEvent>(4);
+        let wake: WakeFn = Arc::new(|| {});
+        state.handle_control(ctrl, &event_tx, &wake);
+    }
+
+    /// The meter on Settings' Audio tab, not connected: a push-to-talk
+    /// user has no session to hold the key in, and nothing the engine
+    /// hears can leave. With a session both rule again.
+    #[test]
+    fn mute_and_push_to_talk_wait_only_while_there_is_no_session() {
+        let mut state = VoiceLoopState::new();
+        tell(&mut state, VoiceControl::SetPushToTalk(true));
+        assert!(state.effective_mute(), "key up");
+
+        // What `Start` records, without the devices it would open.
+        state.sessionless = true;
+        assert!(!state.effective_mute());
+        tell(&mut state, VoiceControl::SetMuted(true));
+        assert!(!state.effective_mute());
+
+        state.sessionless = false;
+        assert!(state.effective_mute());
+        tell(&mut state, VoiceControl::SetPushToTalk(false));
+        assert!(state.effective_mute(), "still muted by hand");
+        tell(&mut state, VoiceControl::SetMuted(false));
+        assert!(!state.effective_mute());
     }
 }

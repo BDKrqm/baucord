@@ -25,7 +25,7 @@
 
 use std::{
     sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, Ordering},
         Arc,
     },
     thread,
@@ -37,7 +37,7 @@ use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     Device, SampleFormat, Stream, StreamConfig, SupportedStreamConfig,
 };
-use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
+use crossbeam_channel::{Sender, TrySendError};
 use dasp_sample::{FromSample, Sample as DaspSample, ToSample};
 use log::{error, info};
 use rtrb::{Consumer, Producer, RingBuffer};
@@ -45,25 +45,18 @@ use rubato::{Async, Resampler};
 
 use crate::{
     input_config::InputConfig,
+    latch::{Ring, Wait},
     processor::{
         agc::AutoGainControl,
-        clamp::ClampStage,
         compressor::Compressor,
-        denoise::Denoiser,
-        gain::GainStage,
         gate::NoiseGate,
-        level_meter::{LevelMeter, MeterTarget},
-        speaking::SpeakingIndicator,
-        FrameContext, ProcessorChain,
+        speaking::{SpeakingFlag, SpeakingIndicator},
+        FrameContext, InputChain,
     },
     resampler::build_input_resampler,
     stats::AudioStats,
     PcmFrame, FRAME_SIZE, OPUS_SAMPLE_RATE,
 };
-
-/// The capture worker's sleep while the microphone is muted (see the
-/// worker loop).
-const MUTED_WAIT: Duration = Duration::from_millis(50);
 
 pub struct AudioInput {
     /// cpal's device and the config it opens at. Resolved in `new()`,
@@ -88,10 +81,20 @@ pub struct AudioInput {
     /// Open on the platform's voice-call path (`aec::wants_aec` said so).
     voice: bool,
     /// The output device the canceller should treat as its reference
-    /// (`None` = the default communications device). Windows only:
-    /// Android routes and references by itself.
+    /// (`None` = the default communications device, followed by
+    /// Windows itself). Windows only: Android routes and references by
+    /// itself.
     #[cfg(windows)]
     aec_reference: Option<String>,
+    /// Windows: no device picked means the Default Communications
+    /// Device (`communications_default` in lib.rs), else the console
+    /// default.
+    #[cfg(windows)]
+    communications_default: bool,
+    /// Windows: the canceller took the reference from us (see
+    /// [`Self::aec_reference_named`]).
+    #[cfg(windows)]
+    aec_reference_named: bool,
     /// The backend's verdict once capture opened on the voice-call path:
     /// `Ok` = the platform canceller is on the microphone, `Err(why)` =
     /// it is not. `None` = not on the voice-call path.
@@ -103,8 +106,13 @@ pub struct AudioInput {
     ring_consumer: Option<Consumer<f32>>,
 
     /// Wake latch: capture callback → worker ("data available").
-    wake_tx: Option<Sender<()>>,
-    wake_rx: Option<Receiver<()>>,
+    wake_tx: Option<Ring>,
+    wake_rx: Option<Wait>,
+    /// Our own ring of the latch: a stop wakes the worker at once
+    /// instead of after its safety wait. Held for the input's life, it
+    /// also keeps the latch from going dead under a running worker (a
+    /// stream that stopped by itself), which would have it spin.
+    stop_ring: Option<Ring>,
 
     worker_thread: Option<thread::JoinHandle<()>>,
     should_stop: Arc<AtomicBool>,
@@ -113,8 +121,8 @@ pub struct AudioInput {
     config: Arc<InputConfig>,
 
     // ── Observable state (read-only from outside) ────────────────────
-    input_level: Arc<AtomicU32>,
-    is_speaking: Arc<AtomicBool>,
+    /// The engine's speaking light, which this input's chain drives.
+    is_speaking: Arc<SpeakingFlag>,
 
     stats: Arc<AudioStats>,
 }
@@ -128,6 +136,7 @@ impl AudioInput {
         loopback_tx: Sender<PcmFrame>,
         stats: Arc<AudioStats>,
         config: Arc<InputConfig>,
+        is_speaking: Arc<SpeakingFlag>,
         voice: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         #[cfg(windows)]
@@ -145,7 +154,7 @@ impl AudioInput {
         // so the worker wakes on data instead of sleep-polling. (Windows
         // quantizes short sleeps to the system timer — historically up to
         // ~15.6 ms — so polling with sleep(1ms) was a hidden latency tax.)
-        let (wake_tx, wake_rx) = bounded::<()>(1);
+        let (wake_tx, wake_rx) = crate::latch::latch();
 
         Ok(Self {
             cpal,
@@ -159,18 +168,22 @@ impl AudioInput {
             voice,
             #[cfg(windows)]
             aec_reference: None,
+            #[cfg(windows)]
+            communications_default: false,
+            #[cfg(windows)]
+            aec_reference_named: false,
             aec_verdict: None,
             encoder_tx,
             loopback_tx,
             ring_producer: Some(ring_producer),
             ring_consumer: Some(ring_consumer),
+            stop_ring: Some(wake_tx.clone()),
             wake_tx: Some(wake_tx),
             wake_rx: Some(wake_rx),
             worker_thread: None,
             should_stop: Arc::new(AtomicBool::new(false)),
             config,
-            input_level: Arc::new(AtomicU32::new(0.0_f32.to_bits())),
-            is_speaking: Arc::new(AtomicBool::new(false)),
+            is_speaking,
             stats,
         })
     }
@@ -219,6 +232,32 @@ impl AudioInput {
         self.aec_reference = output_device;
     }
 
+    /// Windows: what "Default" means for this stream (call before
+    /// `start`).
+    #[cfg(windows)]
+    pub fn set_communications_default(&mut self, on: bool) {
+        self.communications_default = on;
+    }
+
+    /// Whether the platform took our output as the canceller's
+    /// reference: on Windows, the reference endpoint was set — to the
+    /// picked output, or to follow the communications default that
+    /// playback opened; without the control (Windows 10, early 11) the
+    /// effect picks its own. Elsewhere the call path's own playback is
+    /// the reference.
+    #[must_use]
+    #[cfg_attr(not(windows), allow(clippy::unused_self))]
+    pub fn aec_reference_named(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.aec_reference_named
+        }
+        #[cfg(not(windows))]
+        {
+            true
+        }
+    }
+
     /// Android and iOS: the microphone on the voice-call path
     /// (`native::aaudio`, `native::vpio`), which is what lets the
     /// platform run its echo canceller on it. On failure the ring and
@@ -235,7 +274,6 @@ impl AudioInput {
             wake_tx,
             self.stats.clone(),
             self.config.clone(),
-            self.input_level.clone(),
         ) {
             Ok(native) => {
                 let rate = native.sample_rate;
@@ -272,15 +310,16 @@ impl AudioInput {
         match crate::native::wasapi::NativeCapture::start(
             self.device_name.as_deref(),
             voice,
+            self.communications_default,
             producer,
             wake_tx,
             self.stats.clone(),
             self.config.clone(),
-            self.input_level.clone(),
         ) {
             Ok(native) => {
                 let rate = native.sample_rate;
                 self.aec_verdict = native.aec_verdict;
+                self.aec_reference_named = native.aec_reference_named;
                 self.native = Some(native);
                 self.start_worker_thread(rate)
                     .map_err(|e| format!("worker thread: {e}"))
@@ -355,7 +394,6 @@ impl AudioInput {
         let config = self.config.clone();
         let stats = self.stats.clone();
         let stats_err = self.stats.clone();
-        let input_level = self.input_level.clone();
         let ch = channels as usize;
         // cpal's capture thread runs our callback; promote it on first
         // entry (see platform::promote_callback_thread).
@@ -372,13 +410,10 @@ impl AudioInput {
                     promoted = true;
                     crate::platform::promote_callback_thread(FRAME_SIZE as u32, sample_rate);
                 }
-                if config.muted.load(Ordering::Relaxed) {
-                    input_level.store(0.0_f32.to_bits(), Ordering::Relaxed);
+                if config.silenced() {
                     return;
                 }
 
-                let mut rms_acc = 0.0f32;
-                let mut count = 0usize;
                 let mut overrun = false;
 
                 // Downmix into the ring in one chunked write per callback.
@@ -391,18 +426,15 @@ impl AudioInput {
                 }
                 if want > 0 {
                     if let Ok(chunk) = ring_producer.write_chunk_uninit(want) {
+                        // No clamp here: f32 has headroom and the
+                        // processing chain (gate → AGC → comp → clamp
+                        // stage) owns levels. Clipping at capture
+                        // destroyed the very peaks the compressor
+                        // exists to handle gracefully.
+                        #[allow(clippy::cast_precision_loss)]
                         let mut it = data.chunks(ch).take(want).map(|frame| {
                             let sum: f32 = frame.iter().map(|s| s.to_sample::<f32>()).sum();
-                            // No clamp here: f32 has headroom and the
-                            // processing chain (gate → AGC → comp → clamp
-                            // stage) owns levels. Clipping at capture
-                            // destroyed the very peaks the compressor
-                            // exists to handle gracefully.
-                            #[allow(clippy::cast_precision_loss)]
-                            let mono = sum / ch as f32;
-                            rms_acc += mono * mono;
-                            count += 1;
-                            mono
+                            sum / ch as f32
                         });
                         chunk.fill_from_iter(&mut it);
                     } else {
@@ -413,15 +445,8 @@ impl AudioInput {
                     stats.input_overruns.fetch_add(1, Ordering::Relaxed);
                 }
 
-                if count > 0 {
-                    #[allow(clippy::cast_precision_loss)]
-                    let rms = (rms_acc / count as f32).sqrt();
-                    let scaled = (rms * 3.0).clamp(0.0, 1.0);
-                    input_level.store(scaled.to_bits(), Ordering::Relaxed);
-                }
-
                 // Data available — wake the worker (lock-free latch).
-                let _ = wake_tx.try_send(());
+                wake_tx.ring();
             },
             move |err| {
                 if matches!(err.kind(), cpal::ErrorKind::DeviceNotAvailable) {
@@ -461,24 +486,8 @@ impl AudioInput {
         let loopback_tx = self.loopback_tx.clone();
         let config = self.config.clone();
 
-        // ── Build the processor chain (the DAW view) ─────────────────
-        let gate = NoiseGate::new(config.gate.clone(), 200);
-        let agc = AutoGainControl::new(config.agc.clone(), 30.0);
-        let compressor = Compressor::with_defaults(config.compressor.clone());
-        let speaking = SpeakingIndicator::new();
-        let is_speaking_handle = speaking.speaking_handle();
-        self.is_speaking = is_speaking_handle.clone();
-
-        let mut chain = ProcessorChain::new("voice_input");
-        chain.add(Box::new(Denoiser::new()));
-        chain.add(Box::new(LevelMeter::new(MeterTarget::Denoised)));
-        chain.add(Box::new(gate));
-        chain.add(Box::new(agc));
-        chain.add(Box::new(compressor));
-        chain.add(Box::new(GainStage::new()));
-        chain.add(Box::new(ClampStage::new()));
-        chain.add(Box::new(LevelMeter::new(MeterTarget::Pipeline)));
-        chain.add(Box::new(speaking));
+        let chain = build_chain(&config, self.is_speaking.clone());
+        let is_speaking = self.is_speaking.clone();
 
         self.worker_thread = Some(crate::platform::spawn_named("voice-capture", move || {
             worker_loop(
@@ -490,7 +499,7 @@ impl AudioInput {
                 loopback_tx,
                 config,
                 chain,
-                is_speaking_handle,
+                is_speaking,
                 device_sample_rate,
             );
         }));
@@ -510,27 +519,30 @@ impl AudioInput {
         }
         crate::device_name(&self.cpal.as_ref()?.0)
     }
+}
 
-    pub fn input_level_handle(&self) -> Arc<AtomicU32> {
-        self.input_level.clone()
-    }
-
-    pub fn speaking_handle(&self) -> Arc<AtomicBool> {
-        self.is_speaking.clone()
-    }
+/// The microphone's chain with this input's settings, driving
+/// `is_speaking`.
+fn build_chain(config: &InputConfig, is_speaking: Arc<SpeakingFlag>) -> InputChain {
+    InputChain::new(
+        NoiseGate::new(config.gate.clone(), 200),
+        AutoGainControl::new(config.agc.clone(), 30.0),
+        Compressor::with_defaults(config.compressor.clone()),
+        SpeakingIndicator::with_flag(is_speaking),
+    )
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // one straight-line real-time loop
 fn worker_loop(
     mut ring_consumer: Consumer<f32>,
-    wake_rx: Receiver<()>,
+    wake_rx: Wait,
     should_stop: Arc<AtomicBool>,
     stats: Arc<AudioStats>,
     encoder_tx: Sender<PcmFrame>,
     loopback_tx: Sender<PcmFrame>,
     config: Arc<InputConfig>,
-    mut chain: ProcessorChain,
-    is_speaking: Arc<AtomicBool>,
+    mut chain: InputChain,
+    is_speaking: Arc<SpeakingFlag>,
     device_sample_rate: u32,
 ) {
     // ── Resampler setup ─────────────────────────────────────
@@ -570,24 +582,46 @@ fn worker_loop(
 
     info!("Input worker started (device {device_sample_rate}Hz, resample={needs_resample})");
 
+    let mut muted = false;
     while !should_stop.load(Ordering::Relaxed) {
-        if config.muted.load(Ordering::Relaxed) {
-            is_speaking.store(false, Ordering::Relaxed);
+        // Muted, or (the desktop) out of a voice room, where the relay
+        // would drop it anyway: nothing is denoised, encoded or sent
+        // (review P1-6).
+        if config.silenced() {
+            if !muted {
+                // What it was saying goes with it: the meters would
+                // hold their last values.
+                stats
+                    .denoised_level
+                    .store(0.0_f32.to_bits(), Ordering::Relaxed);
+                stats
+                    .pipeline_level
+                    .store(0.0_f32.to_bits(), Ordering::Relaxed);
+            }
+            muted = true;
+            is_speaking.set(false);
             // Discard whatever landed while muted.
             let stale = ring_consumer.slots();
             if let Ok(chunk) = ring_consumer.read_chunk(stale) {
                 chunk.commit_all();
             }
             // The capture callback stops waking us while muted, so this
-            // timeout is the whole wake rate of a muted microphone: 20
-            // a second rather than 100. Unmuting costs nothing — the
-            // callback's next (unmuted) buffer rings at once — and a
-            // stop waits at most this long for the worker to leave.
-            crate::platform::wait_for_wake(&wake_rx, MUTED_WAIT);
+            // waits out the safety timeout: five wakes a second, nothing
+            // processed. Unmuting costs nothing — the callback's next
+            // (unmuted) buffer rings at once — and a stop rings too.
+            if !wake_rx.wait(crate::platform::LATCH_SAFETY_WAIT) {
+                break;
+            }
+            continue;
+        }
+        if muted {
+            // The unmute edge: a clean chain, as if the microphone had
+            // just opened. Once here, not on every pass while muted —
+            // a reset rebuilds RNNoise's whole state (review P1-4).
+            muted = false;
             chain.reset();
             accumulator.clear();
             resampler_accum.clear();
-            continue;
         }
 
         #[allow(clippy::redundant_closure_for_method_calls)] // keeps Self/T inference explicit
@@ -600,10 +634,12 @@ fn worker_loop(
         let n_read = popped.len();
 
         if n_read == 0 {
-            // Block until the capture callback delivers more audio
-            // (or a short timeout as a safety net) instead of
-            // sleep-polling.
-            crate::platform::wait_for_wake(&wake_rx, Duration::from_millis(5));
+            // Block until the capture callback delivers more audio. The
+            // callback rings on every buffer, so the timeout is only a
+            // safety net, not a tick (review P1-4).
+            if !wake_rx.wait(crate::platform::LATCH_SAFETY_WAIT) {
+                break;
+            }
             continue;
         }
 
@@ -661,9 +697,6 @@ fn worker_loop(
 
             chain.process(&mut frame, &mut ctx);
 
-            stats
-                .denoise_active
-                .store(ctx.denoise_enabled, Ordering::Relaxed);
             stats
                 .denoised_level
                 .store(ctx.denoised_level.to_bits(), Ordering::Relaxed);
@@ -731,13 +764,141 @@ fn open_cpal(
 impl Drop for AudioInput {
     fn drop(&mut self) {
         self.should_stop.store(true, Ordering::Relaxed);
+        if let Some(ring) = &self.stop_ring {
+            ring.ring();
+        }
         self.stream.take();
         #[cfg(windows)]
         self.native.take();
         #[cfg(any(target_os = "android", target_os = "ios"))]
         self.native_voice.take();
+        // With the stream's sender gone too the latch is dead, and the
+        // worker's wait returns at once (but on iOS, where a detached
+        // half lingers in the voice unit until swept: the ring above).
+        self.stop_ring.take();
         if let Some(thread) = self.worker_thread.take() {
             let _ = thread.join();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use crossbeam_channel::{bounded, Receiver};
+
+    use super::*;
+
+    /// The capture worker on a ring and latch of our own, fed the way a
+    /// backend feeds it.
+    struct Rig {
+        producer: Producer<f32>,
+        wake: Option<Ring>,
+        frames: Receiver<PcmFrame>,
+        config: Arc<InputConfig>,
+        stop: Arc<AtomicBool>,
+        worker: thread::JoinHandle<()>,
+    }
+
+    fn rig() -> Rig {
+        let (producer, consumer) = RingBuffer::new(ring_size_for(OPUS_SAMPLE_RATE));
+        let (wake, wake_rx) = crate::latch::latch();
+        let (encoder_tx, frames) = bounded(64);
+        let (loopback_tx, _) = bounded(8);
+        let config = Arc::new(InputConfig::default());
+        let speaking = SpeakingFlag::new().0;
+        let chain = build_chain(&config, speaking.clone());
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker = {
+            let (config, stop) = (config.clone(), stop.clone());
+            thread::spawn(move || {
+                worker_loop(
+                    consumer,
+                    wake_rx,
+                    stop,
+                    Arc::new(AudioStats::new()),
+                    encoder_tx,
+                    loopback_tx,
+                    config,
+                    chain,
+                    speaking,
+                    OPUS_SAMPLE_RATE,
+                );
+            })
+        };
+        Rig {
+            producer,
+            wake: Some(wake),
+            frames,
+            config,
+            stop,
+            worker,
+        }
+    }
+
+    impl Rig {
+        /// `ms` of a tone into the ring, then the callback's ring.
+        fn speak(&mut self, ms: usize) {
+            for i in 0..OPUS_SAMPLE_RATE as usize * ms / 1000 {
+                #[allow(clippy::cast_precision_loss)]
+                let s = (i as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin() * 0.3;
+                let _ = self.producer.push(s);
+            }
+            if let Some(wake) = &self.wake {
+                wake.ring();
+            }
+        }
+
+        /// Stop the way `AudioInput`'s drop does; how long the worker
+        /// took to leave.
+        fn stop(mut self, ring: bool) -> Duration {
+            self.stop.store(true, Ordering::Relaxed);
+            let started = Instant::now();
+            if ring {
+                if let Some(wake) = &self.wake {
+                    wake.ring();
+                }
+            } else {
+                self.wake.take();
+            }
+            self.worker.join().unwrap();
+            started.elapsed()
+        }
+    }
+
+    /// Review P1-6: out of a room nothing reaches the encoder; back in,
+    /// it flows again at once.
+    #[test]
+    fn out_of_a_room_nothing_is_encoded() {
+        let mut rig = rig();
+        rig.config.in_room.store(false, Ordering::Relaxed);
+        rig.speak(100);
+        thread::sleep(Duration::from_millis(100));
+        assert!(rig.frames.try_recv().is_err(), "encoded out of a room");
+
+        rig.config.in_room.store(true, Ordering::Relaxed);
+        rig.speak(100);
+        let frame = rig.frames.recv_timeout(Duration::from_secs(2));
+        assert!(frame.is_ok(), "nothing encoded back in the room");
+        rig.stop(true);
+    }
+
+    /// Review P1-4: the worker waits on its latch with a long safety
+    /// timeout, so a stop must not wait it out — rung, or with the latch
+    /// gone.
+    #[test]
+    fn a_stop_does_not_wait_out_the_safety_timeout() {
+        for ring in [true, false] {
+            let mut rig = rig();
+            rig.config.muted.store(true, Ordering::Relaxed);
+            rig.speak(20);
+            thread::sleep(Duration::from_millis(50));
+            let took = rig.stop(ring);
+            assert!(
+                took < Duration::from_millis(100),
+                "{took:?} to stop (ring: {ring})"
+            );
         }
     }
 }

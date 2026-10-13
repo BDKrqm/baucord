@@ -24,7 +24,6 @@ use server::{
     policy::Restriction,
     server::ChatServer,
 };
-use sha2::Digest;
 use transport::{
     identity::{CLIENT_AUTH_EXPORTER_BYTES, CLIENT_AUTH_EXPORTER_LABEL},
     sim::{LinkSpec, NodeId, SimNet},
@@ -549,7 +548,7 @@ impl TestClient {
         mime: &str,
         bytes: &[u8],
     ) -> [u8; 32] {
-        let sha256: [u8; 32] = sha2::Sha256::digest(bytes).into();
+        let sha256 = transport::sha256::digest(bytes);
         self.send(
             world,
             &ClientMessage::UploadBegin {
@@ -1319,6 +1318,64 @@ fn a_ban_on_a_shared_address_hits_only_the_named_user() {
     assert_eq!(bans.len(), 1);
     assert_eq!(bans[0].ip, None);
     assert_eq!(bans[0].user_id, Some(alice_user));
+}
+
+/// Review P0-1: a listing longer than one message. A session that
+/// joins pages gets every row behind one result; an older one gets the
+/// first message's worth, as it always did — and not an empty panel.
+#[test]
+fn a_long_admin_listing_arrives_in_pages_and_an_older_client_gets_the_first() {
+    const CODES: usize = 1500;
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let boot = w.bootstrap_code();
+    for _ in 0..CODES {
+        w.invite(ROLE_GUEST);
+    }
+    let mut admin = w.connect_as("mpw", Auth::Invite { code: boot });
+    let key = admin.key.clone();
+
+    admin.admin(&mut w, 1, AdminCommand::ListInvites);
+    let Ok(AdminOutcome::Invites(last)) = admin.admin_result(&mut w, &mut [], 1) else {
+        panic!("no list");
+    };
+    let mut codes: Vec<String> = Vec::new();
+    let mut pages = 0;
+    for m in &admin.inbox {
+        if let ServerMessage::AdminRows {
+            request_id: 1,
+            rows: AdminOutcome::Invites(rows),
+        } = m
+        {
+            pages += 1;
+            codes.extend(rows.iter().map(|r| r.code.clone()));
+        }
+    }
+    codes.extend(last.iter().map(|r| r.code.clone()));
+    assert!(pages >= 2, "{pages} pages ahead of the result");
+    assert!(codes.len() >= CODES + 2, "{} codes listed", codes.len());
+    let distinct: std::collections::HashSet<&String> = codes.iter().collect();
+    assert_eq!(distinct.len(), codes.len(), "no row twice");
+
+    // The same admin on a client from before the bit.
+    admin.leave(&mut w);
+    let mut older = w.open();
+    older.key = key;
+    older.features = features::CLIENT_1_1 & !features::ADMIN_PAGES;
+    w.admission(&mut older, "mpw", Auth::Key).expect("admitted");
+    older.admin(&mut w, 2, AdminCommand::ListInvites);
+    let Ok(AdminOutcome::Invites(first)) = older.admin_result(&mut w, &mut [], 2) else {
+        panic!("no list");
+    };
+    assert!(
+        !older
+            .inbox
+            .iter()
+            .any(|m| matches!(m, ServerMessage::AdminRows { .. })),
+        "a client that cannot join pages is sent none"
+    );
+    assert!(!first.is_empty() && first.len() < codes.len());
+    let first: Vec<&String> = first.iter().map(|r| &r.code).collect();
+    assert_eq!(first, codes.iter().take(first.len()).collect::<Vec<_>>());
 }
 
 #[test]
@@ -2158,7 +2215,7 @@ fn post_file(
     bytes: &[u8],
     conv: ConvRef,
 ) -> Result<(u64, [u8; 32]), DmFailReason> {
-    let sha256: [u8; 32] = sha2::Sha256::digest(bytes).into();
+    let sha256 = transport::sha256::digest(bytes);
     who.send(
         w,
         &ClientMessage::UploadBegin {
@@ -2291,6 +2348,40 @@ fn files_are_posted_as_cards_and_replayed() {
     });
     assert_eq!(reason, DmFailReason::NoSuchBlob);
 
+    // …but the same bytes, sent in full, may be posted by anyone: the
+    // server asks for the transfer (proof of possession) instead of
+    // answering "already here" and then refusing the post (review P0-4).
+    bob.send(
+        &mut w,
+        &ClientMessage::UploadBegin {
+            upload_id: 40,
+            name: "notes.txt".into(),
+            mime: "text/plain".into(),
+            size: u32::try_from(notes.len()).unwrap(),
+            sha256: blob,
+        },
+    );
+    let needed = bob.wait_for(&mut w, &mut [&mut alice], |m| match m {
+        ServerMessage::UploadAccept {
+            upload_id: 40,
+            needed,
+        } => Some(*needed),
+        _ => None,
+    });
+    assert!(needed, "someone else's file is sent in full once");
+    let (_, reposted) = post_file(
+        &mut bob,
+        &mut w,
+        &mut [&mut alice],
+        41,
+        "notes.txt",
+        "text/plain",
+        &notes,
+        ConvRef::General,
+    )
+    .expect("the second poster may post it");
+    assert_eq!(reposted, blob);
+
     // Guests do not upload files.
     let mut guest = w.connect("guest");
     guest.send(
@@ -2311,6 +2402,23 @@ fn files_are_posted_as_cards_and_replayed() {
         _ => None,
     });
     assert_eq!(reason, UploadRejectReason::NoPermission);
+    // The refusal names the upload restriction. It used to say
+    // General's text kind, and the client then locked the guest's
+    // chat until a reconnect (review P0-2).
+    assert!(guest.inbox.iter().any(|m| matches!(
+        m,
+        ServerMessage::Restricted {
+            kind: RestrictionKind::Upload,
+            ..
+        }
+    )));
+    assert!(!guest.inbox.iter().any(|m| matches!(
+        m,
+        ServerMessage::Restricted {
+            kind: RestrictionKind::GeneralText,
+            ..
+        }
+    )));
 
     // Over the per-file cap: refused at announce.
     alice.send(
@@ -2358,7 +2466,8 @@ fn files_are_posted_as_cards_and_replayed() {
         ServerMessage::History { messages, .. }
             if messages.iter().any(|h| h.id == msg_id && h.text.is_empty()))));
 
-    // Deleting the message lets go of the blob's reference.
+    // Deleting the message lets go of its reference to the blob (bob's
+    // repost of the same bytes still holds one).
     alice.send(&mut w, &ClientMessage::DeleteMessage { msg_id });
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -2367,7 +2476,7 @@ fn files_are_posted_as_cards_and_replayed() {
             .policy()
             .blobs
             .get(&blob)
-            .is_some_and(|b| b.refs == 0)
+            .is_some_and(|b| b.refs == 1)
         {
             break;
         }
@@ -3061,24 +3170,321 @@ fn a_code_minted_by_the_cli_is_picked_up_by_the_running_server() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `server user purge` while the server runs (review P2-8): the
+/// person's messages leave the replay ring and everyone's screen with
+/// the reload, not after 200 newer messages pushed them out.
+#[test]
+fn a_purge_by_the_cli_takes_the_messages_off_the_live_server() {
+    let dir = temp_dir("cli-purge");
+    let db = dir.join("baucord.db");
+    let mut w = World::new(persistent_config(vec![open_channel("Lobby", true)], &dir));
+    let mut alice = w.connect("alice");
+    let mut troll = w.connect("troll");
+    let troll_user = troll.key.user_id();
+    troll.send(&mut w, &ClientMessage::Chat("garbage".to_string()));
+    alice.wait_for(&mut w, &mut [&mut troll], |m| {
+        matches!(m, ServerMessage::Chat(c) | ServerMessage::ChatFrom { msg: c, .. } if c.text == "garbage").then_some(())
+    });
+    // On disk before the CLI looks for the account.
+    let deadline = Instant::now() + Duration::from_secs(6);
+    while server::persistence::cli_find_user(&db, "troll").is_err()
+        || stored_message_count(&dir) == 0
+    {
+        assert!(Instant::now() < deadline, "the message never reached disk");
+        std::thread::sleep(Duration::from_millis(20));
+        w.pump(&mut [&mut alice, &mut troll]);
+    }
+
+    server::persistence::cli_purge(&db, &troll_user).expect("purge");
+    // The persistence thread polls `data_version` every 2 s of real time.
+    let deadline = Instant::now() + Duration::from_secs(6);
+    while !alice
+        .inbox
+        .iter()
+        .any(|m| matches!(m, ServerMessage::MessageDeleted { .. }))
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the purged message stayed on screen"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+        w.pump(&mut [&mut alice, &mut troll]);
+    }
+    let mut carol = w.connect("carol");
+    w.settle(&mut [&mut carol, &mut alice], Duration::from_millis(300));
+    assert!(
+        carol.inbox.iter().all(|m| match m {
+            ServerMessage::History { messages, .. } => messages.iter().all(|x| x.text != "garbage"),
+            _ => true,
+        }),
+        "a newcomer is still replayed the purged message"
+    );
+    drop(w);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A key or an address names nobody (review P2-10): it can only be
+/// banned from the server, and that takes the ban permission.
+#[test]
+fn a_key_or_an_address_can_only_be_banned_and_only_with_the_ban_permission() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let boot = w.bootstrap_code();
+    let mut admin = w.connect_as("mpw", Auth::Invite { code: boot });
+    let mut alice = w.connect_member("alice");
+    let restrict = |kind| AdminCommand::Restrict {
+        target: AdminTarget::Address("10.9.9.9".to_string()),
+        kind,
+        duration_secs: None,
+        reason: String::new(),
+    };
+
+    admin.admin(&mut w, 1, restrict(RestrictionKind::GeneralText));
+    assert!(matches!(
+        admin.admin_result(&mut w, &mut [&mut alice], 1),
+        Err(AdminError::Invalid(_))
+    ));
+
+    // A role that may restrict but not ban.
+    admin.admin(
+        &mut w,
+        2,
+        AdminCommand::CreateRole {
+            name: "warden".into(),
+            permissions: permissions::MEMBER_PERMISSIONS | permissions::RESTRICT,
+            icon: String::new(),
+            color: 0,
+        },
+    );
+    let Ok(AdminOutcome::RoleCreated(warden)) = admin.admin_result(&mut w, &mut [&mut alice], 2)
+    else {
+        panic!("role not created");
+    };
+    admin.admin(
+        &mut w,
+        3,
+        AdminCommand::SetRoles {
+            target: AdminTarget::Name("alice".to_string()),
+            roles: vec![ROLE_MEMBER, warden],
+        },
+    );
+    assert_eq!(
+        admin.admin_result(&mut w, &mut [&mut alice], 3),
+        Ok(AdminOutcome::Done)
+    );
+    alice.admin(&mut w, 4, restrict(RestrictionKind::Server));
+    assert_eq!(
+        alice.admin_result(&mut w, &mut [&mut admin], 4),
+        Err(AdminError::NoPermission)
+    );
+    assert!(w.server().policy().restrictions.is_empty());
+
+    admin.admin(&mut w, 5, restrict(RestrictionKind::Server));
+    assert_eq!(
+        admin.admin_result(&mut w, &mut [&mut alice], 5),
+        Ok(AdminOutcome::Done)
+    );
+    assert_eq!(w.server().policy().restrictions.len(), 1);
+}
+
+/// Keeping a person out of the server is a ban by whatever command
+/// asks for it: a role that may restrict and not ban gets its mutes and
+/// no more (the rest of review P2-10).
+#[test]
+fn a_server_restriction_on_a_person_takes_the_ban_permission() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let boot = w.bootstrap_code();
+    let mut admin = w.connect_as("mpw", Auth::Invite { code: boot });
+    let mut alice = w.connect_member("alice");
+    let mut guest = w.connect("guest");
+    admin.admin(
+        &mut w,
+        1,
+        AdminCommand::CreateRole {
+            name: "warden".into(),
+            permissions: permissions::MEMBER_PERMISSIONS | permissions::RESTRICT,
+            icon: String::new(),
+            color: 0,
+        },
+    );
+    let Ok(AdminOutcome::RoleCreated(warden)) =
+        admin.admin_result(&mut w, &mut [&mut alice, &mut guest], 1)
+    else {
+        panic!("role not created");
+    };
+    admin.admin(
+        &mut w,
+        2,
+        AdminCommand::SetRoles {
+            target: AdminTarget::Name("alice".to_string()),
+            roles: vec![ROLE_MEMBER, warden],
+        },
+    );
+    assert_eq!(
+        admin.admin_result(&mut w, &mut [&mut alice, &mut guest], 2),
+        Ok(AdminOutcome::Done)
+    );
+    let on_guest = |kind| AdminCommand::Restrict {
+        target: AdminTarget::Name("guest".to_string()),
+        kind,
+        duration_secs: None,
+        reason: String::new(),
+    };
+    alice.admin(&mut w, 3, on_guest(RestrictionKind::Server));
+    assert_eq!(
+        alice.admin_result(&mut w, &mut [&mut admin, &mut guest], 3),
+        Err(AdminError::NoPermission)
+    );
+    assert!(w.server().policy().restrictions.is_empty());
+    // What the role is for still works.
+    alice.admin(&mut w, 4, on_guest(RestrictionKind::GeneralText));
+    assert_eq!(
+        alice.admin_result(&mut w, &mut [&mut admin, &mut guest], 4),
+        Ok(AdminOutcome::Done)
+    );
+}
+
+/// A ban may name an equal (spec §12: only an administrator is out of
+/// reach), and the person named leaves at once. The rank rule that
+/// protects whoever else shares their key or address used to protect
+/// them too: the ban was stored, the answer was `Done`, and they stayed
+/// in the room until they next reconnected.
+#[test]
+fn a_ban_of_an_equal_removes_them_at_once() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let boot = w.bootstrap_code();
+    let mut admin = w.connect_as("mpw", Auth::Invite { code: boot });
+    let mut alice = w.connect_member("alice");
+    let mut bob = w.connect_member("bob");
+    admin.admin(
+        &mut w,
+        1,
+        AdminCommand::CreateRole {
+            name: "bouncer".into(),
+            permissions: permissions::MEMBER_PERMISSIONS | permissions::BAN,
+            icon: String::new(),
+            color: 0,
+        },
+    );
+    let Ok(AdminOutcome::RoleCreated(bouncer)) =
+        admin.admin_result(&mut w, &mut [&mut alice, &mut bob], 1)
+    else {
+        panic!("role not created");
+    };
+    for (request, name) in [(2, "alice"), (3, "bob")] {
+        admin.admin(
+            &mut w,
+            request,
+            AdminCommand::SetRoles {
+                target: AdminTarget::Name(name.to_string()),
+                roles: vec![ROLE_MEMBER, bouncer],
+            },
+        );
+        assert_eq!(
+            admin.admin_result(&mut w, &mut [&mut alice, &mut bob], request),
+            Ok(AdminOutcome::Done)
+        );
+    }
+    alice.admin(
+        &mut w,
+        4,
+        AdminCommand::Ban {
+            target: AdminTarget::Name("bob".to_string()),
+            duration_secs: None,
+            reason: "enough".to_string(),
+        },
+    );
+    bob.wait_for(&mut w, &mut [&mut admin, &mut alice], |m| match m {
+        ServerMessage::Removed {
+            kind: RemovedKind::Banned { until: None },
+            reason,
+            ..
+        } if reason == "enough" => Some(()),
+        _ => None,
+    });
+    // The administrator on the same address is still there, and still
+    // out of reach.
+    alice.admin(
+        &mut w,
+        5,
+        AdminCommand::Ban {
+            target: AdminTarget::Name("mpw".to_string()),
+            duration_secs: None,
+            reason: String::new(),
+        },
+    );
+    assert_eq!(
+        alice.admin_result(&mut w, &mut [&mut admin], 5),
+        Err(AdminError::Outranked)
+    );
+}
+
+/// A full server still shakes hands, and says why it refuses. The
+/// transport used to count the unadmitted against `max_clients` too,
+/// so the next connection was refused before it could say Hello and
+/// `ServerFull` reached nobody (review P3-5).
 #[test]
 fn server_full_is_refused_at_hello() {
     let mut config = test_config(vec![open_channel("Lobby", true)]);
     config.network.max_clients = 1;
     let mut w = World::new(config);
     let _a = w.connect("alice");
-    // With one seat taken the transport already refuses the second
-    // handshake; the app-level check is the backstop.
-    let mut second = w.open_attempt();
-    let deadline = w.net.now() + WAIT;
-    while second.disconnected().is_none() && !w.net.driver(second.node).is_connected(second.peer) {
-        assert!(w.net.now() < deadline, "no verdict");
-        w.pump(&mut [&mut second]);
-    }
-    assert!(
-        second.disconnected().is_some(),
-        "second connection must be refused"
+    let code = w.guest_code.clone();
+    assert_eq!(
+        w.try_connect("bob", Auth::Invite { code }).unwrap_err(),
+        RefusedReason::ServerFull
     );
+}
+
+/// The seat a user holds is theirs: back after a blackout, with the
+/// old session still on the server's books, their new connection
+/// replaces it even on a full server.
+#[test]
+fn a_returning_user_replaces_their_session_on_a_full_server() {
+    let mut config = test_config(vec![open_channel("Lobby", true)]);
+    config.network.max_clients = 1;
+    let mut w = World::new(config);
+    let mut old = w.connect("alice");
+    let key = Arc::clone(&old.key);
+    let mut new = w
+        .try_connect_with_key("alice", Auth::Key, key)
+        .expect("the same user gets back in");
+    assert_ne!(new.id, old.id);
+    old.wait_for(&mut w, &mut [&mut new], |m| {
+        matches!(
+            m,
+            ServerMessage::Removed {
+                kind: RemovedKind::Replaced,
+                ..
+            }
+        )
+        .then_some(())
+    });
+}
+
+/// One address opening connections in a loop, never saying Hello: it
+/// holds its share of the waiting room and no more, and someone else
+/// still gets in (plan SEC-2).
+#[test]
+fn one_address_cannot_fill_the_waiting_room() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let mut hostile: Vec<TestClient> = (0..30u16)
+        .map(|i| {
+            let from: SocketAddr = format!("10.9.9.9:{}", 7000 + i).parse().expect("addr");
+            w.open_attempt_from(from)
+        })
+        .collect();
+    {
+        let mut refs: Vec<&mut TestClient> = hostile.iter_mut().collect();
+        w.settle(&mut refs, Duration::from_secs(1));
+    }
+    let connected = hostile
+        .iter()
+        .filter(|c| w.net.driver(c.node).is_connected(c.peer))
+        .count();
+    assert_eq!(connected, 8, "its share of the room, the rest refused");
+
+    let alice = w.connect("alice");
+    assert_ne!(alice.id, 0);
 }
 
 #[test]
@@ -3331,6 +3737,71 @@ fn channel_scoped_share_visibility_follows_membership() {
         matches!(m, ServerMessage::ScreenShareStopped { client_id } if *client_id == sharer_id)
             .then_some(())
     });
+}
+
+/// What a session does in the lobby stays there (review P2-1): its
+/// speaking edges, its mute, a rename and a role change used to reach
+/// every client, each one naming the session nobody was told about.
+#[test]
+fn a_lobby_session_keeps_its_state_to_itself() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let boot = w.bootstrap_code();
+    let mut admin = w.connect_as("mpw", Auth::Invite { code: boot });
+    let mut alice = w.connect("alice");
+    let mut bob = w.connect_lobby("bob");
+    let bob_id = bob.id;
+    let bob_user = bob.key.user_id();
+    bob.send(&mut w, &ClientMessage::Speaking(true));
+    bob.send(
+        &mut w,
+        &ClientMessage::AudioState {
+            muted: true,
+            deafened: false,
+        },
+    );
+    bob.send(
+        &mut w,
+        &ClientMessage::SetNickname {
+            name: "robert".to_string(),
+        },
+    );
+    admin.admin(
+        &mut w,
+        9,
+        AdminCommand::SetRoles {
+            target: AdminTarget::User(bob_user),
+            roles: vec![ROLE_MEMBER],
+        },
+    );
+    assert_eq!(
+        admin.admin_result(&mut w, &mut [&mut alice, &mut bob], 9),
+        Ok(AdminOutcome::Done)
+    );
+    w.settle(
+        &mut [&mut admin, &mut alice, &mut bob],
+        Duration::from_secs(1),
+    );
+    let about_bob = |m: &ServerMessage| match m {
+        ServerMessage::Speaking { client_id, .. }
+        | ServerMessage::AudioState { client_id, .. }
+        | ServerMessage::UserRenamed { client_id, .. }
+        | ServerMessage::UserDetails { client_id, .. } => *client_id == bob_id,
+        _ => false,
+    };
+    assert!(
+        !alice.inbox.iter().any(about_bob),
+        "a lobby session's state reached someone in a room: {:?}",
+        alice
+            .inbox
+            .iter()
+            .filter(|m| about_bob(m))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        bob.inbox.iter().any(|m| matches!(m,
+            ServerMessage::UserRenamed { client_id, name } if *client_id == bob_id && name == "robert")),
+        "the lobby session still hears its own rename"
+    );
 }
 
 #[test]
@@ -3808,6 +4279,141 @@ fn voice_is_relayed_within_the_channel_and_reported_back() {
     assert_eq!(expected, 100);
 }
 
+/// Voice the relay drops on purpose still arrived (review P2-2): a
+/// muted stretch must not show up as loss in the sender's report once
+/// the mute lifts.
+#[test]
+fn voice_dropped_for_a_mute_is_not_reported_as_lost() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let boot = w.bootstrap_code();
+    let mut admin = w.connect_as("mpw", Auth::Invite { code: boot });
+    let mut alice = w.connect("alice");
+    let mut bob = w.connect("bob");
+    let alice_user = alice.key.user_id();
+
+    let talk = |w: &mut World,
+                alice: &mut TestClient,
+                bob: &mut TestClient,
+                admin: &mut TestClient,
+                seqs: std::ops::Range<u32>| {
+        for seq in seqs {
+            let pkt = protocol::pack_voice(seq, seq * 20, &[0xAB; 60]).expect("voice");
+            let now = w.net.now();
+            w.net
+                .driver(alice.node)
+                .send(now, alice.peer, Lane::Voice, &pkt)
+                .expect("send voice");
+            w.settle(&mut [alice, bob, admin], Duration::from_millis(20));
+        }
+        w.settle(&mut [alice, bob, admin], Duration::from_millis(500));
+        let mut got = 0;
+        while w.net.driver(bob.node).recv(bob.peer, Lane::Voice).is_some() {
+            got += 1;
+        }
+        got
+    };
+    assert_eq!(talk(&mut w, &mut alice, &mut bob, &mut admin, 0..20), 20);
+
+    admin.admin(
+        &mut w,
+        1,
+        AdminCommand::Restrict {
+            target: AdminTarget::User(alice_user),
+            kind: RestrictionKind::Voice,
+            duration_secs: Some(30 * 60),
+            reason: "hot mic".to_string(),
+        },
+    );
+    assert_eq!(
+        admin.admin_result(&mut w, &mut [&mut alice, &mut bob], 1),
+        Ok(AdminOutcome::Done)
+    );
+    assert_eq!(talk(&mut w, &mut alice, &mut bob, &mut admin, 20..40), 0);
+
+    w.advance_wall(Duration::from_mins(31));
+    alice.wait_for(&mut w, &mut [&mut admin, &mut bob], |m| {
+        matches!(
+            m,
+            ServerMessage::RestrictionLifted {
+                kind: RestrictionKind::Voice
+            }
+        )
+        .then_some(())
+    });
+    assert_eq!(talk(&mut w, &mut alice, &mut bob, &mut admin, 40..60), 20);
+    w.settle(
+        &mut [&mut alice, &mut bob, &mut admin],
+        Duration::from_secs(3),
+    );
+
+    let (mut received, mut expected, mut lost) = (0, 0, 0);
+    for m in &alice.inbox {
+        if let ServerMessage::VoiceReceiverReport {
+            received: r,
+            expected: e,
+            lost: l,
+            ..
+        } = m
+        {
+            received += r;
+            expected += e;
+            lost += l;
+        }
+    }
+    assert_eq!(
+        (received, expected, lost),
+        (60, 60, 0),
+        "all sixty packets arrived, the muted twenty included"
+    );
+}
+
+/// A session that sends no voice is sent no report of it — once it
+/// has said it can do without (`QUIET_REPORTS`): a report of nothing
+/// every two seconds kept a phone's radio up for as long as it sat in
+/// the lobby. A client from before the bit reads a missing report as a
+/// stalled link, and keeps getting them (review P2-49).
+#[test]
+fn a_silent_session_is_sent_no_voice_report_if_it_can_do_without() {
+    let reports = |c: &TestClient| {
+        c.inbox
+            .iter()
+            .filter(|m| matches!(m, ServerMessage::VoiceReceiverReport { .. }))
+            .count()
+    };
+    let mut w = World::new(test_config(vec![
+        open_channel("Lobby", true),
+        open_channel("Room", false),
+    ]));
+    let mut quiet = w.connect("quiet");
+    let mut older = w.open();
+    older.features = features::CLIENT_1_1 & !features::QUIET_REPORTS;
+    let code = w.guest_code.clone();
+    w.admission(&mut older, "older", Auth::Invite { code })
+        .expect("admitted");
+    w.settle(&mut [&mut quiet, &mut older], Duration::from_secs(7));
+    assert_eq!(reports(&quiet), 0, "nothing said, nothing reported");
+    assert!(reports(&older) >= 3, "every two seconds, as it expects");
+
+    // It talks: the reports come, and stop again after the last
+    // interval that held any of its voice.
+    quiet.join(&mut w, 1, None);
+    for seq in 0..150u32 {
+        let pkt = protocol::pack_voice(seq, seq * 960, &[0xAB; 60]).expect("voice");
+        let now = w.net.now();
+        w.net
+            .driver(quiet.node)
+            .send(now, quiet.peer, Lane::Voice, &pkt)
+            .expect("send");
+        w.settle(&mut [&mut quiet, &mut older], Duration::from_millis(20));
+    }
+    let while_talking = reports(&quiet);
+    assert!(while_talking >= 1, "three seconds of voice, reported");
+    w.settle(&mut [&mut quiet, &mut older], Duration::from_secs(3));
+    let after = reports(&quiet);
+    w.settle(&mut [&mut quiet, &mut older], Duration::from_secs(7));
+    assert_eq!(reports(&quiet), after, "silent again, no more reports");
+}
+
 #[test]
 fn video_groups_are_mirrored_to_subscribers_on_the_sharers_track() {
     let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
@@ -3881,6 +4487,105 @@ fn video_groups_are_mirrored_to_subscribers_on_the_sharers_track() {
         assert_eq!(sender, sharer_id);
         assert!(protocol::parse_video_header(payload).is_some());
     }
+}
+
+/// A viewer on a narrow link watches two streams: one busy, one that
+/// has not sent a picture yet. Every group of the busy one is lost to
+/// that viewer, and its sharer hears so in every report — a group is
+/// two seconds long, so a one-second window read 0 % half the time —
+/// while the quiet stream's sharer is not charged with losses that are
+/// not its own (review P2-3).
+#[test]
+fn stream_health_is_per_stream_and_spans_whole_groups() {
+    let mut w = World::new(test_config(vec![open_channel("Lobby", true)]));
+    let mut busy = w.connect_member("busy");
+    let mut quiet = w.connect_member("quiet");
+    let mut viewer = w.connect_member("viewer");
+
+    for sharer in [&mut busy, &mut quiet] {
+        sharer.send(
+            &mut w,
+            &ClientMessage::ScreenShareStart {
+                width: 640,
+                height: 360,
+                scope: ShareScope::Everyone,
+            },
+        );
+    }
+    for target_id in [busy.id, quiet.id] {
+        viewer.wait_for(&mut w, &mut [&mut busy, &mut quiet], |m| {
+            matches!(m, ServerMessage::ScreenShareStarted { client_id, .. } if *client_id == target_id)
+                .then_some(())
+        });
+        viewer.send(&mut w, &ClientMessage::SubscribeScreen { target_id });
+    }
+    w.settle(
+        &mut [&mut busy, &mut quiet, &mut viewer],
+        Duration::from_millis(200),
+    );
+    busy.inbox.clear();
+    quiet.inbox.clear();
+
+    // The server reaches the viewer at 0.3 Mbit/s; the busy stream
+    // offers well over a megabit.
+    w.net.set_link_one_way(
+        w.server,
+        viewer.node,
+        LinkSpec::clean(Duration::from_millis(20)).with_bandwidth(300_000, 100),
+    );
+    let start = w.net.now();
+    let mut next_group = start;
+    let mut next_frame = start;
+    let mut seq = 0u32;
+    let payload = vec![3u8; 20_000];
+    while w.net.now() < start + Duration::from_secs(12) {
+        let now = w.net.now();
+        let drv = w.net.driver(busy.node);
+        if now >= next_group {
+            next_group = now + Duration::from_secs(2);
+            drv.video_new_group(now, busy.peer, OWN_TRACK);
+            next_frame = now;
+        }
+        if now >= next_frame {
+            next_frame = now + Duration::from_millis(100);
+            seq += 1;
+            let frame = protocol::pack_video_frame(seq, false, 640, 360, seq * 100, &payload)
+                .expect("frame");
+            for chunk in &frame {
+                let _ = drv.send(now, busy.peer, Lane::Video, chunk);
+            }
+        }
+        w.pump(&mut [&mut busy, &mut quiet, &mut viewer]);
+        while w.net.driver(viewer.node).recv_video(viewer.peer).is_some() {}
+    }
+
+    let health = |c: &TestClient| -> Vec<(f32, u16)> {
+        c.inbox
+            .iter()
+            .filter_map(|m| match m {
+                ServerMessage::StreamHealth {
+                    worst_loss,
+                    viewers,
+                    ..
+                } => Some((*worst_loss, *viewers)),
+                _ => None,
+            })
+            .collect()
+    };
+    let busy_reports = health(&busy);
+    let quiet_reports = health(&quiet);
+    assert!(busy_reports.len() >= 10, "{busy_reports:?}");
+    assert!(quiet_reports.len() >= 10, "{quiet_reports:?}");
+    assert!(
+        quiet_reports.iter().all(|r| *r == (0.0, 1)),
+        "the quiet stream lost nothing: {quiet_reports:?}"
+    );
+    // The first group needs its half-second deadline to be given up
+    // on; from then on no report reads clean.
+    assert!(
+        busy_reports[3..].iter().all(|(loss, _)| *loss > 0.0),
+        "every later report shows the viewer behind: {busy_reports:?}"
+    );
 }
 
 // ── Persistence (spec §1, §11: the first test of 1.1) ───────────────────
@@ -4271,7 +4976,7 @@ fn an_avatar_uploads_once_and_reaches_everyone() {
             name: "huge.png".into(),
             mime: "image/png".into(),
             size: u32::try_from(huge.len()).unwrap(),
-            sha256: sha2::Sha256::digest(&huge).into(),
+            sha256: transport::sha256::digest(&huge),
         },
     );
     let why = alice.wait_for(&mut w, &mut [&mut bob], |m| match m {
@@ -4446,7 +5151,7 @@ fn profiles_and_avatars_survive_a_restart() {
     let key = Arc::new(ClientKey::generate());
     let alice_user = key.user_id();
     let picture = png_blob(6, 6 * 1024);
-    let blob_id: [u8; 32] = sha2::Sha256::digest(&picture).into();
+    let blob_id = transport::sha256::digest(&picture);
     {
         let mut w = World::new(persistent_config(vec![open_channel("Lobby", true)], &dir));
         let code = w.invite(ROLE_MEMBER);
@@ -4723,6 +5428,65 @@ fn a_stalled_store_fails_a_dm_within_the_deadline() {
         .iter()
         .any(|m| matches!(m, ServerMessage::Direct { .. })));
     drop(stalled);
+    drop(w);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A file sent as a DM takes a reference when it is sent. A store that
+/// does not answer fails the DM — and the reference goes back: it used
+/// to stay, and a file with a count above zero is never deleted
+/// (review P2-11).
+#[test]
+fn a_file_dm_that_was_not_stored_gives_its_reference_back() {
+    let dir = temp_dir("dm-file-stall");
+    let mut w = World::new(persistent_config(vec![open_channel("Lobby", true)], &dir));
+    let mut alice = w.connect_member("alice");
+    let mut bob = w.connect_member("bob");
+    let bob_user = bob.key.user_id();
+    let (_, blob) = post_file(
+        &mut alice,
+        &mut w,
+        &mut [&mut bob],
+        30,
+        "notes.txt",
+        "text/plain",
+        b"the same file, twice",
+        ConvRef::General,
+    )
+    .expect("posted in the room");
+    let refs = |w: &mut World| w.server().policy().blobs.get(&blob).map(|b| b.refs);
+    assert_eq!(refs(&mut w), Some(1));
+
+    let send_as_dm = |alice: &mut TestClient, w: &mut World, bob: &mut TestClient, client_ref| {
+        alice.send(
+            w,
+            &ClientMessage::SendFile {
+                conv: ConvRef::Dm(bob_user),
+                blob_id: blob,
+                client_ref,
+            },
+        );
+        alice.wait_for(w, &mut [bob], |m| match m {
+            ServerMessage::MessageAck { client_ref: r, .. } if *r == client_ref => Some(Ok(())),
+            ServerMessage::MessageFailed {
+                client_ref: r,
+                reason,
+            } if *r == client_ref => Some(Err(*reason)),
+            _ => None,
+        })
+    };
+
+    let stalled = w.server().persistence().stall();
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(
+        send_as_dm(&mut alice, &mut w, &mut bob, 71),
+        Err(DmFailReason::Store)
+    );
+    assert_eq!(refs(&mut w), Some(1), "the failed DM holds nothing");
+    drop(stalled);
+
+    assert_eq!(send_as_dm(&mut alice, &mut w, &mut bob, 72), Ok(()));
+    assert_eq!(refs(&mut w), Some(2), "the room's post and the DM");
     drop(w);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -5247,12 +6011,31 @@ fn a_report_reaches_the_moderators_and_waits_in_the_reports_tab() {
         bob.admin_result(&mut w, &mut [&mut admin, &mut alice], 1),
         Err(AdminError::NoPermission)
     );
-    admin.admin(&mut w, 2, AdminCommand::ListReports { resolved: false });
-    let Ok(AdminOutcome::Reports(list)) =
-        admin.admin_result(&mut w, &mut [&mut alice, &mut bob], 2)
-    else {
-        panic!("no reports");
-    };
+    // The reports are written by the persistence thread, in real time;
+    // the settle above is simulated time, which a loaded machine runs
+    // through before the second write is even queued. Ask until both
+    // are there (this was a flake: one report listed, about one run in
+    // four on a busy disk).
+    let mut list = Vec::new();
+    for attempt in 0..200u32 {
+        // Ids of their own: the requests further down are 3, 4 and 5.
+        let request = 100 + attempt;
+        admin.admin(
+            &mut w,
+            request,
+            AdminCommand::ListReports { resolved: false },
+        );
+        let Ok(AdminOutcome::Reports(now)) =
+            admin.admin_result(&mut w, &mut [&mut alice, &mut bob], request)
+        else {
+            panic!("no reports");
+        };
+        list = now;
+        if list.len() == 2 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
     assert_eq!(list.len(), 2);
     assert_eq!(list[0].msg_id, None);
     assert_eq!(list[1].msg_id, Some(msg_id));
@@ -5541,7 +6324,7 @@ fn a_picture_someone_else_also_uses_outlives_its_uploaders_account() {
     };
     use_as_avatar(&mut alice, &mut bob, &mut w);
     use_as_avatar(&mut bob, &mut alice, &mut w);
-    let blob: [u8; 32] = sha2::Sha256::digest(&picture).into();
+    let blob = transport::sha256::digest(&picture);
     w.settle(&mut [&mut alice, &mut bob], Duration::from_millis(500));
 
     alice.send(&mut w, &ClientMessage::DeleteAccount);
@@ -5586,4 +6369,121 @@ fn the_last_admin_cannot_delete_their_account() {
     assert_eq!(reason, protocol::DeleteRefusal::LastAdmin);
     let admin_user = admin.key.user_id();
     assert!(w.server().policy().users.contains_key(&admin_user));
+}
+
+/// Wait until the persistence thread has written everything queued, so
+/// the CLI finds the rows.
+fn wait_for_rows(w: &mut World) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while w.server().persistence().stats().queued > 0 {
+        assert!(Instant::now() < deadline, "rows never landed");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// What a policy reload sends a client: the roster lines (whose), and
+/// how many `Session` and `RoleList` messages.
+fn reload_messages(c: &TestClient) -> (Vec<ClientId>, usize, usize) {
+    let mut details = Vec::new();
+    let (mut sessions, mut role_lists) = (0, 0);
+    for m in &c.inbox {
+        match m {
+            ServerMessage::UserDetails { client_id, .. } => details.push(*client_id),
+            ServerMessage::Session { .. } => sessions += 1,
+            ServerMessage::RoleList { .. } => role_lists += 1,
+            _ => {}
+        }
+    }
+    (details, sessions, role_lists)
+}
+
+#[test]
+fn cli_listings_reload_nothing_and_message_nobody() {
+    // Every CLI open re-synced the built-in roles and truncated the WAL
+    // on close, so `server user list` read as a change: the server
+    // reloaded every table and sent N² messages (review P1-22).
+    let dir = temp_dir("cli-listings");
+    let mut w = World::new(persistent_config(vec![open_channel("Lobby", true)], &dir));
+    let mut alice = w.connect("alice");
+    let mut bob = w.connect("bob");
+    // Bob's arrival still on its way to alice.
+    w.settle(&mut [&mut alice, &mut bob], Duration::from_millis(500));
+    wait_for_rows(&mut w);
+    let before = w.server().persistence().stats().external_changes;
+    alice.inbox.clear();
+    bob.inbox.clear();
+
+    let db = dir.join("baucord.db");
+    let (found, policy) = server::persistence::cli_find_user(&db, "alice").expect("by name");
+    assert_eq!(found, alice.key.user_id());
+    assert_eq!(policy.users.len(), 2);
+    server::persistence::cli_load_policy(&db).expect("user list");
+    assert!(!server::persistence::cli_list_invites(&db)
+        .expect("invite list")
+        .is_empty());
+    server::persistence::cli_telemetry(&db, &found, 0, 10).expect("telemetry");
+    assert!(server::persistence::check(&db).expect("db check").is_ok());
+
+    // Past the 2 s poll, twice.
+    let until = Instant::now() + Duration::from_millis(4500);
+    while Instant::now() < until {
+        w.pump(&mut [&mut alice, &mut bob]);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(w.server().persistence().stats().external_changes, before);
+    for c in [&alice, &bob] {
+        assert_eq!(reload_messages(c), (Vec::new(), 0, 0), "{:?}", c.inbox);
+    }
+    drop(w);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_cli_grant_messages_only_what_changed() {
+    let dir = temp_dir("cli-grant-diff");
+    let mut w = World::new(persistent_config(vec![open_channel("Lobby", true)], &dir));
+    let mut alice = w.connect("alice");
+    let mut bob = w.connect("bob");
+    let mut carol = w.connect("carol");
+    // The arrivals still on their way to the others.
+    w.settle(
+        &mut [&mut alice, &mut bob, &mut carol],
+        Duration::from_millis(500),
+    );
+    wait_for_rows(&mut w);
+    for c in [&mut alice, &mut bob, &mut carol] {
+        c.inbox.clear();
+    }
+
+    let db = dir.join("baucord.db");
+    let alice_user = alice.key.user_id();
+    server::persistence::cli_set_roles(&db, &alice_user, &[ROLE_MEMBER]).expect("grant");
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        w.pump(&mut [&mut alice, &mut bob, &mut carol]);
+        if alice.inbox.iter().any(|m| {
+            matches!(m, ServerMessage::Session { permissions, .. }
+                if *permissions == permissions::MEMBER_PERMISSIONS)
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the grant never reached the session"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    w.settle(
+        &mut [&mut alice, &mut bob, &mut carol],
+        Duration::from_millis(200),
+    );
+
+    // Alice's roster line to everyone, her own permission set to her,
+    // and the role table to nobody: it did not change.
+    let alice_id = alice.id;
+    assert_eq!(reload_messages(&alice), (vec![alice_id], 1, 0));
+    assert_eq!(reload_messages(&bob), (vec![alice_id], 0, 0));
+    assert_eq!(reload_messages(&carol), (vec![alice_id], 0, 0));
+    drop(w);
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -45,7 +45,6 @@ server-add = Adicionar servidor
 server-remove = Remover
 server-manage = Gerenciar servidores
 server-new-name = Novo servidor
-save = Salvar
 server-fingerprint = Identidade do servidor (SHA256:…, do convite; aprendida na primeira conexão)
 server-config-note =
     A identidade é aprendida na primeira conexão e fixada; cole-a do log de inicialização do servidor para verificá-lo antes. Vale na próxima conexão.
@@ -88,15 +87,13 @@ chat-command-usage-unlink = Uso: /unlink <hash da chave, 64 dígitos hex> (veja 
 chat-command-usage-link = Uso: /link <nome> <hash da chave, 64 dígitos hex>
 chat-command-no-such-user = Ninguém online se chama { $name }.
 chat-admin-refused = Recusado: { $why }.
-chat-admin-done = Feito.
+activity-command-done = { $command }: feito
 chat-server-muted-locked = O servidor silenciou você; poderá reativar o microfone quando isso for removido.
 chat-your-roles-changed = Seus cargos agora são: { $roles }
 roles-none = nenhum
 reason-none = (sem motivo)
 chat-admin-users-header = { $count } usuário(s) registrados (● online):
-chat-admin-role-created = Papel criado (id { $id })
-chat-admin-blobs-header = { $count } blob(s) guardados
-chat-admin-audit-header = { $count } entradas de auditoria, mais novas primeiro
+chat-admin-list-more = … e mais { $count }. O painel de administração mostra todos.
 chat-admin-restrictions-header = { $count } restrição(ões):
 chat-admin-invites-header = { $count } convite(s):
 restricted-voice = O servidor silenciou você{ $until }{ $reason }
@@ -128,7 +125,6 @@ identity-regenerated = Nova identidade criada. A próxima conexão precisa de um
 
 # ── Sidebar ─────────────────────────────────────────────────────────────
 users-count = Usuários: { $count }
-status-connecting = Conectando...
 status-connected = Conectado
 status-disconnected = Desconectado
 mute = Silenciar
@@ -138,7 +134,6 @@ undeafen = Reativar áudio
 share-screen = Compartilhar tela
 stop-sharing = Parar compartilhamento
 disconnect = Desconectar
-user-volume = Volume do usuário
 reset-audio = Redefinir áudio
 watch-stream = Assistir transmissão
 live = Ao vivo
@@ -180,7 +175,6 @@ stop-watching = Parar de assistir
 viewer-stats = { $res } { $fps }fps { $kbps }KB/s { $mb }MB | buf { $depth }/{ $target }ms jit { $jitter }ms
 
 # ── Audio panel ─────────────────────────────────────────────────────────
-audio-devices-header = DISPOSITIVOS
 audio-input-device = Dispositivo de entrada (microfone)
 audio-output-device = Dispositivo de saída (alto-falantes/fones)
 audio-input-header = ENTRADA
@@ -192,6 +186,7 @@ audio-test-mic = Testar microfone
 audio-stop-testing = Parar teste
 audio-test-hint = Ouça seu próprio microfone (outras pessoas não vão ouvir você)
 audio-testing-hint = Ouvindo seu microfone... outras pessoas não podem ouvir você
+audio-testing-hint-delayed = Diga algo: você vai ouvir meio segundo depois. Outras pessoas não podem ouvir você
 audio-output-header = SAÍDA
 audio-master-volume = Volume principal
 audio-system-default = Padrão do sistema
@@ -201,9 +196,6 @@ audio-route-auto = Automático
 audio-route-speaker = Alto-falante
 audio-route-earpiece = Fone do celular
 audio-route-wired = Fone com fio
-audio-device-count = { $inputs } dispositivo(s) de entrada, { $outputs } de saída
-audio-gain-value = Ganho: { $percent }%
-audio-volume-value = Volume: { $percent }%
 audio-sensitivity-line = Sensibilidade: { $name }  (limiar: { $threshold } RMS)
 sensitivity-very-high = Muito alta
 sensitivity-high = Alta
@@ -218,10 +210,10 @@ action-toggle-share = Alternar compartilhamento de tela
 action-push-to-talk = Pressionar para falar
 
 # ── Keybinds panel ──────────────────────────────────────────────────────
-keybinds-header = ATALHOS DE TECLADO
 keybinds-hint = Clique em Gravar e pressione uma combinação de teclas. Esc cancela, Backspace limpa.
+keybinds-access = O macOS só deixa o baucord ver seus atalhos enquanto você está em outro app com a permissão de Acessibilidade. Até lá, uma tecla atribuída continua funcionando, mas o macOS a tira do app em que você está: ela não digita nada ali.
+keybinds-access-ask = Permitir nos Ajustes do Sistema…
 keybind-not-set = Não definido
-keybind-record = Gravar
 keybind-press-combo = Pressione uma combinação de teclas...
 
 # ── Screen share dialog ─────────────────────────────────────────────────
@@ -232,19 +224,15 @@ start-sharing = Iniciar compartilhamento
 error-no-monitors = Nenhum monitor encontrado
 
 # ── Credits panel ───────────────────────────────────────────────────────
-credits-header = CRÉDITOS
 credits-super-testers = SUPER BETA TESTERS
 credits-beta-testers = BETA TESTERS
 
 # ── About panel ─────────────────────────────────────────────────────────
-about-header = SOBRE
 about-running-from = Executando de:
 about-config-file = Arquivo de configuração:
 about-open-config = Abrir pasta de configuração
-about-open-folder = Abrir pasta de instalação
 about-built-with = FEITO COM
 tech-rust = Rust - Linguagem de programação
-tech-fltk = FLTK - Interface de usuário
 tech-quinn = quinn-proto - Transporte QUIC
 tech-ffmpeg = FFmpeg - Codificação/decodificação de vídeo
 tech-xcap = Xcap - Captura de tela
@@ -255,24 +243,19 @@ tech-rubato = Rubato - Reamostragem de áudio
 
 # ── Update flow ─────────────────────────────────────────────────────────
 splash-checking = Verificando atualizações...
-update-available-title = Atualização disponível
 update-available-heading = Nova versão disponível!
 update-version-info =
     Sua versão: { $current }
     Versão mais recente: { $latest }
 update-skip = Pular
 update-now = Atualizar
-update-downloading-title = Atualizando
 update-downloading-heading = Baixando atualização v{ $version }...
-update-starting-download = Iniciando download...
 update-progress = Baixando... { $percent }%
-update-ready-title = Atualização pronta
 update-downloaded-heading = Atualização baixada!
 update-ready-info = Pronto para instalar. O aplicativo será reiniciado automaticamente.
 update-not-now = Agora não
 # Rendered in an FLTK label — the code escapes '&' before display.
 update-install-restart = Instalar e reiniciar
-update-failed-title = Falha na atualização
 update-failed-heading = Falha no download
 update-continue = Continuar
 cancel = Cancelar
@@ -287,18 +270,14 @@ unknown = Desconhecido
 chat-emoji-tooltip = Emojis — ou digite códigos :nome: como :joy:
 chat-attach-tooltip = Envie uma imagem do seu computador
 chat-clear-tooltip = Limpar o chat (só para você)
-chat-image-filter = Imagens
 chat-image-load-error = Não foi possível carregar a imagem: { $error }
 chat-image-undisplayable = { $name } enviou uma imagem que não pôde ser exibida
 image-preview-title = Enviar imagem
 image-save-filter = Imagem PNG
-image-window-title = { $name } — imagem
 menu-cut = Recortar
 menu-copy = Copiar
 menu-paste = Colar
 menu-copy-message = Copiar mensagem
-menu-copy-link = Copiar link
-menu-open-link = Abrir link
 menu-open-image = Abrir imagem
 menu-save-image = Salvar imagem…
 menu-copy-image = Copiar imagem
@@ -310,7 +289,7 @@ resource-line = CPU { $cpu }% · Mem { $mem } MB
 chat-gif-too-large = O GIF ultrapassa o limite de { $mb } MB
 chat-gif-too-big = GIFs animados podem ter no máximo { $dim } px de largura ou altura
 image-save-filter-gif = Imagem GIF
-chat-upload-progress = Enviando imagem… { $pct }%
+image-save-filter-jpeg = Imagem JPEG
 
 # ── Adições da migração para Slint ──────────────────────────────────────
 tech-slint = Slint - Interface de usuário
@@ -354,7 +333,6 @@ chat-history-unavailable = O histórico não está disponível agora; tente de n
 chat-edited-mark = (editado)
 chat-deleted-placeholder = Mensagem apagada
 chat-message-edited = A mensagem #{ $id } foi editada: { $text }
-chat-message-deleted = A mensagem #{ $id } foi apagada.
 chat-rate-limited = Devagar: o chat tem limite; tente de novo em { $secs } s.
 chat-level-up = Subiu de nível! Agora você é nível { $level } ({ $xp } xp).
 chat-moved-idle = Você foi movido para o canal AFK após { $min } minutos sem atividade.
@@ -573,6 +551,9 @@ aec-status-canceller-off = Indisponível — não foi possível ligar o cancelam
 aec-status-refused = Indisponível — o sistema não abriu o áudio de chamada. Os detalhes estão no baucord.log.
 aec-status-unsupported = Ainda não disponível neste sistema.
 aec-status-idle = Vale quando você entrar num canal de voz.
+aec-lowering = O Windows abaixa o volume dos seus outros apps enquanto o baucord está conectado, e não deixou o baucord desativar isso. Nas configurações de som do Windows, na aba Comunicações, escolha "Não fazer nada".
+aec-lowering-fix = Abrir as configurações de som do Windows
+aec-lowering-told = O Windows abaixa o volume dos seus outros apps enquanto o baucord está conectado. Em Configurações → Áudio você vê como evitar.
 ptt-tooltip = Apertar para falar — segure
 
 # ── Perfis na rede (spec §7.1) ────────────────────────────────────────
@@ -623,7 +604,6 @@ month-11 = novembro
 month-12 = dezembro
 
 # ── Mensagens diretas (spec §6) ───────────────────────────────────────
-chat-dm-received = Mensagem direta de { $name }: { $text }
 dm-failed-offline = Está offline, e este servidor não guarda mensagens.
 dm-failed-no-permission = Mensagens diretas são para membros.
 dm-failed-no-such-user = Esse usuário não existe.
@@ -649,12 +629,9 @@ menu-save-file = Salvar arquivo…
 file-save = Salvar
 file-uploading-pct = Enviando
 file-downloading-pct = Baixando
-file-uploading = Enviando { $name } ({ $size })…
 file-upload-failed = { $name } não foi enviado: { $why }
-file-post-failed = O arquivo não foi publicado: { $why }
 file-too-large = { $name } tem mais de { $max } MB
 file-read-error = Não foi possível ler { $name }: { $error }
-file-downloading = Baixando { $name }…
 notif-channel-voice = Conexão de voz
 notif-connected-title = Conectado a { $server }
 notif-connected-text = Toque para voltar ao app.
@@ -695,10 +672,8 @@ dm-back = Voltar ao Geral
 chat-placeholder-dm = Mensagem para
 menu-message = Mensagem…
 sounds-dm = Chega uma mensagem direta
-chat-dm-with-offline = { $name } está offline; a mensagem espera no servidor.
 chat-command-usage-dm = Uso: /dm <nome> <mensagem>
 chat-dm-unknown = Ninguém aqui se chama { $name }.
-dm-close = Fechar conversa
 
 # ── Admin panel (spec §8) ──
 admin-title = Administração
@@ -914,3 +889,46 @@ licenses-crates-count = { $count ->
    *[other] { $count } crates
 }
 licenses-used-by = Usado por: { $crates }
+
+# ── Intervalos de tempo, e o que o servidor recusou (review P3-30) ────
+span-days = { $n } d
+span-hours = { $n } h
+span-minutes = { $n } min
+span-seconds = { $n } s
+span-days-hours = { $d } d { $h } h
+span-hours-minutes = { $h } h { $m } min
+span-ago = há { $span }
+share-denied = Não foi possível compartilhar a tela: { $why }
+watch-denied = Não é possível assistir { $name }: { $why }
+deny-share-limit = o servidor atingiu o limite de telas compartilhadas
+deny-viewer-limit = esta transmissão atingiu o limite de espectadores
+deny-not-sharing = esse usuário não está compartilhando a tela
+deny-dimensions = o servidor recusou o tamanho da transmissão
+deny-not-in-channel = esta transmissão só aparece no canal de voz dela
+deny-not-permitted = você não tem permissão
+channel-deny-missing = Esse canal não existe mais.
+channel-deny-not-permitted = Você não tem permissão para entrar nesse canal.
+upload-deny-too-large = o arquivo é maior do que este servidor aceita
+upload-deny-bad-type = só são aceitas imagens PNG, JPEG e WebP
+upload-deny-damaged = o arquivo chegou corrompido
+upload-deny-refused = o servidor recusou o arquivo
+upload-deny-quota = você já usou sua cota de envios de hoje
+upload-deny-full = o servidor não tem mais espaço para arquivos
+upload-deny-not-permitted = você não tem permissão para enviar arquivos aqui
+channel-flag-afk = AFK
+channel-flag-temporary = temporário
+channel-flag-password = com senha
+channel-flag-permanent = permanente
+channel-list-limit = limite { $limit }
+admin-list-no-roles = sem cargos
+admin-list-key = chave { $id }
+admin-list-uses = usos { $uses }
+admin-error-no-permission = você não tem permissão para isso
+admin-error-no-user = esse usuário não existe
+admin-error-no-restriction = essa restrição não existe
+admin-error-no-invite = esse convite não existe
+admin-error-no-role = esse cargo não existe
+admin-error-no-channel = esse canal não existe
+admin-error-outranked = a pessoa tem o seu nível ou um maior
+admin-error-last-admin = o último administrador continua administrador
+admin-error-yourself = não em você mesmo

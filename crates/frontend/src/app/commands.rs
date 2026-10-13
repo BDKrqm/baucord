@@ -8,6 +8,12 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
+/// How many rows a typed listing (`/users`, `/bans`, `/invites`,
+/// `/reports`) prints into the chat. The server sends a long listing
+/// whole since 1.2.1 (review P0-1); the panel shows all of it, and a
+/// chat that keeps 500 rows should not lose them to one command.
+const COMMAND_LIST_ROWS: usize = 150;
+
 impl AppState {
     pub(super) fn handle_connect(&mut self, nickname: &str) {
         self.reconnect_timer.stop();
@@ -70,11 +76,24 @@ impl AppState {
     }
 
     /// One slash command from the composer. Moderation commands map
-    /// onto `AdminCommand` (spec §8): the server checks them, the
-    /// answer lands in chat.
+    /// onto `AdminCommand` (spec §8): the server checks them, a list
+    /// or a refusal lands in chat, and a plain "done" in the activity
+    /// log under what was typed ([`Self::send_admin`]).
     pub(super) fn handle_slash_command(&mut self, command: &str, args: &str) {
+        let shown = args.trim();
+        self.typed_command = Some(if shown.is_empty() {
+            format!("/{command}")
+        } else {
+            format!("/{command} {shown}")
+        });
+        self.run_slash_command(command, args);
+        // Not every command asks the server anything.
+        self.typed_command = None;
+    }
+
+    fn run_slash_command(&mut self, command: &str, args: &str) {
         // Output goes back where the command was typed.
-        self.command_conv = self.active_dm;
+        self.command_conv = self.session.chat.active_dm;
         match command {
             "invite" => self.handle_invite_command(args),
             "help" | "commands" => {
@@ -125,6 +144,7 @@ impl AppState {
                     }
                 };
                 let found = self
+                    .session
                     .users
                     .iter()
                     .find(|(_, u)| u.username.eq_ignore_ascii_case(name))
@@ -133,7 +153,7 @@ impl AppState {
                     self.push_command_output(&t!("chat-dm-unknown", "name" => name));
                     return;
                 };
-                let Some(user_id) = self.details.get(&client_id).map(|(u, _)| *u) else {
+                let Some(user_id) = self.session.details.get(&client_id).map(|(u, _)| *u) else {
                     return;
                 };
                 self.open_dm(user_id, &shown);
@@ -229,6 +249,7 @@ impl AppState {
                 // Their current roles, known while they are online.
                 let mut roles: Vec<client::RoleId> = match &target {
                     AdminTarget::User(user_id) => self
+                        .session
                         .details
                         .values()
                         .find(|(u, _)| u == user_id)
@@ -248,6 +269,7 @@ impl AppState {
             "move" => {
                 let wanted = rest.join(" ");
                 let Some(channel_id) = self
+                    .session
                     .channels
                     .iter()
                     .position(|c| c.name.eq_ignore_ascii_case(wanted.trim()))
@@ -268,7 +290,7 @@ impl AppState {
     /// admin can.
     pub(super) fn commands_available(&self) -> String {
         use client::permissions as p;
-        let has = |bit: u64| p::has(self.permissions, bit);
+        let has = |bit: u64| p::has(self.session.permissions, bit);
         let mut out: Vec<&str> = vec!["/help", "/history [n]", "/channel list", "/mem", "/leave"];
         if super::HOST_CAN_QUIT {
             out.push("/quit");
@@ -292,7 +314,7 @@ impl AppState {
             out.push("/unmute [voice|text] <user>");
             out.push("/bans");
         }
-        if has(p::RESTRICT) && self.safety {
+        if has(p::RESTRICT) && self.session.safety.on {
             out.push("/reports [all]");
             out.push("/resolve <id>");
         }
@@ -335,27 +357,34 @@ impl AppState {
         match verb {
             "list" => {
                 let lines: Vec<String> = self
+                    .session
                     .channels
                     .iter()
                     .map(|c| {
-                        let facts = self.channel_details.get(&c.id);
+                        let facts = self.session.channel_details.get(&c.id);
                         let owner = facts
                             .and_then(|f| f.owner)
                             .and_then(|o| {
-                                self.details
+                                self.session
+                                    .details
                                     .iter()
                                     .find(|(_, (u, _))| *u == o)
-                                    .and_then(|(client_id, _)| self.users.get(client_id))
+                                    .and_then(|(client_id, _)| self.session.users.get(client_id))
                                     .map(|u| u.username.clone())
                             })
                             .unwrap_or_else(|| t!("channel-owner-server"));
-                        let flags: Vec<&str> = [
-                            facts.is_some_and(|f| f.is_afk).then_some("afk"),
-                            facts.is_some_and(|f| !f.permanent).then_some("temporary"),
-                            c.locked.then_some("password"),
+                        let flags: Vec<String> = [
+                            facts
+                                .is_some_and(|f| f.is_afk)
+                                .then_some("channel-flag-afk"),
+                            facts
+                                .is_some_and(|f| !f.permanent)
+                                .then_some("channel-flag-temporary"),
+                            c.locked.then_some("channel-flag-password"),
                         ]
                         .into_iter()
                         .flatten()
+                        .map(|key| t!(key))
                         .collect();
                         format!(
                             "#{} {} — {} — {}{}",
@@ -363,12 +392,14 @@ impl AppState {
                             c.name,
                             owner,
                             if flags.is_empty() {
-                                "permanent".to_string()
+                                t!("channel-flag-permanent")
                             } else {
                                 flags.join(", ")
                             },
-                            c.user_limit
-                                .map_or(String::new(), |l| format!(" — limit {l}"))
+                            c.user_limit.map_or(String::new(), |l| format!(
+                                " — {}",
+                                t!("channel-list-limit", "limit" => l)
+                            ))
                         )
                     })
                     .collect();
@@ -400,7 +431,9 @@ impl AppState {
                 if verb == "delete" {
                     self.network
                         .tx
-                        .send(NetworkControl::DeleteChannel { channel_id })
+                        .send(NetworkControl::Send(ClientMessage::DeleteChannel {
+                            channel_id,
+                        }))
                         .ok();
                 } else if let Some(mut spec) = self.current_spec(channel_id) {
                     spec.permanent = true;
@@ -420,10 +453,10 @@ impl AppState {
                 };
                 self.network
                     .tx
-                    .send(NetworkControl::ChannelKick {
+                    .send(NetworkControl::Send(ClientMessage::ChannelKick {
                         channel_id,
                         user_id,
-                    })
+                    }))
                     .ok();
             }
             _ => self.push_command_output(&t!("chat-command-usage-channel")),
@@ -442,7 +475,7 @@ impl AppState {
         }
         self.network
             .tx
-            .send(NetworkControl::CreateChannel(spec))
+            .send(NetworkControl::Send(ClientMessage::CreateChannel(spec)))
             .ok();
     }
 
@@ -451,6 +484,7 @@ impl AppState {
     pub(super) fn edit_channel(&mut self, channel_id: u16, spec: client::ChannelSpec) {
         if let Some(server) = self.settings.default_server_mut() {
             let old_name = self
+                .session
                 .channels
                 .iter()
                 .find(|c| c.id == channel_id)
@@ -474,7 +508,10 @@ impl AppState {
         }
         self.network
             .tx
-            .send(NetworkControl::EditChannel { channel_id, spec })
+            .send(NetworkControl::Send(ClientMessage::EditChannel {
+                channel_id,
+                spec,
+            }))
             .ok();
     }
 
@@ -482,8 +519,8 @@ impl AppState {
     /// the facts, and the password only if it was saved locally (the
     /// server never sends it, so an edit without it clears it).
     pub(super) fn current_spec(&self, channel_id: u16) -> Option<client::ChannelSpec> {
-        let info = self.channel_infos.get(usize::from(channel_id))?;
-        let facts = self.channel_details.get(&channel_id);
+        let info = self.session.channel_infos.get(usize::from(channel_id))?;
+        let facts = self.session.channel_details.get(&channel_id);
         let password = if info.has_password {
             self.settings
                 .default_server()
@@ -503,7 +540,7 @@ impl AppState {
 
     /// The `+`: an empty dialog.
     pub(super) fn channel_create(&mut self) {
-        self.channel_dialog = Some(ChannelDialog {
+        self.session.chat.channel_dialog = Some(ChannelDialog {
             editing: None,
             min_role: None,
             pending: false,
@@ -529,10 +566,11 @@ impl AppState {
             return;
         };
         let has_password = self
+            .session
             .channel_infos
             .get(usize::from(channel_id))
             .is_some_and(|c| c.has_password);
-        self.channel_dialog = Some(ChannelDialog {
+        self.session.chat.channel_dialog = Some(ChannelDialog {
             editing: Some(channel_id),
             min_role: spec.min_role,
             pending: false,
@@ -568,7 +606,7 @@ impl AppState {
     /// "Delete channel…": confirm with the name, then send.
     pub(super) fn channel_delete(&mut self, channel_id: u16) {
         let name = self.channel_name(channel_id);
-        self.pending_confirm = Some(Confirm::DeleteChannel { channel_id });
+        self.session.chat.pending_confirm = Some(Confirm::DeleteChannel { channel_id });
         let s = self.main.global::<State>();
         s.set_confirm_title(t!("confirm-delete-channel-title", "name" => name.as_str()).into());
         s.set_confirm_body(t!("confirm-delete-channel-body").into());
@@ -579,7 +617,7 @@ impl AppState {
     /// Save on the dialog: validate what the server would refuse as
     /// `Invalid` here, with a sentence per field, then send the spec.
     pub(super) fn channel_dialog_save(&mut self) {
-        let Some(dialog) = self.channel_dialog.as_mut() else {
+        let Some(dialog) = self.session.chat.channel_dialog.as_mut() else {
             return;
         };
         if dialog.pending {
@@ -621,13 +659,14 @@ impl AppState {
     }
 
     pub(super) fn channel_dialog_cancel(&mut self) {
-        self.channel_dialog = None;
+        self.session.chat.channel_dialog = None;
         self.main.global::<State>().set_channel_dialog_open(false);
     }
 
     /// The wire id of a channel by name, case-insensitive.
     pub(super) fn channel_id_named(&self, name: &str) -> Option<u16> {
-        self.channels
+        self.session
+            .channels
             .iter()
             .position(|c| c.name.eq_ignore_ascii_case(name.trim()))
             .and_then(|i| u16::try_from(i).ok())
@@ -638,10 +677,11 @@ impl AppState {
     /// a ban to lift, a kicked person's roles).
     pub(super) fn target_for(&self, name: &str) -> AdminTarget {
         let name = name.trim_start_matches('@');
-        self.users
+        self.session
+            .users
             .iter()
             .find(|(_, u)| u.username.eq_ignore_ascii_case(name))
-            .and_then(|(client_id, _)| self.details.get(client_id))
+            .and_then(|(client_id, _)| self.session.details.get(client_id))
             .map_or_else(
                 || AdminTarget::Name(name.to_string()),
                 |(user_id, _)| AdminTarget::User(*user_id),
@@ -651,19 +691,36 @@ impl AppState {
     pub(crate) fn send_admin(&mut self, command: AdminCommand, then: PendingAdmin) {
         // A printed answer lands in the conversation shown when it was
         // asked for — a menu pick as much as a typed command.
-        if matches!(then, PendingAdmin::Show) {
-            self.command_conv = self.active_dm;
-        }
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.wrapping_add(1).max(1);
-        self.pending_admin.insert(request_id, then);
+        if matches!(then, PendingAdmin::Show) {
+            self.command_conv = self.session.chat.active_dm;
+            // A typed command is named in the activity log when the
+            // server says it is done. A menu pick is not: what it did
+            // shows where it was picked.
+            if let Some(typed) = self.typed_command.take() {
+                self.session.admin_typed.insert(request_id, typed);
+            }
+        }
+        self.session.pending_admin.insert(request_id, then);
         self.network
             .tx
-            .send(NetworkControl::Admin {
+            .send(NetworkControl::Send(ClientMessage::Admin {
                 request_id,
                 command,
-            })
+            }))
             .ok();
+    }
+
+    /// The line under a typed listing that was cut to
+    /// [`COMMAND_LIST_ROWS`]: how many more there are, and where.
+    fn push_list_rest(&mut self, total: usize) {
+        if let Some(rest) = total
+            .checked_sub(COMMAND_LIST_ROWS)
+            .filter(|rest| *rest > 0)
+        {
+            self.push_command_output(&t!("chat-admin-list-more", "count" => rest));
+        }
     }
 
     pub(super) fn handle_admin_result(
@@ -672,9 +729,11 @@ impl AppState {
         result: Result<client::AdminOutcome, client::AdminError>,
     ) {
         let then = self
+            .session
             .pending_admin
             .remove(&request_id)
             .unwrap_or(PendingAdmin::Show);
+        let typed = self.session.admin_typed.remove(&request_id);
         let outcome = match result {
             Ok(outcome) => outcome,
             Err(e) => {
@@ -684,7 +743,7 @@ impl AppState {
                     log::info!("telemetry for {client_id:#x} refused: {}", e.describe());
                     return;
                 }
-                let why = e.describe();
+                let why = describe_admin_error(&e);
                 if matches!(then, PendingAdmin::Panel(_) | PendingAdmin::AuditMore) {
                     crate::adminui::take_error(self, &why);
                     return;
@@ -736,7 +795,7 @@ impl AppState {
                     }
                     None => t!("tooltip-no-telemetry"),
                 };
-                self.telemetry_notes.insert(
+                self.session.telemetry_notes.insert(
                     client_id,
                     TelemetryNote {
                         fetched: Instant::now(),
@@ -748,10 +807,19 @@ impl AppState {
             return;
         }
         match outcome {
-            client::AdminOutcome::Done => self.push_command_output(&t!("chat-admin-done")),
+            // Nothing to show but that it worked: not a line in
+            // whatever conversation is open (it read "Done." under
+            // every kick, mute and move), but one in the activity log
+            // for a command that was typed, which has no other answer.
+            client::AdminOutcome::Done => {
+                if let Some(typed) = typed {
+                    self.push_activity(&t!("activity-command-done", "command" => typed.as_str()));
+                }
+            }
             client::AdminOutcome::Users(users) => {
-                self.push_command_output(&t!("chat-admin-users-header", "count" => users.len()));
-                for u in users {
+                let total = users.len();
+                self.push_command_output(&t!("chat-admin-users-header", "count" => total));
+                for u in users.into_iter().take(COMMAND_LIST_ROWS) {
                     let roles: Vec<String> =
                         u.roles.iter().map(|r| self.role_name_of(*r)).collect();
                     let line = format!(
@@ -763,7 +831,7 @@ impl AppState {
                         },
                         u.name,
                         if roles.is_empty() {
-                            "no roles".to_string()
+                            t!("admin-list-no-roles")
                         } else {
                             roles.join(", ")
                         },
@@ -772,17 +840,24 @@ impl AppState {
                     );
                     self.push_command_output(&line);
                 }
+                self.push_list_rest(total);
             }
             client::AdminOutcome::Restrictions(list) => {
+                let total = list.len();
                 self.push_command_output(&t!(
                     "chat-admin-restrictions-header",
-                    "count" => list.len()
+                    "count" => total
                 ));
-                for r in list {
+                for r in list.into_iter().take(COMMAND_LIST_ROWS) {
                     let who = r
                         .user_name
                         .clone()
-                        .or_else(|| r.key_hash.map(|k| format!("key {}", short_id(&k))))
+                        .or_else(|| {
+                            r.key_hash.map(|k| {
+                                let id = short_id(&k);
+                                t!("admin-list-key", "id" => id.as_str())
+                            })
+                        })
                         .or_else(|| r.address.clone())
                         .unwrap_or_default();
                     let line = format!(
@@ -796,6 +871,7 @@ impl AppState {
                     );
                     self.push_command_output(&line);
                 }
+                self.push_list_rest(total);
             }
             client::AdminOutcome::Telemetry(sample) => match sample {
                 Some(t) => {
@@ -805,58 +881,33 @@ impl AppState {
                 None => self.push_command_output(&t!("chat-admin-no-telemetry")),
             },
             client::AdminOutcome::Invites(list) => {
-                self.push_command_output(&t!("chat-admin-invites-header", "count" => list.len()));
-                for i in list {
+                let total = list.len();
+                self.push_command_output(&t!("chat-admin-invites-header", "count" => total));
+                for i in list.into_iter().take(COMMAND_LIST_ROWS) {
                     let uses = match i.max_uses {
                         Some(max) => format!("{}/{max}", i.uses),
                         None => i.uses.to_string(),
                     };
-                    let state = if i.revoked { " (revoked)" } else { "" };
+                    let state = if i.revoked {
+                        format!(" ({})", t!("admin-revoked"))
+                    } else {
+                        String::new()
+                    };
                     let line = format!(
-                        "{} — {} — {} — uses {uses}{state}",
+                        "{} — {} — {} — {}{state}",
                         client::invite::display_code(&i.code),
                         self.role_name_of(i.grants_role),
-                        describe_expiry(i.expires_at)
+                        describe_expiry(i.expires_at),
+                        t!("admin-list-uses", "uses" => uses.as_str())
                     );
                     self.push_command_output(&line);
                 }
-            }
-            // The panel's answers (spec §8): until the window lands they
-            // read as one line each, so `/`-typed commands still answer.
-            client::AdminOutcome::RoleCreated(id) => {
-                self.push_command_output(&t!("chat-admin-role-created", "id" => id));
-            }
-            client::AdminOutcome::Stats(stats) => {
-                let line = format!(
-                    "baucord {} · up {} · {} online / {} users · {} messages · {} blobs, {} of {}",
-                    stats.version,
-                    describe_duration(stats.uptime_secs),
-                    stats.online,
-                    stats.users,
-                    stats.messages,
-                    stats.blobs,
-                    app_core::chat::human_size(stats.blob_bytes),
-                    app_core::chat::human_size(stats.blob_cap_bytes),
-                );
-                self.push_command_output(&line);
-            }
-            client::AdminOutcome::Blobs(blobs) => {
-                self.push_command_output(&t!("chat-admin-blobs-header", "count" => blobs.len()));
-                for b in blobs {
-                    let line = format!(
-                        "{} — {} — {} — {} — refs {}",
-                        b.name,
-                        b.mime,
-                        app_core::chat::human_size(u64::from(b.size)),
-                        b.created_by.as_deref().unwrap_or("?"),
-                        b.refs
-                    );
-                    self.push_command_output(&line);
-                }
+                self.push_list_rest(total);
             }
             client::AdminOutcome::Reports(list) => {
-                self.push_command_output(&t!("chat-admin-reports-header", "count" => list.len()));
-                for r in list {
+                let total = list.len();
+                self.push_command_output(&t!("chat-admin-reports-header", "count" => total));
+                for r in list.into_iter().take(COMMAND_LIST_ROWS) {
                     let mut line = format!(
                         "#{} {} — {} — {}",
                         r.id,
@@ -884,27 +935,14 @@ impl AppState {
                     }
                     self.push_command_output(&line);
                 }
+                self.push_list_rest(total);
             }
-            client::AdminOutcome::Audit(entries) => {
-                self.push_command_output(&t!("chat-admin-audit-header", "count" => entries.len()));
-                for e in entries {
-                    let line = format!(
-                        "{} — {} — {}{}{}",
-                        format_wall_time(e.ts),
-                        e.actor.as_deref().unwrap_or("server"),
-                        e.action,
-                        e.target
-                            .as_deref()
-                            .map(|t| format!(" {t}"))
-                            .unwrap_or_default(),
-                        e.detail
-                            .as_deref()
-                            .map(|d| format!(": {d}"))
-                            .unwrap_or_default(),
-                    );
-                    self.push_command_output(&line);
-                }
-            }
+            // Answers to what only the admin panel asks, and it takes
+            // its own (`adminui::take_outcome`): nothing typed leads here.
+            client::AdminOutcome::RoleCreated(_)
+            | client::AdminOutcome::Stats(_)
+            | client::AdminOutcome::Blobs(_)
+            | client::AdminOutcome::Audit(_) => {}
         }
     }
 

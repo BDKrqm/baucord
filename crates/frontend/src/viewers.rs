@@ -3,7 +3,7 @@
 // in-window image viewer overlay (chat image tapped → darkened scrim,
 // ◀ ▶ stepping, save).
 
-use std::rc::Rc;
+use std::{cell::Cell, rc::Rc, time::Duration};
 
 use app_core::{fps::FpsCounter, stats::FrameRing};
 use i18n::t;
@@ -31,6 +31,62 @@ pub struct Viewer {
     width: u32,
     height: u32,
     peer_name: String,
+    /// Whether the window is minimized, as last told to the screen
+    /// thread (the page has the host's visibility instead).
+    minimized: Rc<Minimized>,
+}
+
+/// A viewer window's minimized state, shared with its reveal hook. A
+/// minimized viewer's frames are not decoded at all; restored, the
+/// stream asks for a keyframe (review P1-7).
+struct Minimized {
+    client_id: u64,
+    told: Cell<bool>,
+}
+
+/// A second look after a reveal: an X11 window manager may report the
+/// restore a little after the focus or redraw that announces it.
+const RECHECK_AFTER: Duration = Duration::from_millis(250);
+
+impl Minimized {
+    fn update(&self, minimized: bool) {
+        if self.told.replace(minimized) != minimized {
+            crate::present::set_stream_visible(Some(self.client_id), !minimized);
+        }
+    }
+
+    /// Look again once the window may have been restored: after the
+    /// event that revealed it has been applied, and a little later.
+    fn recheck(self: &Rc<Self>, win: &slint::Weak<StreamViewerWindow>) {
+        if !self.told.get() {
+            return;
+        }
+        for delay in [Duration::ZERO, RECHECK_AFTER] {
+            let this = Rc::clone(self);
+            let win = win.clone();
+            slint::Timer::single_shot(delay, move || {
+                if let Some(w) = win.upgrade() {
+                    this.update(window_minimized(w.window()));
+                }
+            });
+        }
+    }
+}
+
+/// Whether a window is minimized, asked of the OS window itself when
+/// there is one: Slint's own flag follows only resize and occlusion
+/// events, and an X11 restore need not send either.
+#[cfg(feature = "desktop")]
+fn window_minimized(win: &slint::Window) -> bool {
+    use slint::winit_030::{winit::window::Window, WinitWindowAccessor};
+    win.with_winit_window(Window::is_minimized)
+        .flatten()
+        .unwrap_or_else(|| win.is_minimized())
+}
+
+#[cfg(not(feature = "desktop"))]
+fn window_minimized(win: &slint::Window) -> bool {
+    win.is_minimized()
 }
 
 impl Viewer {
@@ -46,6 +102,10 @@ impl Viewer {
         text_scale: f32,
         main: &MainWindow,
     ) -> Result<Self, slint::PlatformError> {
+        let minimized = Rc::new(Minimized {
+            client_id,
+            told: Cell::new(false),
+        });
         let surface = if app::SINGLE_WINDOW_HOST {
             let s = main.global::<State>();
             s.set_watch_peer_name(peer_name.into());
@@ -95,10 +155,15 @@ impl Viewer {
             win.set_stats("--".into());
             let weak = win.as_weak();
             let armed = std::rc::Rc::new(std::cell::Cell::new(false));
+            let seen = Rc::clone(&minimized);
             crate::app::repaint_on_reveal(win.window(), armed, move || {
                 if let Some(w) = weak.upgrade() {
                     w.set_repaint_flip(!w.get_repaint_flip());
                 }
+                // Revealed (focused, resized, uncovered): restored, if
+                // it was minimized. The hook runs before the event is
+                // applied, so the look comes after.
+                seen.recheck(&weak);
             });
             win.show()?;
             Surface::Window(win)
@@ -112,6 +177,7 @@ impl Viewer {
             width,
             height,
             peer_name: peer_name.to_string(),
+            minimized,
         })
     }
 
@@ -173,17 +239,30 @@ impl Viewer {
     }
 
     /// Blit a decoded frame and refresh the once-per-second stats line.
-    #[allow(clippy::cast_precision_loss, clippy::too_many_arguments)]
+    #[allow(clippy::cast_precision_loss)]
     pub fn update_frame(
         &mut self,
         buffer: slint::SharedPixelBuffer<slint::Rgba8Pixel>,
-        width: u32,
-        height: u32,
-        frame_bytes: usize,
-        buffer_depth_ms: f32,
-        buffer_target_ms: f32,
-        buffer_jitter_ms: f32,
+        meta: &client::screen::FrameMeta,
     ) {
+        let client::screen::FrameMeta {
+            width,
+            height,
+            frame_bytes,
+            buffer_depth_ms,
+            buffer_target_ms,
+            buffer_jitter_ms,
+            ..
+        } = *meta;
+        // A minimized window: stop the stream's decoding until it is
+        // restored (Slint's flag is enough here — it is current on
+        // Windows and macOS, and where it is not, decoding just goes
+        // on as before).
+        if let Surface::Window(win) = &self.surface
+            && win.window().is_minimized()
+        {
+            self.minimized.update(true);
+        }
         if (width, height) != (self.width, self.height) {
             self.width = width;
             self.height = height;
@@ -276,15 +355,6 @@ pub(crate) fn wire_page(main: &MainWindow) {
 
 // ── Image viewer overlay ────────────────────────────────────────────────
 
-/// GIF playback state for the overlay: loops continuously while shown
-/// (no autoplay budget — matches the old viewer's behavior), advanced
-/// by the app's animation ticker.
-pub struct GalleryGif {
-    pub anim: Rc<app_core::gif::GifAnimation>,
-    pub idx: usize,
-    pub in_frame_ms: f64,
-}
-
 /// Every image row-id in chat order (stepping order).
 fn image_row_ids(app: &AppState) -> Vec<i32> {
     let model = app.chat_model();
@@ -319,26 +389,17 @@ pub fn open_gallery(app: &mut AppState, row_id: i32) {
     s.set_viewer_has_prev(pos > 0);
     s.set_viewer_has_next(pos + 1 < ids.len());
 
-    if is_gif {
-        if let Ok(anim) = app_core::gif::decode_animation(&bytes) {
-            if let Some(first) = anim.frames.first() {
-                s.set_viewer_image(ui::convert::rgba_image(
-                    &first.rgba,
-                    anim.width,
-                    anim.height,
-                ));
-            }
-            app.gallery_gif = Some(GalleryGif {
-                anim: Rc::new(anim),
-                idx: 0,
-                in_frame_ms: 0.0,
-            });
-            app.ensure_gif_ticker();
-        } else if let Ok((img, _, _)) = ui::convert::decode_to_image(&bytes) {
-            s.set_viewer_image(img);
+    // The picture (a GIF's first frame) at full size; an animation then
+    // loops for as long as the overlay shows it, frame by frame like a
+    // chat row's (no autoplay budget here).
+    if let Ok((img, _, _)) = ui::convert::decode_to_image(&bytes) {
+        s.set_viewer_image(img.clone());
+        if is_gif {
+            app.gallery_gif = crate::media::GifPlayer::looping(bytes, img);
         }
-    } else if let Ok((img, _, _)) = ui::convert::decode_to_image(&bytes) {
-        s.set_viewer_image(img);
+    }
+    if app.gallery_gif.is_some() {
+        app.ensure_gif_ticker();
     }
 
     app.main.global::<State>().set_viewer_open(true);

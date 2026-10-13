@@ -37,12 +37,12 @@
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
 use client::{
-    screen::{PresentTallies, ScreenEvent},
+    screen::{FrameMeta, PresentTallies, ScreenControl, ScreenEvent, ScreenTx},
     WakeFn,
 };
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
@@ -50,6 +50,30 @@ use log::{error, info};
 use video::PictureFormat;
 
 type Pixels = slint::SharedPixelBuffer<slint::Rgba8Pixel>;
+
+/// The screen thread's control channel, for telling it who can see a
+/// stream: the host's visibility comes from any thread
+/// (`app::set_host_visible`), a viewer window's from its own hooks.
+static SCREEN_TX: OnceLock<ScreenTx> = OnceLock::new();
+
+/// Called once, with the screen thread's sender, when the workers start.
+/// The thread starts out decoding; a background reached before this
+/// only costs what it always did (decoded frames the code below drops).
+pub(crate) fn attach_screen(tx: ScreenTx) {
+    let _ = SCREEN_TX.set(tx);
+}
+
+/// Tell the screen thread whether a stream's picture can be seen:
+/// `None` for the whole app (a phone's background), a peer for its
+/// viewer window (minimized). Unseen frames are not decoded at all; a
+/// stream seen again asks for a keyframe (review P1-7). A blocking
+/// send: a lost "visible" would leave the picture frozen, and the
+/// screen thread drains its channel constantly.
+pub(crate) fn set_stream_visible(client_id: Option<u64>, visible: bool) {
+    if let Some(tx) = SCREEN_TX.get() {
+        let _ = tx.send(ScreenControl::SetVisible { client_id, visible });
+    }
+}
 
 /// Pixel buffers kept per stream. The UI holds the one it shows and
 /// the slot may hold the next, so the oldest of three is normally free
@@ -65,17 +89,8 @@ const FORGET_AFTER: Duration = Duration::from_secs(3);
 /// A decoded frame whose pixels already live in a Slint-ready buffer.
 /// Everything the UI needs to present + log, minus any heavy work.
 pub struct PreparedFrame {
-    pub client_id: u64,
+    pub meta: FrameMeta,
     pub buffer: Pixels,
-    pub width: u32,
-    pub height: u32,
-    pub frame_bytes: usize,
-    pub seq: u32,
-    pub enqueued_at: Instant,
-    pub decoded_at: Instant,
-    pub buffer_depth_ms: f32,
-    pub buffer_target_ms: f32,
-    pub buffer_jitter_ms: f32,
 }
 
 /// Shared between the prep thread (producer) and the UI drain
@@ -112,34 +127,15 @@ pub fn spawn(
                 while let Some(evt) = next {
                     match evt {
                         ScreenEvent::FrameReady {
-                            client_id,
-                            width,
-                            height,
+                            meta,
                             pixels,
                             format,
-                            frame_bytes,
-                            seq,
-                            is_keyframe: _,
-                            enqueued_at,
-                            decoded_at,
-                            buffer_depth_ms,
-                            buffer_target_ms,
-                            buffer_jitter_ms,
                         } => prep.keep_newest(
                             &mut newest,
                             Waiting {
-                                client_id,
-                                width,
-                                height,
+                                meta,
                                 pixels,
                                 format,
-                                frame_bytes,
-                                seq,
-                                enqueued_at,
-                                decoded_at,
-                                buffer_depth_ms,
-                                buffer_target_ms,
-                                buffer_jitter_ms,
                             },
                         ),
                         other => {
@@ -178,18 +174,9 @@ pub fn spawn(
 
 /// A decoded frame waiting to be prepared.
 struct Waiting {
-    client_id: u64,
-    width: u32,
-    height: u32,
+    meta: FrameMeta,
     pixels: Vec<u8>,
     format: PictureFormat,
-    frame_bytes: usize,
-    seq: u32,
-    enqueued_at: Instant,
-    decoded_at: Instant,
-    buffer_depth_ms: f32,
-    buffer_target_ms: f32,
-    buffer_jitter_ms: f32,
 }
 
 /// One stream's pixel buffers, oldest first.
@@ -246,7 +233,7 @@ impl Prep {
     /// Queue `frame` as its stream's newest, passing over the one it
     /// replaces before anyone paid to convert it.
     fn keep_newest(&self, newest: &mut HashMap<u64, Waiting>, frame: Waiting) {
-        let id = frame.client_id;
+        let id = frame.meta.client_id;
         if let Some(older) = newest.insert(id, frame) {
             video::pool::recycle(older.pixels);
             if let Ok(mut tallies) = self.tallies.lock() {
@@ -260,22 +247,21 @@ impl Prep {
     /// show.
     fn prepare(&mut self, frame: Waiting) -> bool {
         let Waiting {
+            meta,
+            pixels,
+            format,
+        } = frame;
+        let FrameMeta {
             client_id,
             width,
             height,
-            pixels,
-            format,
-            frame_bytes,
             seq,
-            enqueued_at,
-            decoded_at,
-            buffer_depth_ms,
-            buffer_target_ms,
-            buffer_jitter_ms,
-        } = frame;
+            ..
+        } = meta;
         // A phone app in the background shows nothing: no conversion,
-        // no redraw. The decoder keeps going (its pictures depend on
-        // each other), so the next frame after the return is current.
+        // no redraw. The screen thread stops decoding once it hears
+        // (`set_stream_visible`); this catches what was already on its
+        // way.
         if !crate::app::host_visible() {
             video::pool::recycle(pixels);
             return false;
@@ -299,19 +285,7 @@ impl Prep {
             ring.buffers.push_back(buffer.clone());
         }
 
-        let prepared = PreparedFrame {
-            client_id,
-            buffer,
-            width,
-            height,
-            frame_bytes,
-            seq,
-            enqueued_at,
-            decoded_at,
-            buffer_depth_ms,
-            buffer_target_ms,
-            buffer_jitter_ms,
-        };
+        let prepared = PreparedFrame { meta, buffer };
         let replaced = self
             .shared
             .slots
@@ -378,6 +352,7 @@ fn fill(
             out.copy_from_slice(pixels);
             Ok(())
         }
+        PictureFormat::Bgra => video::yuv::bgra_to_rgba_into(pixels, out),
         PictureFormat::Yuv420 { layout, color } => {
             video::yuv::to_rgba_into(pixels, &layout, color, out, threads)
         }
@@ -395,6 +370,17 @@ mod tests {
         fill(&mut out, &pixels, PictureFormat::Rgba, 2).unwrap();
         assert_eq!(out, pixels);
         assert!(fill(&mut out, &pixels[..12], PictureFormat::Rgba, 2).is_err());
+    }
+
+    /// iOS's decoder hands BGRA on; it becomes RGBA as it is written
+    /// into the picture the UI draws (review P2-43).
+    #[test]
+    fn bgra_is_swapped_into_the_ui_buffer() {
+        let pixels = [1u8, 2, 3, 0, 4, 5, 6, 0];
+        let mut out = vec![0u8; 8];
+        fill(&mut out, &pixels, PictureFormat::Bgra, 2).unwrap();
+        assert_eq!(out, [3, 2, 1, 255, 6, 5, 4, 255]);
+        assert!(fill(&mut out, &pixels[..4], PictureFormat::Bgra, 2).is_err());
     }
 
     #[test]
@@ -426,18 +412,20 @@ mod tests {
     fn frame(id: u64, fill_byte: u8) -> Waiting {
         let now = Instant::now();
         Waiting {
-            client_id: id,
-            width: 2,
-            height: 2,
+            meta: FrameMeta {
+                client_id: id,
+                width: 2,
+                height: 2,
+                frame_bytes: 100,
+                seq: u32::from(fill_byte),
+                enqueued_at: now,
+                decoded_at: now,
+                buffer_depth_ms: 0.0,
+                buffer_target_ms: 0.0,
+                buffer_jitter_ms: 0.0,
+            },
             pixels: vec![fill_byte; 16],
             format: PictureFormat::Rgba,
-            frame_bytes: 100,
-            seq: u32::from(fill_byte),
-            enqueued_at: now,
-            decoded_at: now,
-            buffer_depth_ms: 0.0,
-            buffer_target_ms: 0.0,
-            buffer_jitter_ms: 0.0,
         }
     }
 
@@ -454,7 +442,7 @@ mod tests {
         }
         let slots = p.shared.slots.lock().unwrap();
         let shown = slots.get(&7).expect("prepared");
-        assert_eq!(shown.seq, 3);
+        assert_eq!(shown.meta.seq, 3);
         assert!(shown.buffer.as_bytes().iter().all(|&b| b == 3));
         let tally = p.tallies.lock().unwrap()[&7];
         assert_eq!((tally.prepared, tally.replaced), (1, 2));
@@ -502,7 +490,7 @@ mod tests {
             assert!(p.prepare(frame(7, b)));
         }
         let mut big = frame(7, 9);
-        big.width = 4;
+        big.meta.width = 4;
         big.pixels = vec![9; 4 * 2 * 4];
         assert!(p.prepare(big));
         assert_eq!(p.rings[&7].buffers.len(), 1);

@@ -7,7 +7,7 @@
 
 import { Icon, IconSet, IconDisplay } from "@lucide";
 import { Theme } from "theme.slint";
-import { MenuEntry, MenuAction } from "globals.slint";
+import { MenuEntry } from "globals.slint";
 
 // ── Buttons ─────────────────────────────────────────────────────────────
 
@@ -141,9 +141,6 @@ export component Field inherits Rectangle {
     // substring op, and the wire check in send_current still guards.
     callback edited;
     public function focus-input() { input.focus(); }
-    public function do-cut() { input.cut(); }
-    public function do-copy() { input.copy(); }
-    public function do-paste() { input.paste(); }
     /// Android: commit the word the keyboard is still composing into
     /// `text` (Slint does it when the field loses focus) — see the
     /// composer's twin in chat.slint.
@@ -302,7 +299,14 @@ export component VuMeter inherits Rectangle {
         background: root.lv > 0.9 ? Theme.danger
             : root.lv > 0.7 ? Theme.warning
             : root.accent;
-        animate width { duration: 80ms; }
+        // The glide between two readings, at the display's own rate:
+        // without it the bar is seen stepping at the timer's rate,
+        // whatever that comes to on the device. It costs frames only
+        // while a bar is moving on the Audio tab — the app sets the
+        // level when it changed and not otherwise (`app_core::meter`).
+        // It was taken out when the timer ran on every tab and drew
+        // every reading (review P2-40), and the bar stepped.
+        animate width { duration: 80ms; easing: linear; }
     }
 }
 
@@ -331,7 +335,8 @@ export component GateMeter inherits Rectangle {
         width: (root.width - 4px) * root.lv;
         border-radius: Theme.radius-sm - 2px;
         background: root.lv > root.thr ? Theme.success : Theme.subtle;
-        animate width { duration: 80ms; }
+        // As the VuMeter's.
+        animate width { duration: 80ms; easing: linear; }
     }
     marker := Rectangle {
         x: 2px + (root.width - 4px) * root.thr - 1px;
@@ -482,6 +487,95 @@ export component Card inherits Rectangle {
     background: Theme.bg-secondary;
 }
 
+/// A dialog over the window: the scrim, a card in the middle of it, and
+/// the ways out every dialog has — a click on the scrim, Escape, and
+/// Android's Back, which arrives as a key. What is put inside is laid
+/// out as a column in the card. (Eight dialogs each carried a copy of
+/// this, Back handling included; review P2-58.)
+///
+/// The dialog takes the keyboard when it appears. A dialog that wants
+/// its first field focused does that in `opened`, not in the field's
+/// own `init`: that one runs before this component's, and the scope
+/// then took the keyboard back — typing and Enter went nowhere.
+export component Modal inherits Rectangle {
+    /// The card's width, where the window has the room.
+    in property <length> card-width: 380px;
+    /// The dialog is up and has the keyboard: focus a field here.
+    callback opened();
+    /// Escape, Back, or a click outside the card.
+    callback dismissed();
+    /// Any other key no field inside took: Return for the dialog's
+    /// default action.
+    callback key(KeyEvent) -> EventResult;
+
+    background: Theme.scrim;
+    TouchArea { clicked => { root.dismissed(); } }
+    FocusScope {
+        init => {
+            self.focus();
+            root.opened();
+        }
+        key-pressed(ev) => {
+            if (ev.text == Key.Escape || ev.text == Key.Back) {
+                root.dismissed();
+                return accept;
+            }
+            return root.key(ev);
+        }
+        Card {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: Math.min(root.card-width, root.width - 48px);
+            height: body.preferred-height;
+            TouchArea { }   // swallow clicks inside the card
+            body := VerticalLayout {
+                padding: Theme.gap-lg;
+                spacing: Theme.gap-md;
+                @children
+            }
+        }
+    }
+}
+
+/// A ring that fills with a percent: determinate, so it says how far,
+/// not just that something moves. 28 px square, the ring 18 px in it.
+export component ProgressRing inherits Rectangle {
+    in property <int> percent;
+    in property <brush> track-color: Theme.subtle;
+    in property <brush> ring-color: Theme.accent-text;
+    property <float> frac: Math.clamp(root.percent, 0, 100) / 100;
+    property <angle> sweep: frac * 360deg;
+    property <float> ex: 9 + 8 * Math.sin(sweep);
+    property <float> ey: 9 - 8 * Math.cos(sweep);
+    width: 28px;
+    height: 28px;
+    Path {
+        x: 5px;
+        y: 5px;
+        width: 18px;
+        height: 18px;
+        viewbox-width: 18;
+        viewbox-height: 18;
+        commands: "M 9 1 A 8 8 0 1 1 8.99 1";
+        stroke: root.track-color;
+        stroke-width: 2px;
+    }
+    Path {
+        x: 5px;
+        y: 5px;
+        width: 18px;
+        height: 18px;
+        viewbox-width: 18;
+        viewbox-height: 18;
+        commands: root.frac >= 0.999
+            ? "M 9 1 A 8 8 0 1 1 8.99 1"
+            : "M 9 1 A 8 8 0 \{root.frac > 0.5 ? 1 : 0} 1 \{root.ex} \{root.ey}";
+        stroke: root.ring-color;
+        stroke-width: 2px;
+        stroke-line-cap: round;
+    }
+}
+
 /// Small field label above a control.
 export component FieldLabel inherits Text {
     color: Theme.text-secondary;
@@ -546,10 +640,11 @@ export component MenuPanel inherits Rectangle {
     /// The entry whose submenu is open: stays highlighted while the
     /// pointer is in the child column.
     in property <int> open-entry: -1;
-    /// A `MenuAction.volume` entry draws as a slider bound here
+    /// A `slider` entry draws as a slider bound here
     /// instead of a text row.
     in-out property <float> volume: 1.0;
-    callback activated(action: MenuAction, arg: int);
+    /// An entry was picked: its `MenuEntry.id`.
+    callback activated(id: int);
     /// The pointer rests on `entry`; `model` is its submenu (-1 for
     /// none) and `y` where the row starts, relative to this panel.
     callback submenu-hovered(entry: int, model: int, y: length);
@@ -581,7 +676,7 @@ export component MenuPanel inherits Rectangle {
                 }
             }
             // The volume slider, inline: one drag instead of a dialog.
-            if e.action == MenuAction.volume : Rectangle {
+            if e.slider : Rectangle {
                 height: 52px;
                 // Under the slider (declared first): a pointer resting
                 // on the label line is no submenu hover.
@@ -619,7 +714,7 @@ export component MenuPanel inherits Rectangle {
                     }
                 }
             }
-            if e.action != MenuAction.volume : row := Rectangle {
+            if !e.slider : row := Rectangle {
                 height: 30px;
                 border-radius: Theme.radius-sm;
                 background: e.enabled && (it.has-hover || root.open-entry == i)
@@ -660,7 +755,7 @@ export component MenuPanel inherits Rectangle {
                         if (e.submenu >= 0) {
                             root.submenu-hovered(i, e.submenu, row.absolute-position.y - root.absolute-position.y);
                         } else {
-                            root.activated(e.action, e.arg);
+                            root.activated(e.id);
                         }
                     }
                 }

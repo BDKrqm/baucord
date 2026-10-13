@@ -43,8 +43,6 @@ export global SettingsState {
     in-out property <int> name-style-index: 0;
     in property <image> avatar;
     in property <bool> has-avatar: false;
-    /// Connected as an admin: the gold swatch is on the palette.
-    in property <bool> is-admin: false;
     /// The nickname's first letter, for the avatar fallback (.slint
     /// has no substring).
     in property <string> initial: "?";
@@ -130,9 +128,15 @@ export global SettingsState {
     in property <[string]> aec-modes;
     in-out property <int> aec-index: 0;
     in property <string> aec-status;
+    /// Windows is lowering the user's other apps because of our call
+    /// streams and would not be asked not to (AEC-SPEC.md E15).
+    in property <bool> aec-lowering;
 
     // ── Keyboard ──
     in property <[KeybindRow]> keybinds;
+    /// macOS without the Accessibility permission: a bound key works
+    /// but is taken from every other program.
+    in property <bool> keybinds-need-access;
     /// True while some row is recording — arms the window's key capture.
     in property <bool> capturing: false;
 
@@ -216,9 +220,13 @@ export global SettingsLogic {
     callback toggle-test-mic();
     callback transmission-selected(int);
     callback aec-selected(int);
+    /// Open the system's sound settings (Windows: Communications tab).
+    callback open-sound-settings();
 
     // Keyboard
     callback record-keybind(int);
+    /// Put up the system's prompt for watching keys (macOS).
+    callback ask-keybind-access();
     /// A key landed while recording: (key-text, ctrl, alt, shift).
     /// The host filters bare modifiers and maps text → key codes.
     callback capture-key(string, bool, bool, bool);
@@ -235,6 +243,8 @@ export global SettingsLogic {
     callback save-and-close();
     callback reset-defaults();
     callback closed();
+    // Another tab is showing: the meters run on Audio only.
+    callback tab-shown();
     /// Licenses: a component or license group opened or
     /// closed (`LicenseRow.entry`).
     callback license-toggled(int);
@@ -307,6 +317,39 @@ component PanelHeader inherits VerticalLayout {
 }
 
 /// Label, control, optional hint — one unit.
+/// A standing warning inside a panel: the icon and a text that wraps.
+/// The same box as the chat's standing notice — its height follows the
+/// wrapped text, which a layout alone gets wrong.
+component WarningNote inherits Rectangle {
+    in property <string> text;
+    height: note.preferred-height + 2 * Theme.gap-sm;
+    border-radius: Theme.radius-sm;
+    background: Theme.warning.with-alpha(0.12);
+    border-width: 1px;
+    border-color: Theme.warning.with-alpha(0.5);
+    HorizontalLayout {
+        padding-left: Theme.gap-md;
+        padding-right: Theme.gap-md;
+        spacing: Theme.gap-sm;
+        Rectangle {
+            width: 14px;
+            IconDisplay {
+                icon: IconSet.TriangleAlert;
+                size: 14px;
+                stroke: Theme.warning;
+            }
+        }
+        note := Text {
+            text: root.text;
+            color: Theme.text-secondary;
+            font-size: Theme.font-sm;
+            vertical-alignment: center;
+            wrap: word-wrap;
+            horizontal-stretch: 1;
+        }
+    }
+}
+
 component Setting inherits VerticalLayout {
     in property <string> label;
     in property <string> hint;
@@ -969,6 +1012,18 @@ component AudioPanel inherits VerticalLayout {
             font-size: Theme.font-sm;
             wrap: word-wrap;
         }
+        // What Windows does to the other apps, and the one place it can
+        // be turned off (it goes away by itself once it is).
+        if SettingsState.aec-lowering : WarningNote {
+            text: Tr.aec-lowering;
+        }
+        if SettingsState.aec-lowering : HorizontalLayout {
+            Btn {
+                text: Tr.aec-lowering-fix;
+                clicked => { SettingsLogic.open-sound-settings(); }
+            }
+            Rectangle { }   // keep the button its natural width
+        }
     }
     Setting {
         label: Tr.audio-transmission;
@@ -1059,6 +1114,21 @@ component AudioPanel inherits VerticalLayout {
 component KeyboardPanel inherits VerticalLayout {
     spacing: Theme.gap-lg;
     PanelHeader { title: Tr.tab-keyboard; lead: Tr.keybinds-hint; }
+    // macOS without the Accessibility permission. The prompt comes
+    // from this button and from nowhere else.
+    if SettingsState.keybinds-need-access : VerticalLayout {
+        spacing: Theme.gap-sm;
+        WarningNote {
+            text: Tr.keybinds-access;
+        }
+        HorizontalLayout {
+            Btn {
+                text: Tr.keybinds-access-ask;
+                clicked => { SettingsLogic.ask-keybind-access(); }
+            }
+            Rectangle { }   // keep the button its natural width
+        }
+    }
     VerticalLayout {
         spacing: Theme.gap-xs;
         for kb[i] in SettingsState.keybinds : Rectangle {
@@ -1517,12 +1587,15 @@ export component SettingsPanel inherits FocusScope {
     /// 6 credits, 7 about, 8 debug, 9 open-source licenses. Mirrored by
     /// `settingsui::TAB_*`.
     in-out property <int> tab: 0;
+    changed tab => { SettingsLogic.tab-shown(); }
     /// The narrow layout (a phone held upright; ANDROID-SPEC.md D28):
     /// the section list and the open section are two pages, as the
     /// sidebar and the chat are in the main window.
     in property <bool> narrow: false;
     /// Narrow only: a section's page is showing, not the list.
     in-out property <bool> section-open: false;
+    // The Audio section's meter and microphone run while it shows.
+    changed section-open => { SettingsLogic.tab-shown(); }
 
     public function focus-capture() { root.focus(); }
 

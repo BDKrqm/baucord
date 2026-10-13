@@ -1,8 +1,8 @@
 [package]
 name = "ui"
 version = "0.4.1"
-edition = "2024"
-license = "Apache-2.0"
+edition.workspace = true
+license.workspace = true
 description = "The baucord UI: .slint screens + generated-component glue. Compiles identically for desktop and the future mobile shells."
 
 [lints]
@@ -10,14 +10,14 @@ workspace = true
 
 [dependencies]
 app-core = { path = "../app-core" }
-# Default features = winit backend + femtovg & software renderers.
-# Software is the footprint path (select at runtime via SLINT_BACKEND);
-# femtovg stays one env var away for A/B testing.
+# The workspace's features: the winit backend with the Skia and software
+# renderers. Software is the footprint path (select at runtime via
+# SLINT_BACKEND).
 slint.workspace = true
 log.workspace = true
 
 [build-dependencies]
-slint-build = "1.18.1"
+slint-build = "~1.18.1"
 # Lucide icons as pre-converted Slint Path elements, mounted as the
 # `@lucide` library in build.rs. Lives here (not in the shells) so
 # every shell gets the same icon set; needs Slint 1.15+ (Path in the

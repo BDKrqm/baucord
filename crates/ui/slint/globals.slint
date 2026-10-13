@@ -44,7 +44,6 @@ export struct UserRow {
     // 1.1 — from the server's tables (UserDetails / ChannelDetails).
     // For user rows `channel-id` is the channel they are in.
     role: int,              // users: 0 unknown, 1 guest, 2 member, 3 organizer, 4 admin
-    level: int,             // users: progress level, 0 = unknown
     level-label: string,    // users: "Level 3" for the hover card ("" = unknown)
     role-label: string,     // users: "Member" for the hover card ("" = none)
     role-icon: string,      // users: a custom role's glyph name ("" = none)
@@ -62,18 +61,14 @@ export struct UserRow {
     name-color: color,
     has-name-color: bool,   // false = the theme's default name color
     name-style: int,        // 0 normal, 1 bold, 2 italic
-    outranked: bool,        // users: rank strictly below ours — mute/disconnect/kick/ban apply
-    role-editable: bool,    // users: rank at or below ours — the role submenu applies
-    channel-kickable: bool, // users: we own their channel (or manage all) — send to default
     members-only: bool,     // channels: a min-role gate exists
     temporary: bool,        // channels: evaporates when left empty
-    is-afk: bool,           // channels: the server's AFK room
-    owned: bool,            // channels: this session created it
-    from-config: bool,      // channels: the server's file owns it (no delete/rename)
+    // What only the menu needs (the rank rule, channel powers, who
+    // owns a channel) is not here: the host works it out when the
+    // menu opens (review P1-9).
 }
 
 /// A channel as the "Move to" submenu lists it (visible ones only).
-export struct ChannelOption { id: int, name: string }
 
 /// One direct-message conversation in the sidebar's Messages section.
 export struct DmRow {
@@ -94,29 +89,14 @@ export enum ToastKind { info, success, warning, error }
 /// What a moderation dialog is about to do (spec §4.1 / §4.2).
 export enum ModAction { mute-voice, mute-chat, unmute-voice, unmute-chat, disconnect, kick, ban }
 
-/// What a context-menu entry does (app-core's `menu::Action`, minus
-/// its parameter, which rides in `MenuEntry.arg`). The host builds
-/// the entries and dispatches the pick against the target it
+/// One row of a context menu, drawn by the overlay in main.slint. The
+/// host builds the entries (app-core's `menu`), keeps what each one
+/// does under its `id`, and dispatches a pick against the target it
 /// remembered — a roster row, a message, the composer.
-export enum MenuAction {
-    none,
-    channel-edit, channel-delete,
-    volume, mute-for-me, reset-audio, watch, message,
-    set-role, move-to, channel-kick,
-    mute-voice, mute-chat, unmute-voice, unmute-chat, disconnect, kick, ban,
-    copy-text, select-text, edit-message, delete-message, open-image, save-image,
-    cut, copy, paste,
-    save-file,
-    copy-image,
-    // 1.2 — blocks and reports
-    block, unblock, report, report-message, block-author,
-}
-
-/// One row of a context menu, drawn by the overlay in main.slint.
 export struct MenuEntry {
     label: string,
-    action: MenuAction,
-    arg: int,            // role, channel id, or 1/0 for select-text
+    id: int,             // the host's handle for the entry, handed back on a pick
+    slider: bool,        // the volume row: a slider, never a pick
     enabled: bool,
     separator: bool,     // a rule above this entry
     danger: bool,        // destructive: danger-colored label
@@ -164,7 +144,7 @@ export struct ChatRow {
     file-saved: bool,       // files: already in the Downloads folder
 }
 
-export struct EmojiRow  { glyph: string, code: string, section: string }
+export struct EmojiRow  { glyph: string, code: string }
 export struct KeybindRow { action-label: string, bind: string, recording: bool }
 /// A row of Settings → Licenses (1.2): 0 a section title,
 /// 1 a component or a license group (tap opens it; `entry` names it
@@ -270,8 +250,6 @@ export global State {
     /// The composer is rewriting one of our messages (Enter saves,
     /// Escape restores the draft).
     in property <bool> editing: false;
-    /// RESTRICT: the delete entry appears on everyone's messages.
-    in property <bool> perm-delete-any: false;
     /// The one styled chat row shown as selectable plain text (its
     /// row id; -1 = none). The row's menu and a double-click toggle it.
     in-out property <int> selecting-row: -1;
@@ -380,30 +358,17 @@ export global State {
     // ── 1.1: what this session may do (Session.permissions, rendered
     // as bools — Slint has no 64-bit int). The server decides; these
     // only choose what to draw.
-    in property <bool> perm-mute: false;        // MUTE or RESTRICT
-    in property <bool> perm-disconnect: false;
-    in property <bool> perm-kick: false;
-    in property <bool> perm-ban: false;
     in property <bool> perm-move: false;        // MANAGE_CHANNELS
     /// Connected but in no room yet: the server's lobby (spec §12,
     /// 1.1.5). The banner shows, the mic hint says why.
     in property <bool> in-lobby: false;
-    in property <bool> perm-roles: false;       // MANAGE_ROLES
-    in property <bool> perm-users: false;       // MANAGE_USERS (telemetry tooltip)
     in property <bool> perm-create-channels: false;
     in property <bool> perm-create-invites: false;
     in property <bool> perm-manage-invites: false;  // longer expiries
     in property <bool> perm-panel: false;           // the Admin chip (PANEL)
-    in property <bool> perm-admin-channel: false;   // the Messages row (ADMIN_CHANNEL)
-    in property <bool> perm-manage-own: false;  // MANAGE_OWN_CHANNELS
-    /// Our highest built-in role (same scale as UserRow.role): the
-    /// role submenu offers roles up to it.
-    in property <int> our-role: 0;
     /// `Session.persistent`: false earns a standing notice on
     /// moderation dialogs and in chat (spec §1.1).
     in property <bool> server-persistent: true;
-    /// Channels this session can see, for the "Move to" submenu.
-    in property <[ChannelOption]> channel-options;
 
     // ── 1.1.1: direct messages (spec §6) ────────────────────────────
     /// The Messages section: DM conversations, newest first.
@@ -520,8 +485,10 @@ export global Logic {
     callback user-context(index: int, x: length, y: length);
     /// A chat row; `selecting` = a styled body is in its plain view.
     callback row-context(row: ChatRow, selecting: bool, x: length, y: length);
-    callback composer-context(x: length, y: length);
-    callback menu-activated(action: MenuAction, arg: int);
+    /// The composer, with its selection as the click found it (byte
+    /// offsets): by the time an entry is picked the field has lost it.
+    callback composer-context(x: length, y: length, cursor: int, anchor: int);
+    callback menu-activated(id: int);
     /// The slider in a user's menu: every move is heard at once,
     /// the release is what is kept.
     callback menu-volume-changed(float);
@@ -608,8 +575,6 @@ export global Logic {
     callback invite-create();
     /// The Admin chip: open the panel (spec §8).
     callback admin-open();
-    /// The Messages section's shield row: open the admin channel.
-    callback admin-channel-open();
     /// The dialog: mint with the picked options; copy the code; close.
     callback invite-dialog-create();
     callback invite-dialog-copy();
@@ -627,7 +592,4 @@ export global Logic {
 
     /// The toast was clicked: hide it now.
     callback toast-dismiss();
-
-    // Window lifecycle
-    callback main-close-requested();
 }

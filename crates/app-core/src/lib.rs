@@ -21,14 +21,17 @@ pub mod composer;
 pub mod devices;
 pub mod emoji;
 mod emoji_table;
+pub mod files;
 pub mod fps;
 pub mod gif;
 pub mod images;
 pub mod logfile;
 pub mod markdown;
 pub mod menu;
+pub mod meter;
 pub mod roster;
 pub mod stats;
 pub mod update;
+pub mod usage;
 
 pub use emoji_table::EMOJI;

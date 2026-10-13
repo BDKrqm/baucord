@@ -42,6 +42,9 @@ pub mod held;
 #[cfg(target_os = "android")]
 pub mod mediacodec;
 pub mod pool;
+// Drawn by the Windows capture only; compiled for the tests everywhere.
+#[cfg(any(target_os = "windows", test))]
+pub mod pointer;
 #[cfg(target_os = "ios")]
 pub mod videotoolbox;
 pub mod yuv;
@@ -73,17 +76,23 @@ pub enum Quality {
 }
 impl std::fmt::Display for Quality {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::HD30 => write!(f, "720p 30fps"),
-            Self::HD60 => write!(f, "720p 60fps"),
-            Self::FHD30 => write!(f, "1080p 30fps"),
-            Self::FHD60 => write!(f, "1080p 60fps"),
-            Self::QHD30 => write!(f, "1440p 30fps"),
-        }
+        f.write_str(self.label())
     }
 }
 
 impl Quality {
+    /// The preset's name as the log and the telemetry write it.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::HD30 => "720p 30fps",
+            Self::HD60 => "720p 60fps",
+            Self::FHD30 => "1080p 30fps",
+            Self::FHD60 => "1080p 60fps",
+            Self::QHD30 => "1440p 30fps",
+        }
+    }
+
     /// Maximum encoded width. The actual encoded width may be smaller
     /// to preserve the source aspect ratio.
     #[must_use]
@@ -153,24 +162,6 @@ impl Quality {
     #[must_use]
     pub const fn frame_duration(self) -> std::time::Duration {
         std::time::Duration::from_nanos(1_000_000_000 / self.fps() as u64)
-    }
-
-    /// Pixel count at the maximum resolution for this preset.
-    #[must_use]
-    pub const fn pixel_count(self) -> usize {
-        self.width() as usize * self.height() as usize
-    }
-
-    /// Byte count for one RGBA frame at the maximum resolution.
-    #[must_use]
-    pub const fn rgba_size(self) -> usize {
-        self.pixel_count() * 4
-    }
-
-    /// Byte count for one YUV420 frame at the maximum resolution.
-    #[must_use]
-    pub const fn yuv420_size(self) -> usize {
-        self.pixel_count() * 3 / 2
     }
 
     pub const ALL: &'static [Quality] = &[
@@ -271,6 +262,12 @@ pub struct EncodedFrame {
 pub enum PictureFormat {
     /// Tightly packed RGBA, `width × height × 4` bytes.
     Rgba,
+    /// Tightly packed BGRA, the same size (iOS's `VideoToolbox`).
+    /// Whoever shows the picture swaps it into RGBA as it writes the
+    /// buffer it draws from ([`yuv::bgra_to_rgba_into`]): the decoder
+    /// used to zero-fill a buffer and swap into it, and the picture was
+    /// then copied once more (review P2-43).
+    Bgra,
     /// The decoder's own 4:2:0 planes (Android's `MediaCodec`). Whoever
     /// shows the picture converts it ([`yuv::to_rgba_into`]) straight
     /// into the buffer it draws from, and only the pictures it will
@@ -391,7 +388,18 @@ pub trait VideoEncoder {
     /// frame with its own sequence number. Never concatenate them.
     fn encode(&mut self, frame: &Frame) -> Result<Vec<EncodedFrame>, CodecError>;
 
-    fn quality(&self) -> Quality;
+    /// Encode `frame` again: the picture [`VideoEncoder::encode`] last
+    /// took, with only its timestamp moved on — a still screen's
+    /// once-a-second refresh. The same output contract. A backend
+    /// should leave the still time out of its keyframe cadence: an
+    /// unchanged picture needs no new keyframe until somebody asks
+    /// ([`VideoEncoder::force_keyframe`]).
+    ///
+    /// # Errors
+    /// As [`VideoEncoder::encode`].
+    fn encode_repeat(&mut self, frame: &Frame) -> Result<Vec<EncodedFrame>, CodecError> {
+        self.encode(frame)
+    }
 
     /// Run rate control at `pct` percent of the preset bitrate (clamped
     /// to [`MIN_BITRATE_SCALE_PCT`]`..=100`). Resolution and frame rate
@@ -457,6 +465,31 @@ pub trait VideoEncoder {
     fn qp_floor(&self) -> Option<u32> {
         None
     }
+
+    /// Frames submitted whose access units have not come out yet.
+    fn frames_in_flight(&self) -> usize {
+        0
+    }
+
+    /// The access units that finished since the last call, without
+    /// submitting a frame. Capture is change-driven, so a still screen
+    /// makes no `encode` calls; this is how the frames a hardware
+    /// encoder still holds leave on the next tick instead of with the
+    /// next change or refresh (review P1-13).
+    ///
+    /// # Errors
+    /// As [`Self::encode`].
+    fn drain(&mut self) -> Result<Vec<EncodedFrame>, CodecError> {
+        Ok(Vec::new())
+    }
+
+    /// Whether finished output leaves only with a later submission, so
+    /// that [`Self::drain`] cannot bring out the last frame's access
+    /// unit: the caller then submits the held frame once more after a
+    /// change (`FFmpeg` 7.1's AMF wrapper).
+    fn output_needs_input(&self) -> bool {
+        false
+    }
 }
 
 /// Where one [`VideoDecoder::decode`] call that produced a picture
@@ -478,13 +511,6 @@ pub struct DecodeTiming {
 pub trait VideoDecoder {
     /// Returns `Ok(None)` when the decoder is still buffering (needs more NALs).
     fn decode(&mut self, encoded: &EncodedFrame) -> Result<Option<DecodedFrame>, CodecError>;
-
-    /// Return a previously-decoded buffer for reuse. Every decoder takes
-    /// its buffers from [`pool`], so [`pool::recycle`] does the same from
-    /// anywhere — the app's present thread gives them back that way.
-    fn return_buffer(&mut self, buf: Vec<u8>) {
-        pool::recycle(buf);
-    }
 
     /// Flush decoder state, clearing internal reference frame buffers.
     ///
@@ -511,6 +537,14 @@ pub trait VideoDecoder {
     /// As [`Self::decode`].
     fn poll(&mut self) -> Result<Option<DecodedFrame>, CodecError> {
         Ok(None)
+    }
+
+    /// When a [`Self::poll`] could next hand out a picture, at `now`:
+    /// `None` when none can come without another frame (the default —
+    /// `decode` hands out every picture itself). The caller sleeps until
+    /// then instead of asking on a short timer (review P1-7).
+    fn next_poll(&self, _now: std::time::Instant) -> Option<std::time::Instant> {
+        None
     }
 }
 

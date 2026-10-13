@@ -1,10 +1,41 @@
 [workspace]
 members = ["crates/*"]
+# A bare `cargo build` / `cargo test` at the root builds the desktop, the
+# server and the libraries. The phone hosts build only with `-p android`
+# / `-p ios` (their own targets and features); the iOS crate's off-iOS
+# stub binary is also named `baucord` and would collide with the desktop's.
+default-members = [
+  "crates/protocol",
+  "crates/transport",
+  "crates/server",
+  "crates/client",
+  "crates/app-core",
+  "crates/frontend",
+  "crates/desktop",
+  "crates/ui",
+  "crates/i18n",
+  "crates/audio",
+  "crates/video",
+  "crates/keywatch",
+]
 # Vendored dependencies (`[patch.crates-io]` below) are not members: no
 # fmt or clippy of upstream code, and nothing Windows-only built
 # elsewhere.
 exclude = ["third_party"]
 resolver = "2"
+
+# ── The product's version ───────────────────────────────────────────────
+# One line for the eight public crates (protocol, transport, client,
+# server, frontend, desktop, android, ios — they say
+# `version.workspace = true`), and the line the release workflows,
+# Android's Gradle script and the iOS scripts read: bump it here, and
+# nowhere else. It was eight manifests kept equal by hand (review P2-61).
+# Keep `version = "…"` at the start of its line: those readers match it.
+[workspace.package]
+version = "1.2.1"
+edition = "2024"
+license = "Apache-2.0"
+
 # ── Shared dependency versions ──────────────────────────────────────────
 # Crates opt in per dependency with `dep.workspace = true`. Only deps
 # used by two or more crates live here; single-user deps stay local.
@@ -19,7 +50,7 @@ crossbeam-channel = "0.5.15"
 # in the winit adapter's handle_focus_change (slint-ui/slint#6922).
 # Users hit it opening the volume popover. Re-enable once that is fixed
 # upstream.
-slint = { version = "1.18.1", default-features = false, features = [
+slint = { version = "~1.18.1", default-features = false, features = [
   "std",
   "backend-winit",
   "renderer-skia",
@@ -29,6 +60,14 @@ slint = { version = "1.18.1", default-features = false, features = [
 bytes = "1.12"
 thiserror = "2"
 rand = "0.10"
+# Declared once for the crates that share them (review P3-49); a crate
+# adds its own features where it needs them.
+chrono = "0.4.45"
+serde_json = "1.0"
+env_logger = "0.11"
+# `wasapi`, `xcap` and our own Windows code agree on this one, so there
+# is a single `windows` tree.
+windows = "0.62"
 # ── Shared lints (crates opt in with `[lints] workspace = true`) ────────
 [workspace.lints.rust]
 future-incompatible = "warn"
@@ -60,22 +99,17 @@ panic = "abort"   # ~10% smaller binary, no unwind overhead
 [profile.deploy]
 inherits = "release"
 strip = "symbols"
-lto = "thin"
-# ── Debug-opt: release speed with debug symbols ────────────────────────
-[profile.debug-opt]
-inherits = "release"
-debug = 2
-debug-assertions = true
-incremental = true
-# override: keep unwind so backtraces work in profiling
-panic = "unwind"
 # ── Dev: fast compile, tolerable runtime ───────────────────────────────
 [profile.dev]
 opt-level = 1
 # Optimize all dependencies even in dev — they don't change often
-# and unoptimized audio/codec code is unusably slow.
+# and unoptimized audio/codec code is unusably slow. Line tables only:
+# a backtrace through a dependency still names file and line, and full
+# debug info for some 800 optimized crates was most of a 15+ GB
+# `target/`.
 [profile.dev.package."*"]
 opt-level = 3
+debug = "line-tables-only"
 # Workspace crates with per-pixel and per-sample loops (the decoder's
 # colour conversion, the voice chain): a Debug build on a phone
 # (`ios/run.sh --device`) logged "Slow decode" at ~20 ms per 1080p

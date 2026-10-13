@@ -28,7 +28,7 @@ use std::{
     ptr::{self, addr_of},
     slice,
     sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex, PoisonError, Weak,
     },
 };
@@ -53,7 +53,9 @@ use super::{
     avsession,
     pump::{CapturePump, RenderPump},
 };
-use crate::{aec::reasons, input_config::InputConfig, stats::AudioStats, OPUS_SAMPLE_RATE};
+use crate::{
+    aec::reasons, input_config::InputConfig, latch::Ring, stats::AudioStats, OPUS_SAMPLE_RATE,
+};
 
 /// The largest slice the unit may ask for: with the screen locked iOS
 /// moves to 4096-frame buffers, and a unit left at its default refuses
@@ -142,18 +144,17 @@ impl<P> Mailbox<P> {
     /// The callback's current half: a new one from the slot replaces
     /// it, a detached one is given back.
     fn current<'a>(&self, held: &'a mut Option<Half<P>>) -> Option<&'a mut P> {
-        if let Some(new) = self.slot.take() {
-            if let Some(old) = held.replace(new) {
-                self.retire(old);
-            }
+        if let Some(new) = self.slot.take()
+            && let Some(old) = held.replace(new)
+        {
+            self.retire(old);
         }
         if held
             .as_ref()
             .is_some_and(|h| !h.attached.load(Ordering::Relaxed))
+            && let Some(old) = held.take()
         {
-            if let Some(old) = held.take() {
-                self.retire(old);
-            }
+            self.retire(old);
         }
         held.as_mut().map(|h| &mut h.pump)
     }
@@ -478,7 +479,7 @@ pub struct NativeCapture {
 pub struct CaptureStartError {
     pub reason: String,
     pub producer: Producer<f32>,
-    pub wake_tx: Sender<()>,
+    pub wake_tx: Ring,
 }
 
 impl NativeCapture {
@@ -490,10 +491,9 @@ impl NativeCapture {
     /// error.
     pub fn start(
         producer: Producer<f32>,
-        wake_tx: Sender<()>,
+        wake_tx: Ring,
         stats: Arc<AudioStats>,
         config: Arc<InputConfig>,
-        input_level: Arc<AtomicU32>,
     ) -> Result<Self, CaptureStartError> {
         let unit = match shared_unit(&stats, false) {
             Ok(unit) => unit,
@@ -513,7 +513,6 @@ impl NativeCapture {
                 wake_tx,
                 stats,
                 config,
-                input_level,
             },
         });
         let aec_verdict = if unit.processing {
@@ -552,7 +551,7 @@ pub struct NativeRender {
 pub struct RenderStartError {
     pub reason: String,
     pub consumer: Consumer<f32>,
-    pub wake_tx: Sender<()>,
+    pub wake_tx: Ring,
 }
 
 impl NativeRender {
@@ -564,7 +563,7 @@ impl NativeRender {
     /// error.
     pub fn start(
         consumer: Consumer<f32>,
-        wake_tx: Sender<()>,
+        wake_tx: Ring,
         stats: Arc<AudioStats>,
         callback_frames: Arc<AtomicUsize>,
     ) -> Result<Self, RenderStartError> {

@@ -49,23 +49,36 @@ pub enum ImageError {
 /// [`ImageError::TooLargeAfterDownscale`] if even the 320px floor is
 /// over budget.
 pub fn encode_bounded_png(buf: &image::RgbImage, max_bytes: usize) -> Result<Vec<u8>, ImageError> {
+    encode_bounded(buf, max_bytes, |scaled, out| {
+        scaled.write_to(out, image::ImageFormat::Png)
+    })
+}
+
+/// The loop both encoders share: bound the longest edge, encode, and
+/// halve the bound until the bytes fit or the 320 px floor is reached.
+/// A picture already inside the bound is encoded where it is — it used
+/// to be copied first, on every pass (review P3-41, P3-42).
+fn encode_bounded(
+    buf: &image::RgbImage,
+    max_bytes: usize,
+    encode: impl Fn(&image::RgbImage, &mut Cursor<Vec<u8>>) -> image::ImageResult<()>,
+) -> Result<Vec<u8>, ImageError> {
+    let longest = buf.width().max(buf.height());
     let mut bound = MAX_IMAGE_DIM;
     loop {
-        let scaled = if buf.width().max(buf.height()) > bound {
-            image::imageops::resize(
+        let scaled = if longest > bound {
+            std::borrow::Cow::Owned(image::imageops::resize(
                 buf,
-                (buf.width() * bound / buf.width().max(buf.height())).max(1),
-                (buf.height() * bound / buf.width().max(buf.height())).max(1),
+                (buf.width() * bound / longest).max(1),
+                (buf.height() * bound / longest).max(1),
                 image::imageops::FilterType::Triangle,
-            )
+            ))
         } else {
-            buf.clone()
+            std::borrow::Cow::Borrowed(buf)
         };
 
         let mut out = Cursor::new(Vec::new());
-        image::DynamicImage::ImageRgb8(scaled)
-            .write_to(&mut out, image::ImageFormat::Png)
-            .map_err(|e| ImageError::Codec(e.to_string()))?;
+        encode(&scaled, &mut out).map_err(|e| ImageError::Codec(e.to_string()))?;
         let bytes = out.into_inner();
 
         if bytes.len() <= max_bytes {
@@ -119,16 +132,20 @@ pub fn load_image_bytes(bytes: Vec<u8>, max_bytes: usize) -> Result<Vec<u8>, Ima
     let is_png = format == Some(image::ImageFormat::Png);
     let is_jpeg = format == Some(image::ImageFormat::Jpeg);
 
-    let decoded = decode_bounded(&bytes)?;
-
     // Already-encoded PNGs and JPEGs inside both budgets pass through
-    // untouched — receivers sniff the magic and decode either.
+    // untouched — receivers sniff the magic and decode either. Their
+    // size is read from the header: every caller decodes the result for
+    // the send preview next, which is where a broken file is found, so
+    // decoding here as well was a second full decode only to measure
+    // (review P3-41).
     if (is_png || is_jpeg)
         && bytes.len() <= max_bytes
-        && decoded.width().max(decoded.height()) <= MAX_IMAGE_DIM
+        && dimensions_of(&bytes).is_some_and(|(w, h)| w.max(h) <= MAX_IMAGE_DIM)
     {
         return Ok(bytes);
     }
+
+    let decoded = decode_bounded(&bytes)?;
 
     // Photographs (anything that arrived as JPEG) re-encode as JPEG:
     // a photo transcoded to PNG balloons 5–10×, which used to turn a
@@ -136,10 +153,37 @@ pub fn load_image_bytes(bytes: Vec<u8>, max_bytes: usize) -> Result<Vec<u8>, Ima
     // everyone. Screenshots and everything else keep the sharp-edged
     // PNG path.
     if is_jpeg {
-        encode_bounded_jpeg(&decoded.to_rgb8(), max_bytes)
+        encode_bounded_jpeg(&decoded.into_rgb8(), max_bytes)
     } else {
-        encode_bounded_png(&decoded.to_rgb8(), max_bytes)
+        encode_bounded_png(&decoded.into_rgb8(), max_bytes)
     }
+}
+
+/// Pixels with no file format around them — a system clipboard's
+/// bitmap (`width` × `height`, RGBA, rows top to bottom) — into
+/// protocol-ready bytes: straight into the bounded-PNG pipeline. Alpha
+/// is dropped, as on every other road into it (and a clipboard bitmap's
+/// is often all zeroes).
+///
+/// # Errors
+/// [`ImageError::Codec`] when the buffer is not `width × height × 4`
+/// bytes of something, or as [`encode_bounded_png`].
+pub fn load_rgba(
+    width: usize,
+    height: usize,
+    rgba: Vec<u8>,
+    max_bytes: usize,
+) -> Result<Vec<u8>, ImageError> {
+    let pixels = u32::try_from(width)
+        .ok()
+        .zip(u32::try_from(height).ok())
+        .filter(|(w, h)| *w > 0 && *h > 0)
+        .and_then(|(w, h)| image::RgbaImage::from_raw(w, h, rgba))
+        .ok_or_else(|| ImageError::Codec("not a picture".to_string()))?;
+    encode_bounded_png(
+        &image::DynamicImage::ImageRgba8(pixels).into_rgb8(),
+        max_bytes,
+    )
 }
 
 /// [`encode_bounded_png`]'s photographic sibling: JPEG at quality 85,
@@ -150,52 +194,92 @@ pub fn load_image_bytes(bytes: Vec<u8>, max_bytes: usize) -> Result<Vec<u8>, Ima
 /// [`ImageError::TooLargeAfterDownscale`] below 320 px, or
 /// [`ImageError::Codec`] from the encoder.
 pub fn encode_bounded_jpeg(buf: &image::RgbImage, max_bytes: usize) -> Result<Vec<u8>, ImageError> {
-    let mut bound = MAX_IMAGE_DIM;
-    loop {
-        let scaled = if buf.width().max(buf.height()) > bound {
-            image::imageops::resize(
-                buf,
-                (buf.width() * bound / buf.width().max(buf.height())).max(1),
-                (buf.height() * bound / buf.width().max(buf.height())).max(1),
-                image::imageops::FilterType::Triangle,
-            )
-        } else {
-            buf.clone()
-        };
+    encode_bounded(buf, max_bytes, |scaled, out| {
+        scaled.write_with_encoder(image::codecs::jpeg::JpegEncoder::new_with_quality(out, 85))
+    })
+}
 
-        let mut out = Cursor::new(Vec::new());
-        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85);
-        image::DynamicImage::ImageRgb8(scaled)
-            .write_with_encoder(encoder)
-            .map_err(|e| ImageError::Codec(e.to_string()))?;
-        let bytes = out.into_inner();
-
-        if bytes.len() <= max_bytes {
-            return Ok(bytes);
-        }
-        if bound <= 320 {
-            return Err(ImageError::TooLargeAfterDownscale(bytes.len() / 1024));
-        }
-        bound /= 2;
+/// The file extension a received picture's bytes are saved under: what
+/// they are, not what most pictures are (a JPEG saved as `.png` opens
+/// in a browser and nowhere else; review P3-31). PNG for anything the
+/// sniff does not know — nothing else gets as far as a chat row.
+#[must_use]
+pub fn extension_for(bytes: &[u8]) -> &'static str {
+    match image::guess_format(bytes) {
+        Ok(image::ImageFormat::Jpeg) => "jpg",
+        Ok(image::ImageFormat::Gif) => "gif",
+        _ => "png",
     }
+}
+
+/// A picture's size from its header, without decoding it.
+fn dimensions_of(bytes: &[u8]) -> Option<(u32, u32)> {
+    image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
 }
 
 /// Decode with explicit limits so a crafted file (e.g. a 30000×30000
 /// bomb that compresses to nothing) can't allocate gigabytes before
 /// any of our dimension checks run.
 ///
+/// Every compiled format is tried: this is for what the user picks,
+/// pastes or drops. Bytes from the wire go through [`decode_received`].
+///
 /// # Errors
 /// [`ImageError::Codec`] on unreadable/oversized input.
 pub fn decode_bounded(bytes: &[u8]) -> Result<image::DynamicImage, ImageError> {
+    let mut reader = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| ImageError::Codec(e.to_string()))?;
+    reader.limits(decode_limits());
+    reader
+        .decode()
+        .map_err(|e| ImageError::Codec(e.to_string()))
+}
+
+fn decode_limits() -> image::Limits {
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(16_384);
     limits.max_image_height = Some(16_384);
     limits.max_alloc = Some(512 * 1024 * 1024);
+    limits
+}
 
-    let mut reader = image::ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .map_err(|e| ImageError::Codec(e.to_string()))?;
-    reader.limits(limits);
+/// The format of a picture that came over the wire, by its magic
+/// bytes: PNG, JPEG or GIF, the only ones a sender produces
+/// ([`load_image_bytes`] passes those through and re-encodes the rest).
+/// `None` for anything else.
+#[must_use]
+pub fn received_format(bytes: &[u8]) -> Option<image::ImageFormat> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some(image::ImageFormat::Png)
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some(image::ImageFormat::Jpeg)
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some(image::ImageFormat::Gif)
+    } else {
+        None
+    }
+}
+
+/// [`decode_bounded`] for bytes someone else sent: chat pictures,
+/// avatars, the gallery. Only PNG, JPEG and GIF reach a decoder, and
+/// the one their magic names (review P1-20). A crafted WebP, BMP or
+/// TIFF would otherwise reach those decoders on every receiver, and
+/// history replays it to newcomers; with `panic = "abort"`, one
+/// decoder panic would end every client that shows the picture.
+///
+/// # Errors
+/// [`ImageError::Codec`] for another format, or as [`decode_bounded`].
+pub fn decode_received(bytes: &[u8]) -> Result<image::DynamicImage, ImageError> {
+    let Some(format) = received_format(bytes) else {
+        return Err(ImageError::Codec("not a PNG, JPEG or GIF picture".into()));
+    };
+    let mut reader = image::ImageReader::with_format(Cursor::new(bytes), format);
+    reader.limits(decode_limits());
     reader
         .decode()
         .map_err(|e| ImageError::Codec(e.to_string()))
@@ -220,7 +304,7 @@ pub fn avatar_png(bytes: &[u8]) -> Result<Vec<u8>, ImageError> {
     );
     let mut out = Cursor::new(Vec::new());
     square
-        .to_rgba8()
+        .into_rgba8()
         .write_to(&mut out, image::ImageFormat::Png)
         .map_err(|e| ImageError::Codec(e.to_string()))?;
     Ok(out.into_inner())
@@ -389,6 +473,42 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_pixels_become_a_png_without_their_alpha() {
+        // 2×1, both pixels fully transparent: the picture must still
+        // show (a clipboard bitmap's alpha is often all zeroes).
+        let rgba = vec![255, 0, 0, 0, 0, 0, 255, 0];
+        let png = load_rgba(2, 1, rgba, 1 << 20).expect("encodes");
+        let back = decode_bounded(&png).expect("decodes");
+        assert_eq!((back.width(), back.height()), (2, 1));
+        assert_eq!(back.to_rgba8().into_raw(), [255, 0, 0, 255, 0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn a_saved_picture_is_named_for_what_it_is() {
+        assert_eq!(extension_for(&[0xFF, 0xD8, 0xFF, 0xE0, 0, 0]), "jpg");
+        assert_eq!(extension_for(b"GIF89a\x01\x00\x01\x00"), "gif");
+        assert_eq!(
+            extension_for(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]),
+            "png"
+        );
+        assert_eq!(extension_for(b"?"), "png");
+    }
+
+    #[test]
+    fn clipboard_pixels_of_the_wrong_size_are_refused() {
+        assert!(load_rgba(2, 2, vec![0; 8], 1 << 20).is_err());
+        assert!(load_rgba(0, 0, Vec::new(), 1 << 20).is_err());
+    }
+
+    #[test]
+    fn a_big_clipboard_picture_is_scaled_into_the_bound() {
+        let (w, h) = (2000usize, 500usize);
+        let png = load_rgba(w, h, vec![40; w * h * 4], 1 << 20).expect("encodes");
+        let back = decode_bounded(&png).expect("decodes");
+        assert_eq!(back.width(), MAX_IMAGE_DIM);
+    }
+
+    #[test]
     fn is_image_path_is_case_insensitive() {
         assert!(is_image_path(Path::new("/tmp/A.PNG")));
         assert!(!is_image_path(Path::new("/tmp/a.txt")));
@@ -404,6 +524,55 @@ mod tests {
         g.extend_from_slice(&[0x01, 0x00, 0x00]); // one data sub-block + terminator
         g.push(0x3B); // trailer
         assert!(!gif_is_animated(&g));
+    }
+
+    /// A 2×2 picture encoded as `format`.
+    fn encoded(format: image::ImageFormat) -> Vec<u8> {
+        let img = image::RgbImage::from_pixel(2, 2, image::Rgb([10, 20, 30]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut out, format)
+            .unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn received_format_reads_only_png_jpeg_and_gif_magic() {
+        use image::ImageFormat::{Gif, Jpeg, Png};
+        assert_eq!(received_format(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR"), Some(Png));
+        assert_eq!(received_format(&[0xFF, 0xD8, 0xFF, 0xE0]), Some(Jpeg));
+        assert_eq!(received_format(b"GIF87a\x01\0\x01\0"), Some(Gif));
+        assert_eq!(received_format(b"GIF89a\x01\0\x01\0"), Some(Gif));
+        // WebP, BMP, both TIFF byte orders, and cut-short headers.
+        for other in [
+            &b"RIFF\x1a\0\0\0WEBPVP8L"[..],
+            b"BM\x3a\0\0\0\0\0",
+            b"II*\0\x08\0\0\0",
+            b"MM\0*\0\0\0\x08",
+            b"\x89PNG",
+            &[0xFF, 0xD8],
+            b"GIF8",
+            b"",
+        ] {
+            assert_eq!(received_format(other), None, "{other:?}");
+        }
+    }
+
+    #[test]
+    fn received_pictures_decode_only_as_png_jpeg_or_gif() {
+        use image::ImageFormat::{Bmp, Gif, Jpeg, Png, Tiff, WebP};
+        for format in [Png, Jpeg, Gif] {
+            assert!(decode_received(&encoded(format)).is_ok(), "{format:?}");
+        }
+        for format in [WebP, Bmp, Tiff] {
+            let bytes = encoded(format);
+            // Still fine for a picture the user pastes or attaches…
+            assert!(decode_bounded(&bytes).is_ok(), "{format:?}");
+            // …never from the wire.
+            assert!(decode_received(&bytes).is_err(), "{format:?}");
+        }
+        // The right magic on a broken body is an error, not a panic.
+        assert!(decode_received(b"\x89PNG\r\n\x1a\n\0\0\0\0garbage").is_err());
     }
 
     #[test]

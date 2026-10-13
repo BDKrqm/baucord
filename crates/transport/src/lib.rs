@@ -16,6 +16,7 @@ pub mod config;
 mod der;
 pub mod driver;
 pub mod identity;
+pub mod sha256;
 #[cfg(any(test, feature = "sim"))]
 pub mod sim;
 pub mod udp;
@@ -23,10 +24,10 @@ pub mod udp;
 pub use config::Budget;
 pub use driver::{
     DisconnectReason, Driver, DriverHost, Event, InboundDatagram, LinkStats, PeerId, SendError,
-    Track, Transmit, UploadId, VideoItem, OWN_TRACK,
+    Shared, Track, TrackStats, Transmit, UploadId, VideoItem, WaitingRoom, OWN_TRACK,
 };
-pub use identity::{ClientKey, Fingerprint, Observation, PinnedVerifier, ServerIdentity, Trust};
+#[cfg(any(test, feature = "server"))]
+pub use identity::ServerIdentity;
+pub use identity::{ClientKey, Fingerprint, Observation, PinnedVerifier, Trust};
 pub use protocol::Lane;
-#[cfg(unix)]
-pub use udp::ReadWaiter;
-pub use udp::{RecvOutcome, UdpIo};
+pub use udp::{ReadWaiter, RecvOutcome, UdpIo};

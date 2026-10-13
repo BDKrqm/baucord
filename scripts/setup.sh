@@ -19,7 +19,8 @@
 #   5. prints the server's address and identity from its log, and on a
 #      new server the one-time admin invite code
 #   6. installs + enables the network monitor as a systemd service
-#      (baucord-monitor — CSV at /var/log/baucord-net.log, logrotate managed)
+#      (baucord-monitor — CSV at /var/log/baucord-net.log, logrotate managed),
+#      and checks at the end that it writes data rows
 #
 # Everything in step 3 is host-level: net.core.* sysctls are global and apply inside
 # containers; NIC settings are physical; conntrack backs Docker's port publishing.
@@ -33,6 +34,12 @@ MEDIA_VIA_DOCKER_NAT="true" # true  = baucord uses `ports:` (iptables DNAT -> co
 BAUCORD_UID="10000"       # uid:gid the mpwsh/baucord image runs as (user "runner")
 DATA_DIR="./data/baucord" # mounted at /app/data; holds identity.key (the server's identity — back it up)
 IFACE="${IFACE:-$(ip -o route show default | awk '{print $5; exit}')}"
+# cloud-init re-renders the host's network config when a NIC is hot-plugged, which
+# undoes the NIC tuning below. This script turns that off for the whole host (a
+# drop-in under /etc/cloud/cloud.cfg.d). KEEP_CLOUD_INIT_HOTPLUG=1 leaves cloud-init
+# as it is — for a host whose NICs do come and go, at the price of running this
+# script again after one does.
+KEEP_CLOUD_INIT_HOTPLUG="${KEEP_CLOUD_INIT_HOTPLUG:-}"
 # ──────────────────────────────────────────────────────────────────────────────
 
 [[ $EUID -eq 0 ]] || {
@@ -99,11 +106,8 @@ docker compose version
 # ── 2. Data dir for the non-root container ────────────────────────────────────
 log "Preparing $DATA_DIR (owner uid $BAUCORD_UID)"
 mkdir -p "$DATA_DIR"
-# 0.5 kept a netcode.key here; 1.0 generates identity.key on first start
-# and clients pin it, so the directory must persist across recreates.
-if [[ -f "$DATA_DIR/netcode.key" ]]; then
-  echo "  netcode.key from the 0.5 line is no longer used; leaving it in place"
-fi
+# The server generates identity.key here on first start and clients pin
+# it, so the directory must persist across recreates.
 chown -R "$BAUCORD_UID:$BAUCORD_UID" "$DATA_DIR"
 chmod 700 "$DATA_DIR"
 
@@ -125,10 +129,9 @@ cat >/etc/sysctl.d/99-baucord-udp.conf <<'EOF'
 # socket's send buffer (200 viewers ≈ 35 MB).
 net.core.wmem_max = 67108864
 net.core.rmem_max = 8388608
-# Defaults apply to every socket on the box. Baucord should still set
-# SO_SNDBUF/SO_RCVBUF explicitly on its relay socket.
-net.core.rmem_default = 4194304
-net.core.wmem_default = 4194304
+# No *_default here: those would resize every socket on the box, and
+# the server asks for its own buffers (SO_SNDBUF/SO_RCVBUF, up to the
+# caps above) when it binds.
 
 # NIC -> IP stack backlog (per CPU). Default 1000 drops under UDP bursts.
 net.core.netdev_max_backlog = 65536
@@ -220,13 +223,25 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 EOF
 
-# Cloud-init: don't let network hotplug rewrite the NIC config under us
-mkdir -p /etc/cloud/cloud.cfg.d
-cat >/etc/cloud/cloud.cfg.d/99-disable-hotplug.cfg <<'EOF'
+# Cloud-init: don't let network hotplug rewrite the NIC config under us.
+# Host-wide, so only where there is a cloud-init to tell, said out loud,
+# and not at all with KEEP_CLOUD_INIT_HOTPLUG=1 (which also takes back
+# what an earlier run of this script wrote).
+HOTPLUG_DROPIN=/etc/cloud/cloud.cfg.d/99-disable-hotplug.cfg
+if [[ -n "$KEEP_CLOUD_INIT_HOTPLUG" ]]; then
+  if [[ -f "$HOTPLUG_DROPIN" ]]; then
+    rm -f "$HOTPLUG_DROPIN"
+    log "cloud-init network hotplug left on (removed $HOTPLUG_DROPIN)"
+  fi
+elif [[ -d /etc/cloud ]]; then
+  mkdir -p /etc/cloud/cloud.cfg.d
+  cat >"$HOTPLUG_DROPIN" <<'EOF'
 updates:
   network:
     when: []
 EOF
+  log "cloud-init network hotplug turned off for this host ($HOTPLUG_DROPIN; KEEP_CLOUD_INIT_HOTPLUG=1 keeps it)"
+fi
 
 log "Applying host tuning"
 sysctl --system >/dev/null
@@ -273,8 +288,10 @@ fi
 # root (nsenter into the container netns, ethtool).
 log "Installing baucord-monitor service"
 install -m 0755 scripts/monitor-net.sh /usr/local/bin/baucord-monitor
+MONITOR_INTERVAL=10
+MONITOR_LOG=/var/log/baucord-net.log
 
-cat >/etc/systemd/system/baucord-monitor.service <<'UNIT'
+cat >/etc/systemd/system/baucord-monitor.service <<UNIT
 [Unit]
 Description=baucord network monitor (per-netns UDP/NIC drop counters)
 Documentation=file:///usr/local/bin/baucord-monitor
@@ -285,7 +302,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/baucord-monitor 10 /var/log/baucord-net.log
+ExecStart=/usr/local/bin/baucord-monitor $MONITOR_INTERVAL $MONITOR_LOG
 Restart=always
 RestartSec=5
 # Needs real root (nsenter/ethtool); harden only what can't break it.
@@ -314,6 +331,10 @@ ROT
 
 systemctl daemon-reload
 systemctl enable baucord-monitor >/dev/null
+# Where the log stands before the restart: the status check below looks
+# for a data row after it.
+monitor_lines=0
+[[ -f "$MONITOR_LOG" ]] && monitor_lines="$(wc -l <"$MONITOR_LOG")"
 # restart (not start): re-running setup picks up script changes; the
 # "# start/resume" header line the script writes doubles as a marker of
 # when setup was re-applied.
@@ -329,4 +350,22 @@ else
   echo "  WARNING: nothing listening on udp/$MEDIA_PORT — check: docker compose logs baucord"
 fi
 echo "  make sure the firewall allows udp/$MEDIA_PORT (nothing else is needed: no TCP, no TLS certificate)"
-echo "  network monitor: systemctl status baucord-monitor   (log: tail -f /var/log/baucord-net.log)"
+# The monitor's first sample is a baseline; its first data row comes one
+# interval later. Until 1.2.1 it never wrote one, silently (review
+# P1-21). Not fatal: the relay works without it.
+monitor_row=""
+for _ in $(seq 1 $((2 * MONITOR_INTERVAL + 5))); do
+  [[ -f "$MONITOR_LOG" ]] && (($(wc -l <"$MONITOR_LOG") < monitor_lines)) && monitor_lines=0 # rotated
+  if [[ -f "$MONITOR_LOG" ]] && awk -F, -v skip="$monitor_lines" \
+    'NR > skip && !/^#/ && $1 != "ts" && $3 != "" { found = 1; exit } END { exit !found }' "$MONITOR_LOG"; then
+    monitor_row="yes"
+    break
+  fi
+  sleep 1
+done
+if [[ -n "$monitor_row" ]]; then
+  echo "  network monitor: writing rows (systemctl status baucord-monitor; log: tail -f $MONITOR_LOG)"
+else
+  echo "  WARNING: the network monitor wrote no data row in $((2 * MONITOR_INTERVAL)) s — check:"
+  echo "    systemctl status baucord-monitor; journalctl -u baucord-monitor; tail $MONITOR_LOG"
+fi

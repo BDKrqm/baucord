@@ -31,9 +31,6 @@ pub struct AudioStats {
 
     // ── Codec stats ─────────────────────────────────────────────────────
     pub encode_errors: AtomicU64,
-    /// Kept for the debug overlay; a corrupt packet is now concealed
-    /// rather than reported, so this stays at 0.
-    pub decode_errors: AtomicU64,
     /// Slots recovered from in-band FEC that was actually present in the
     /// following packet. (Earlier releases counted every *attempt*.)
     pub fec_recoveries: AtomicU64,
@@ -93,6 +90,14 @@ pub struct AudioStats {
     /// Packets recovered at the receiver from a RED copy in a later
     /// packet (the original never arrived or arrived late).
     pub red_recoveries: AtomicU64,
+    /// In a voice room (`VoiceChat::set_presence`; true until told
+    /// otherwise). Out of one there is no voice link to adapt to, and
+    /// the encoder thread stops looking four times a second.
+    pub in_room: AtomicBool,
+    /// Clock-drift windows measured, and those that left the correction
+    /// on (`JitterStats`; review P3-22).
+    pub drift_windows: AtomicU64,
+    pub drift_on: AtomicU64,
 
     // ── Jitter buffer ───────────────────────────────────────────────────
     pub jitter_buffer_occupancy_ms: AtomicUsize,
@@ -134,8 +139,6 @@ pub struct AudioStats {
     /// Speaking indicator: `RNNoise` speech probability + open gate, with
     /// hold (see `processor::speaking`).
     pub vad_active: AtomicBool,
-    pub denoise_active: AtomicBool,
-    pub dtx_active: AtomicBool,
     /// Whether the noise gate is currently open (passing audio).
     pub gate_active: AtomicBool,
 
@@ -167,7 +170,6 @@ impl AudioStats {
             packets_late: AtomicU64::new(0),
             outgoing_dropped: AtomicU64::new(0),
             encode_errors: AtomicU64::new(0),
-            decode_errors: AtomicU64::new(0),
             fec_recoveries: AtomicU64::new(0),
             plc_frames: AtomicU64::new(0),
             uplink_loss_pct: AtomicU32::new(0),
@@ -186,6 +188,9 @@ impl AudioStats {
             adapt_level: AtomicU32::new(0),
             red_active: AtomicBool::new(false),
             red_recoveries: AtomicU64::new(0),
+            in_room: AtomicBool::new(true),
+            drift_windows: AtomicU64::new(0),
+            drift_on: AtomicU64::new(0),
             jitter_buffer_occupancy_ms: AtomicUsize::new(0),
             jitter_buffer_target_ms: AtomicUsize::new(0),
             bytes_sent: AtomicU64::new(0),
@@ -198,8 +203,6 @@ impl AudioStats {
             denoised_level: AtomicU32::new(0.0_f32.to_bits()),
             pipeline_level: AtomicU32::new(0.0_f32.to_bits()),
             vad_active: AtomicBool::new(false),
-            denoise_active: AtomicBool::new(true),
-            dtx_active: AtomicBool::new(false),
             gate_active: AtomicBool::new(false),
             aec: Mutex::new(None),
             aec_generation: AtomicU64::new(0),
@@ -233,6 +236,21 @@ impl AudioStats {
     }
 
     /// Estimated send bandwidth in kbps, from what was actually sent:
+    /// How long ago the relay last reported on our voice
+    /// ([`Self::uplink_loss_updated_ms`]); `None` when it never has.
+    /// The stamp is on this struct's own clock, so the age has to be
+    /// taken here: the telemetry line subtracted it from Unix time, got
+    /// decades, and always said "(idle)" (review P2-19).
+    #[must_use]
+    pub fn uplink_report_age_ms(&self) -> Option<u64> {
+        let updated_ms = self.uplink_loss_updated_ms.load(Ordering::Relaxed);
+        if updated_ms == 0 {
+            return None;
+        }
+        let now_ms = u64::try_from(self.start_time.elapsed().as_millis()).unwrap_or(u64::MAX);
+        Some(now_ms.saturating_sub(updated_ms))
+    }
+
     /// Opus bytes plus per-packet overhead (16-byte `PacketHeader` +
     /// 28 bytes IPv4/UDP) over the session. DTX pauses therefore lower it,
     /// as they do on the wire — the old estimate assumed 100 packets/s of
@@ -282,15 +300,16 @@ impl AudioStats {
         };
 
         format!(
-            "Audio ({}s) | Sent {} Recv {} Lost {} ({:.1}%) | \
-             FEC {} RED {} PLC {} (hint {}%, uplink {}%) | Rate {}k/{}ms{} | Overruns {} Underruns {} Drop {} | Jitter {}ms (target {}ms) | \
+            "Audio ({}s) | Sent {} Recv {} Lost {} ({:.1}%) Late {} | \
+             FEC {} RED {} PLC {} (hint {}%, uplink {}%) | Rate {}k/{}ms{} | Overruns {} Underruns {} Drop {} | Jitter {}ms (target {}ms) | Drift {}/{} | \
              BW ↑{:.1}kbps ↓{:.1}kbps | Pkt {}B (avg {:.0}B) | \
-             Enc {}µs Dec {}µs | Errors: enc {} dec {} | aec: {}",
+             Enc {}µs Dec {}µs | Encode errors {} | Device restarts {} | aec: {}",
             elapsed,
             sent,
             received,
             lost,
             loss_rate,
+            self.packets_late.load(Ordering::Relaxed),
             self.fec_recoveries.load(Ordering::Relaxed),
             self.red_recoveries.load(Ordering::Relaxed),
             self.plc_frames.load(Ordering::Relaxed),
@@ -304,6 +323,8 @@ impl AudioStats {
             self.outgoing_dropped.load(Ordering::Relaxed),
             self.jitter_buffer_occupancy_ms.load(Ordering::Relaxed),
             self.jitter_buffer_target_ms.load(Ordering::Relaxed),
+            self.drift_on.load(Ordering::Relaxed),
+            self.drift_windows.load(Ordering::Relaxed),
             self.estimated_send_kbps(),
             self.estimated_recv_kbps(),
             self.last_packet_size.load(Ordering::Relaxed),
@@ -311,8 +332,30 @@ impl AudioStats {
             self.last_encode_us.load(Ordering::Relaxed),
             self.last_decode_us.load(Ordering::Relaxed),
             self.encode_errors.load(Ordering::Relaxed),
-            self.decode_errors.load(Ordering::Relaxed),
+            self.stream_restarts.load(Ordering::Relaxed),
             aec,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::atomic::Ordering, time::Duration};
+
+    use super::AudioStats;
+
+    /// The report's age is measured on the stats' own clock (review
+    /// P2-19): unknown until the relay has reported, small right after.
+    #[test]
+    fn uplink_report_age_is_none_until_reported_then_small() {
+        let stats = AudioStats::new();
+        assert_eq!(stats.uplink_report_age_ms(), None);
+        std::thread::sleep(Duration::from_millis(5));
+        let now_ms = u64::try_from(stats.start_time.elapsed().as_millis()).unwrap();
+        stats
+            .uplink_loss_updated_ms
+            .store(now_ms.max(1), Ordering::Relaxed);
+        let age = stats.uplink_report_age_ms().expect("reported");
+        assert!(age < 1_000, "a report just stamped reads {age} ms old");
     }
 }

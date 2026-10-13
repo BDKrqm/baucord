@@ -3,13 +3,13 @@
 // Same architecture as voice.rs: dedicated thread, crossbeam channels,
 // control/event enums, shared state for UI.
 //
-// Sender side: capture → encode → NetworkControl::SendVideoFrame
+// Sender side: capture → encode → MediaOut::VideoFrame
 // Receiver side: incoming H.264 frames → jitter buffer → per-peer VideoDecoder → RGBA for display
 //
 // The jitter buffer decouples packet receipt from decode. Without it,
 // keyframe decode stalls (10-16ms) block the channel drain loop, causing
 // `try_send` drops on the network thread and consistent sequence gaps
-// after every keyframe. With the buffer, packets are pushed in O(log n)
+// after every keyframe. With the buffer, packets are appended in O(1)
 // and the decoder pulls at its own pace.
 //
 // System audio: incoming Opus stereo packets are delegated to
@@ -22,7 +22,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -33,10 +33,10 @@ use audio::{
     stats::AudioStats,
     stream::{
         decoder::{self as stream_decoder, StreamAudioPacket, StreamDecoder},
-        input::SystemAudioCapture,
+        input::{PacketSink, SystemAudioCapture},
     },
 };
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, SendError, Sender, TrySendError};
 use log::{info, warn};
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use video::codec::FfmpegDecoder;
@@ -49,9 +49,8 @@ use video::{
 
 pub use crate::viewlog::PresentTally;
 use crate::{
-    network::NetworkControl,
+    network::{MediaOut, NetworkControl},
     viewlog::{ShareState, Sharing, Viewing},
-    WakeFn,
 };
 
 /// What the UI did with each watched stream's frames since its last
@@ -100,6 +99,16 @@ pub enum ScreenControl {
     /// writing an empty summary every 5 s, and its thread polling at
     /// 250 Hz, until the sharer stopped (2026-10-08, both phones).
     StopWatching { client_id: u64 },
+    /// Whether anyone can see a stream's picture: `client_id: None` is
+    /// the whole app (a phone going to the background and back), a peer
+    /// is that viewer's window (minimized and restored on the desktop).
+    /// Unseen, a stream's frames are dropped before the jitter buffer —
+    /// nothing is decoded — while its audio plays on; seen again, it
+    /// waits for a keyframe and asks for one (review P1-7).
+    SetVisible {
+        client_id: Option<u64>,
+        visible: bool,
+    },
     /// An encoded system audio packet arrived from the network for a remote peer.
     IncomingSystemAudio {
         client_id: u64,
@@ -153,6 +162,29 @@ pub enum ScreenControl {
     Shutdown,
 }
 
+/// What travels with a decoded frame from the screen thread to the
+/// window that shows it: whose it is, its size, and the figures the
+/// viewer's stats line and the stream's summary report. One struct all
+/// the way (it was listed field by field four times; review P3-36): a
+/// new figure is added here and where it is read.
+#[derive(Debug, Clone, Copy)]
+pub struct FrameMeta {
+    pub client_id: u64,
+    pub width: u32,
+    pub height: u32,
+    /// The encoded frame's size.
+    pub frame_bytes: usize,
+    pub seq: u32,
+    /// When the jitter buffer released the frame for decoding (after
+    /// its playout hold), so `decoded_at - enqueued_at` is decode
+    /// latency alone.
+    pub enqueued_at: Instant,
+    pub decoded_at: Instant,
+    pub buffer_depth_ms: f32,
+    pub buffer_target_ms: f32,
+    pub buffer_jitter_ms: f32,
+}
+
 #[derive(Debug, Clone)]
 pub enum ScreenEvent {
     /// Our screen share started successfully.
@@ -167,22 +199,9 @@ pub enum ScreenEvent {
     /// gets shown. They come from `video::pool`: give them back with
     /// `video::pool::recycle` when done.
     FrameReady {
-        client_id: u64,
-        width: u32,
-        height: u32,
+        meta: FrameMeta,
         pixels: Vec<u8>,
         format: video::PictureFormat,
-        frame_bytes: usize,
-        seq: u32,
-        is_keyframe: bool,
-        /// When the jitter buffer released the frame for decoding (after
-        /// its playout hold), so `decoded_at - enqueued_at` is decode
-        /// latency alone.
-        enqueued_at: Instant,
-        decoded_at: Instant,
-        buffer_depth_ms: f32,
-        buffer_target_ms: f32,
-        buffer_jitter_ms: f32,
     },
     /// A remote peer started sharing (so UI can show "Watch" button).
     PeerStartedSharing {
@@ -200,34 +219,27 @@ pub enum ScreenEvent {
 pub struct SharedScreenState {
     /// Whether we are currently sharing.
     pub is_sharing: Arc<AtomicBool>,
-    /// Number of frames encoded so far.
-    pub frames_encoded: Arc<AtomicU64>,
     /// Size of the last encoded frame in bytes.
     pub last_frame_bytes: Arc<AtomicU32>,
     /// Encode time of the last frame in microseconds.
     pub last_encode_us: Arc<AtomicU32>,
-    /// Capture time of the last frame in microseconds.
-    pub last_capture_us: Arc<AtomicU32>,
     /// Selected quality by streamer
     pub current_quality: Arc<Mutex<Option<Quality>>>,
     /// Worst packet loss among our viewers, in percent, stored as f32
     /// bits — read with `f32::from_bits`. Updated ~1/s while sharing.
     pub stream_loss_pct: Arc<AtomicU32>,
-    /// Worst viewer RTT in milliseconds, stored as f32 bits.
-    pub stream_rtt_ms: Arc<AtomicU32>,
     /// Number of viewers currently subscribed to our stream.
     pub stream_viewers: Arc<AtomicU32>,
     /// Current capture pace as a percentage of the preset fps
     /// (100 / 75 / 50) — stepped down under viewer keyframe-request
     /// distress, see `PACE_SCALES`.
     pub fps_scale_pct: Arc<AtomicU32>,
-    /// Current encoder bitrate as a percentage of the preset (100 at
-    /// full rate) — stepped down under uplink loss, see
-    /// `RATE_LADDER_PCT`.
-    pub bitrate_scale_pct: Arc<AtomicU32>,
     /// Filled by the frontend as it shows watched streams; read by the
     /// viewer's summary line.
     pub present: PresentTallies,
+    /// The voice output picked in Settings, set by the frontend: stream
+    /// audio plays there too, and moves when it changes (review P1-19).
+    pub stream_output: audio::stream::OutputSelection,
 }
 
 impl Default for SharedScreenState {
@@ -241,25 +253,93 @@ impl SharedScreenState {
     pub fn new() -> Self {
         Self {
             is_sharing: Arc::new(AtomicBool::new(false)),
-            frames_encoded: Arc::new(AtomicU64::new(0)),
             last_frame_bytes: Arc::new(AtomicU32::new(0)),
             last_encode_us: Arc::new(AtomicU32::new(0)),
-            last_capture_us: Arc::new(AtomicU32::new(0)),
             current_quality: Arc::new(Mutex::new(None)),
             stream_loss_pct: Arc::new(AtomicU32::new(0)),
-            stream_rtt_ms: Arc::new(AtomicU32::new(0)),
             stream_viewers: Arc::new(AtomicU32::new(0)),
             fps_scale_pct: Arc::new(AtomicU32::new(100)),
-            bitrate_scale_pct: Arc::new(AtomicU32::new(100)),
             present: Arc::new(Mutex::new(HashMap::new())),
+            stream_output: audio::stream::OutputSelection::default(),
         }
     }
 }
 
 // ── Public API ──────────────────────────────────────────────────────────
 
+/// The way in to the screen threads: one sender to callers, two
+/// threads behind it. Our own share (capture, encode) and the streams
+/// we watch (reassembly, decode, their audio) each run the same loop on
+/// a thread of their own, and a command goes to the one it is for. On
+/// one thread a sharer who also watched lost capture ticks to decoding:
+/// a decode pass may take 24 ms, a 60 fps tick comes every 16.7 (review
+/// P2-44).
+#[derive(Clone)]
+pub struct ScreenTx {
+    share: Sender<ScreenControl>,
+    watch: Sender<ScreenControl>,
+}
+
+impl ScreenTx {
+    /// The thread `ctrl` is for; `None` for the one command both get.
+    fn lane(&self, ctrl: &ScreenControl) -> Option<&Sender<ScreenControl>> {
+        match ctrl {
+            ScreenControl::StartSharing { .. }
+            | ScreenControl::StopSharing
+            | ScreenControl::RestartSystemAudio
+            | ScreenControl::ForceKeyframe
+            | ScreenControl::StreamHealth { .. }
+            | ScreenControl::UplinkStats { .. } => Some(&self.share),
+            ScreenControl::IncomingVideoFrame { .. }
+            | ScreenControl::PeerStartedSharing { .. }
+            | ScreenControl::PeerStoppedSharing { .. }
+            | ScreenControl::Watch { .. }
+            | ScreenControl::StopWatching { .. }
+            | ScreenControl::SetVisible { .. }
+            | ScreenControl::IncomingSystemAudio { .. }
+            | ScreenControl::SetStreamVolume { .. }
+            | ScreenControl::MuteStream { .. } => Some(&self.watch),
+            ScreenControl::Shutdown => None,
+        }
+    }
+
+    /// Send, waiting for room.
+    ///
+    /// # Errors
+    /// The thread is gone; the command comes back.
+    pub fn send(&self, ctrl: ScreenControl) -> Result<(), SendError<ScreenControl>> {
+        if let Some(lane) = self.lane(&ctrl) {
+            return lane.send(ctrl);
+        }
+        let share = self.share.send(ScreenControl::Shutdown);
+        self.watch.send(ctrl).and(share)
+    }
+
+    /// Send if there is room.
+    ///
+    /// # Errors
+    /// The thread is behind (`Full`) or gone; the command comes back.
+    pub fn try_send(&self, ctrl: ScreenControl) -> Result<(), TrySendError<ScreenControl>> {
+        if let Some(lane) = self.lane(&ctrl) {
+            return lane.try_send(ctrl);
+        }
+        let share = self.share.try_send(ScreenControl::Shutdown);
+        self.watch.try_send(ctrl).and(share)
+    }
+}
+
+/// One channel for everything: a test's stand-in for the threads.
+impl From<Sender<ScreenControl>> for ScreenTx {
+    fn from(tx: Sender<ScreenControl>) -> Self {
+        Self {
+            share: tx.clone(),
+            watch: tx,
+        }
+    }
+}
+
 pub struct ScreenThreadHandle {
-    pub tx: Sender<ScreenControl>,
+    pub tx: ScreenTx,
     pub event_rx: Receiver<ScreenEvent>,
     pub shared: SharedScreenState,
     /// Joined by the frontend on shutdown (with a timeout).
@@ -267,23 +347,51 @@ pub struct ScreenThreadHandle {
 }
 
 impl ScreenThreadHandle {
-    pub fn spawn(network_tx: Sender<NetworkControl>, wake: WakeFn) -> Self {
+    /// Start the screen threads ([`ScreenTx`]): `screen-share` for our
+    /// own share, `screen-watch` for the streams we watch. Neither
+    /// wakes the UI: whoever reads `event_rx` does — the frontend's
+    /// present thread, which wakes the UI once it has forwarded an
+    /// event or prepared a frame. A wake here as well was an empty
+    /// drain of the UI per decoded frame, with a phone in the
+    /// background too (review P1-8). A thread with nothing to do blocks
+    /// on its channel and costs nothing. Dropping the handle stops
+    /// both.
+    #[must_use]
+    pub fn spawn(network_tx: Sender<NetworkControl>, media_tx: Sender<MediaOut>) -> Self {
         // 256 slots: at 30fps inbound + outbound control messages, 64 was
         // too tight and caused try_send drops during active streaming.
-        let (tx, control_rx) = bounded::<ScreenControl>(256);
+        let (share_tx, share_rx) = bounded::<ScreenControl>(256);
+        let (watch_tx, watch_rx) = bounded::<ScreenControl>(256);
         let (event_tx, event_rx) = bounded::<ScreenEvent>(256);
         let shared = SharedScreenState::new();
 
+        let share = {
+            let (event_tx, network_tx, media_tx, shared) = (
+                event_tx.clone(),
+                network_tx.clone(),
+                media_tx.clone(),
+                shared.clone(),
+            );
+            thread::Builder::new()
+                .name("screen-share".into())
+                .spawn(move || run_screen_loop(share_rx, event_tx, network_tx, media_tx, shared))
+                .expect("failed to spawn screen thread")
+        };
         let shared_clone = shared.clone();
+        // The one handle callers join: it ends when both have.
         let join_handle = thread::Builder::new()
-            .name("screen-share".into())
+            .name("screen-watch".into())
             .spawn(move || {
-                run_screen_loop(control_rx, event_tx, network_tx, shared_clone, wake);
+                run_screen_loop(watch_rx, event_tx, network_tx, media_tx, shared_clone);
+                let _ = share.join();
             })
             .expect("failed to spawn screen thread");
 
         Self {
-            tx,
+            tx: ScreenTx {
+                share: share_tx,
+                watch: watch_tx,
+            },
             event_rx,
             shared,
             join_handle: Some(join_handle),
@@ -319,10 +427,11 @@ fn report_share_telemetry(
     shared: &SharedScreenState,
 ) {
     const TELEMETRY_INTERVAL: Duration = Duration::from_secs(10);
-    let preset = state.quality.to_string();
+    // Called on every capture tick: a name, not a `String` made for it
+    // each time (review P3-16).
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // a percentage
     let share = ShareState {
-        preset: &preset,
+        preset: state.quality.label(),
         bitrate_pct: state.ladder.pct(),
         fps_pct: (PACE_SCALES[state.pace_idx] * 100.0).round() as u32,
         viewers: shared.stream_viewers.load(Ordering::Relaxed),
@@ -355,7 +464,7 @@ fn report_share_telemetry(
     )]
     let _ = network_tx.try_send(NetworkControl::TelemetrySharing(Some(
         protocol::SharingSample {
-            preset: state.quality.to_string(),
+            preset: state.quality.label().to_string(),
             rung_pct: state.ladder.pct(),
             fps_encoded: encoded as f32 / secs,
             fps_scale_pct: (PACE_SCALES[state.pace_idx] * 100.0).round() as u32,
@@ -385,6 +494,10 @@ struct CaptureState {
     /// frames must keep flowing until one ships. Cleared when a
     /// keyframe AU is sent.
     keyframe_burst_until: Option<Instant>,
+    /// The last change went into an encoder that hands out an access
+    /// unit only when given another frame (`output_needs_input`, AMF):
+    /// the next still tick repeats the held frame once to bring it out.
+    flush_owed: bool,
     /// Rolling 10 s telemetry: (window start, fresh captures, skipped
     /// unchanged ticks, encoded AUs, single-AU encodes, multi-AU
     /// encodes). The last two measure output *spacing*: multi-AU
@@ -399,6 +512,9 @@ struct CaptureState {
     /// System audio capture — started alongside video, sends Opus stereo
     /// packets to the network. `None` if platform doesn't support it.
     system_audio: Option<SystemAudioCapture>,
+    /// Not before this is a capture that stopped by itself restarted
+    /// again (`revive_system_audio`).
+    system_audio_retry: Option<Instant>,
     /// Encoder bitrate ladder (see "Sender-side adaptation").
     ladder: BitrateLadder,
     /// The sharer's summary line (`viewlog`).
@@ -702,19 +818,11 @@ impl BitrateLadder {
 }
 
 /// Feed one uplink sample to the ladder and apply its decision.
-fn adapt_bitrate(
-    state: &mut CaptureState,
-    now: Instant,
-    link: LinkSample,
-    shared: &SharedScreenState,
-) {
+fn adapt_bitrate(state: &mut CaptureState, now: Instant, link: LinkSample) {
     state.uplink_loss_pct = link.loss_pct;
     let from = state.ladder.pct();
     if let Some(change) = state.ladder.sample(now, link) {
         state.encoder.set_bitrate_scale_pct(change.pct);
-        shared
-            .bitrate_scale_pct
-            .store(change.pct, Ordering::Relaxed);
         info!(
             "bitrate ladder: {from}% → {}% ({} kbit/s; {})",
             change.pct,
@@ -752,11 +860,12 @@ const HEALTH_LOG_INTERVAL: Duration = Duration::from_secs(5);
 
 /// While the screen is static (streaming backend reports Unchanged),
 /// re-encode the held frame this often. Identical-content P-frames are
-/// near-zero bytes and the encoder's 2 s IDR cadence rides on top, so a
-/// static share costs a tiny fraction of full-rate encoding while
-/// joining viewers still get a picture within the keyframe interval.
-/// A pending forced keyframe (viewer waiting on an IDR) bypasses this
-/// and encodes on the next tick.
+/// near-zero bytes, and the encoder leaves them out of its keyframe
+/// cadence (`encode_repeat`; a still share sent a full IDR every 2 s
+/// before — review P2-41), so a static share costs next to nothing. A
+/// joining viewer asks for its keyframe: a pending forced keyframe
+/// (viewer waiting on an IDR) bypasses this and encodes on the next
+/// tick.
 const STATIC_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Upper bound on a keyframe "burst" (see `CaptureState::keyframe_burst_until)`:
@@ -767,7 +876,69 @@ const STATIC_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 /// misbehaving encoder can't pin us at full rate forever.
 const KEYFRAME_BURST_MAX: Duration = Duration::from_secs(5);
 
+/// How long a system-audio capture that stopped by itself waits before
+/// it is started again (and again, if it keeps stopping).
+const SYSTEM_AUDIO_RETRY: Duration = Duration::from_secs(10);
+
+/// Stop the share's system-audio capture, if any, and start a new one —
+/// best-effort: a share without sound is still a share.
+fn restart_system_audio(state: &mut CaptureState, media_tx: &Sender<MediaOut>, why: &str) {
+    // Stop the old capture (drops the dead WASAPI loopback stream).
+    if let Some(mut old) = state.system_audio.take() {
+        old.stop();
+        info!("System audio capture stopped ({why})");
+    }
+    match SystemAudioCapture::new(Arc::new(AudioStats::new()), system_audio_sink(media_tx)) {
+        Ok(mut cap) => match cap.start() {
+            Ok(()) => {
+                info!("System audio capture restarted ({why})");
+                state.system_audio = Some(cap);
+            }
+            Err(e) => warn!("System audio capture restart failed ({why}): {e}"),
+        },
+        Err(e) => warn!("System audio capture unavailable ({why}): {e}"),
+    }
+}
+
+/// A system-audio capture that gave up (its device went, the audio
+/// engine kept failing) is started again. It used to log that the share
+/// went on without sound and leave it so until the share ended (review
+/// P2-22). Called on every capture tick: two loads when all is well.
+fn revive_system_audio(state: &mut CaptureState, media_tx: &Sender<MediaOut>) {
+    if !state
+        .system_audio
+        .as_ref()
+        .is_some_and(SystemAudioCapture::failed)
+    {
+        return;
+    }
+    let now = Instant::now();
+    if state.system_audio_retry.is_some_and(|at| now < at) {
+        return;
+    }
+    state.system_audio_retry = Some(now + SYSTEM_AUDIO_RETRY);
+    restart_system_audio(state, media_tx, "it stopped by itself");
+}
+
 /// The capture interval at the current pace.
+/// Our share's sound goes to the network thread as each 20 ms packet is
+/// encoded, from the encoder's own thread. It used to wait for this
+/// thread's capture tick and leave in bursts of a frame interval (33 ms
+/// at 30 fps, 67 at the slowest pace), which every viewer had to buffer
+/// on top (PRODUCTION-PLAN.md LAT-2). A full channel drops the packet.
+fn system_audio_sink(media_tx: &Sender<MediaOut>) -> PacketSink {
+    let media_tx = media_tx.clone();
+    Arc::new(move |packet| {
+        let sent = media_tx.try_send(MediaOut::SystemAudio {
+            seq: packet.seq,
+            channels: packet.channels,
+            duration_ms: u16::from(packet.duration_ms),
+            data: packet.data,
+        });
+        !matches!(sent, Err(TrySendError::Disconnected(_)))
+    })
+}
+
 fn effective_frame_interval(state: &CaptureState) -> Duration {
     state
         .quality
@@ -873,7 +1044,6 @@ struct PeerStream {
 struct Fed {
     seq: u32,
     frame_bytes: usize,
-    is_keyframe: bool,
     /// The sender's capture timestamp (for "behind live").
     sent_at: u32,
     /// When the jitter buffer released it.
@@ -897,7 +1067,69 @@ struct ScreenState {
     decoder_failed: HashSet<u64>,
     /// Peers whose viewer we closed: their late frames are dropped.
     unwatched: HashSet<u64>,
+    /// Nobody sees any stream: the phone app is in the background.
+    host_hidden: bool,
+    /// Peers whose viewer window is minimized.
+    minimized: HashSet<u64>,
     running: bool,
+}
+
+impl ScreenState {
+    /// Whether anyone can see `client_id`'s picture right now.
+    fn sees(&self, client_id: u64) -> bool {
+        !self.host_hidden && !self.minimized.contains(&client_id)
+    }
+
+    /// [`ScreenControl::SetVisible`].
+    fn set_visible(&mut self, client_id: Option<u64>, visible: bool) {
+        let unseen: Vec<u64> = self
+            .peer_streams
+            .keys()
+            .copied()
+            .filter(|&id| !self.sees(id))
+            .collect();
+        match client_id {
+            None => self.host_hidden = !visible,
+            Some(id) if visible => {
+                self.minimized.remove(&id);
+            }
+            Some(id) => {
+                self.minimized.insert(id);
+            }
+        }
+        // A stream seen again starts over from a keyframe: the frames in
+        // between were never decoded. The request goes out with the next
+        // drain, once (the buffer rate-limits it).
+        let now = Instant::now();
+        for id in unseen {
+            if self.sees(id)
+                && let Some(stream) = self.peer_streams.get_mut(&id)
+            {
+                stream.jitter_buffer.wait_for_keyframe(now);
+                log::debug!("video from {id} on screen again: asking for a keyframe");
+            }
+        }
+    }
+}
+
+/// When the loop next has work of its own: the next capture tick while
+/// sharing, and per watched stream the jitter buffer's next release, a
+/// picture its decoder may still hand out, its next log line. `None`
+/// when only a command can bring work.
+fn next_wake(st: &ScreenState, next_capture: Instant, now: Instant) -> Option<Instant> {
+    let capture = st.capture.is_some().then_some(next_capture);
+    st.peer_streams
+        .values()
+        .flat_map(|s| {
+            [
+                s.jitter_buffer.next_due(now),
+                s.decoder.next_poll(now),
+                Some(s.log.next_due()),
+            ]
+        })
+        .flatten()
+        .chain(capture)
+        .min()
 }
 
 // ── Thread loop ─────────────────────────────────────────────────────────
@@ -906,52 +1138,44 @@ fn run_screen_loop(
     control_rx: Receiver<ScreenControl>,
     event_tx: Sender<ScreenEvent>,
     network_tx: Sender<NetworkControl>,
+    media_tx: Sender<MediaOut>,
     shared: SharedScreenState,
-    wake: WakeFn,
 ) {
     let mut st = ScreenState {
         capture: None,
         peer_streams: HashMap::new(),
         decoder_failed: HashSet::new(),
         unwatched: HashSet::new(),
+        host_hidden: false,
+        minimized: HashSet::new(),
         running: true,
     };
     let mut next_capture = Instant::now();
+    // Whether this thread holds `video::pool` for its pictures, and the
+    // 1 ms timer it holds with it.
+    let mut pooling = false;
+    // (Held for what dropping it does; never read.)
+    let mut _fine_timer: Option<audio::TimerResolutionGuard> = None;
 
     while st.running {
+        // Sleep until the earliest thing with a time of its own (review
+        // P1-7): a capture tick, a frame's playout slot, a picture the
+        // decoder may still hand out, a stream's log line. Frames and
+        // commands wake the loop through the channel. It used to poll
+        // every 4 ms while any stream was watched — 250 wakes a second
+        // for a still slide, or a phone in the background.
         let now = Instant::now();
-
-        let is_viewing = !st.peer_streams.is_empty();
-        let is_capturing = st.capture.is_some();
-
-        if is_capturing {
-            // ── Sharing mode ────────────────────────────────────────
-            let time_to_capture = next_capture.saturating_duration_since(now);
-
-            match control_rx.recv_timeout(time_to_capture) {
-                Ok(ctrl) => handle_control(ctrl, &mut st, &event_tx, &network_tx, &shared, &wake),
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
-                Err(_) => break,
-            }
-        } else if is_viewing {
-            // ── Viewing mode ────────────────────────────────────────
-            // Use a short timeout instead of blocking recv() so we can
-            // drain the jitter buffer even when no new packets arrive.
-            // 4ms gives ~250Hz drain rate — fast enough for 60fps with
-            // headroom, while keeping CPU usage negligible.
-            match control_rx.recv_timeout(Duration::from_millis(4)) {
-                Ok(ctrl) => handle_control(ctrl, &mut st, &event_tx, &network_tx, &shared, &wake),
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
-                Err(_) => break,
-            }
-        } else {
-            // ── Idle mode ───────────────────────────────────────────
-            // Nothing to capture and no jitter buffers to drain —
-            // block until a command arrives instead of waking 10×/s.
-            match control_rx.recv() {
-                Ok(ctrl) => handle_control(ctrl, &mut st, &event_tx, &network_tx, &shared, &wake),
-                Err(_) => break,
-            }
+        let received = match next_wake(&st, next_capture, now) {
+            Some(at) => control_rx.recv_timeout(at.saturating_duration_since(now)),
+            // Nothing to capture or drain: block until a command comes.
+            None => control_rx
+                .recv()
+                .map_err(|_| RecvTimeoutError::Disconnected),
+        };
+        match received {
+            Ok(ctrl) => handle_control(ctrl, &mut st, &event_tx, &network_tx, &media_tx, &shared),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
         }
 
         // Drain ALL pending control messages. This is critical: each
@@ -959,7 +1183,24 @@ fn run_screen_loop(
         // (nanoseconds), so we can drain hundreds of pending packets
         // without blocking.
         while let Ok(ctrl) = control_rx.try_recv() {
-            handle_control(ctrl, &mut st, &event_tx, &network_tx, &shared, &wake);
+            handle_control(ctrl, &mut st, &event_tx, &network_tx, &media_tx, &shared);
+        }
+
+        // Frame buffers go round only while a picture is made or
+        // shown; with no share and nothing watched they are freed
+        // (review P2-43).
+        let busy = st.capture.is_some() || !st.peer_streams.is_empty();
+        if busy != pooling {
+            pooling = busy;
+            if busy {
+                video::pool::retain();
+            } else {
+                video::pool::release();
+            }
+            // Capture ticks and playout slots are short timed waits:
+            // on Windows they need the 1 ms timer, which the voice
+            // engine now holds only in a room (review P2-35).
+            _fine_timer = busy.then(audio::TimerResolutionGuard::acquire);
         }
 
         // ── Drain jitter buffers → decode → emit ────────────────────
@@ -970,27 +1211,13 @@ fn run_screen_loop(
             &mut st.peer_streams,
             &event_tx,
             &network_tx,
-            &wake,
             &shared.present,
         );
 
         if let Some(state) = &mut st.capture
             && Instant::now() >= next_capture
         {
-            let cap_start = Instant::now();
-            capture_and_encode(state, &network_tx, &shared);
-
-            // Drain system audio packets and send to network
-            if let Some(ref sys_audio) = state.system_audio {
-                for pkt in sys_audio.drain_packets() {
-                    let _ = network_tx.try_send(NetworkControl::SendSystemAudio {
-                        seq: pkt.seq,
-                        channels: pkt.channels,
-                        duration_ms: u16::from(pkt.duration_ms),
-                        data: pkt.data,
-                    });
-                }
-            }
+            capture_and_encode(state, &network_tx, &media_tx, &shared);
 
             // Advance from the previous target (not from now) so the
             // capture cadence stays exact instead of drifting. The
@@ -1001,17 +1228,15 @@ fn run_screen_loop(
             if next_capture < Instant::now() {
                 next_capture = Instant::now();
             }
-
-            let cap_ms = cap_start.elapsed().as_secs_f32() * 1000.0;
-            log::debug!(
-                "ENCODE seq={} {cap_ms:.0}ms (budget {:.1}ms)",
-                state.seq,
-                effective_frame_interval(state).as_secs_f32() * 1000.0
-            );
         }
     }
 
-    shared.is_sharing.store(false, Ordering::Relaxed);
+    if pooling {
+        video::pool::release();
+    }
+    if st.capture.is_some() {
+        shared.is_sharing.store(false, Ordering::Relaxed);
+    }
     info!("Screen thread stopped");
 }
 
@@ -1026,7 +1251,6 @@ fn emit_picture(
     fed: Fed,
     took: Option<Duration>,
     event_tx: &Sender<ScreenEvent>,
-    wake: &WakeFn,
 ) -> bool {
     let decoded_at = Instant::now();
     stream.frames_decoded_total += 1;
@@ -1052,22 +1276,24 @@ fn emit_picture(
     }
     event_tx
         .send(ScreenEvent::FrameReady {
-            client_id,
-            width: decoded.width,
-            height: decoded.height,
+            meta: FrameMeta {
+                client_id,
+                width: decoded.width,
+                height: decoded.height,
+                frame_bytes: fed.frame_bytes,
+                seq: fed.seq,
+                enqueued_at: fed.enqueued_at,
+                decoded_at,
+                buffer_depth_ms: stream.jitter_buffer.depth_ms(),
+                // The buffer's steady hold; the reorder window this
+                // showed is gone (review P1-12).
+                buffer_target_ms: stream.jitter_buffer.playout_delay_ms(),
+                buffer_jitter_ms: stream.jitter_buffer.adaptive_jitter_ms(),
+            },
             pixels: decoded.data,
             format: decoded.format,
-            frame_bytes: fed.frame_bytes,
-            seq: fed.seq,
-            is_keyframe: fed.is_keyframe,
-            enqueued_at: fed.enqueued_at,
-            decoded_at,
-            buffer_depth_ms: stream.jitter_buffer.depth_ms(),
-            buffer_target_ms: stream.jitter_buffer.adaptive_target_ms(),
-            buffer_jitter_ms: stream.jitter_buffer.adaptive_jitter_ms(),
         })
         .ok();
-    wake();
     report
 }
 
@@ -1081,7 +1307,6 @@ fn drain_and_decode(
     peer_streams: &mut HashMap<u64, PeerStream>,
     event_tx: &Sender<ScreenEvent>,
     network_tx: &Sender<NetworkControl>,
-    wake: &WakeFn,
     present: &PresentTallies,
 ) {
     // Cap decode work per pass. An unbounded pass on a backlog spends
@@ -1106,7 +1331,6 @@ fn drain_and_decode(
             let fed = Fed {
                 seq,
                 frame_bytes: packet.data.len(),
-                is_keyframe,
                 sent_at: packet.timestamp_ms,
                 enqueued_at: Instant::now(),
             };
@@ -1146,11 +1370,12 @@ fn drain_and_decode(
             match result {
                 Ok(Some(decoded)) => {
                     report_viewing |=
-                        emit_picture(client_id, stream, decoded, fed, Some(took), event_tx, wake);
+                        emit_picture(client_id, stream, decoded, fed, Some(took), event_tx);
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    warn!("Decode error for peer {client_id} seq {seq}: {e}");
+                    log::debug!("Decode error for peer {client_id} seq {seq}: {e}");
+                    stream.log.on_decode_error(&e);
                 }
             }
             if pass_start.elapsed() >= DECODE_BUDGET {
@@ -1162,18 +1387,20 @@ fn drain_and_decode(
         if !fed_any && let Some(fed) = stream.last_fed {
             match stream.decoder.poll() {
                 Ok(Some(decoded)) => {
-                    report_viewing |=
-                        emit_picture(client_id, stream, decoded, fed, None, event_tx, wake);
+                    report_viewing |= emit_picture(client_id, stream, decoded, fed, None, event_tx);
                 }
                 Ok(None) => {}
-                Err(e) => warn!("Decode error for peer {client_id} (between frames): {e}"),
+                Err(e) => {
+                    log::debug!("Decode error for peer {client_id} (between frames): {e}");
+                    stream.log.on_decode_error(&e);
+                }
             }
         }
 
-        // The buffer raises this when it recovered by skipping past lost
-        // packets without a keyframe (stream is showing artifacts) or
-        // when it's been watching undecodable deltas while unprimed.
-        // Rate-limited internally, so relaying every signal is safe.
+        // The buffer raises this when a frame never came and no keyframe
+        // was buffered to go on from (it froze), or when it has been
+        // watching undecodable deltas while unprimed. Rate-limited
+        // internally, so relaying every signal is safe.
         if stream.jitter_buffer.take_keyframe_request() {
             // Counted (and a freeze named) in the stream's log lines.
             log::debug!("Requesting keyframe from peer {client_id}");
@@ -1217,8 +1444,8 @@ fn handle_control(
     st: &mut ScreenState,
     event_tx: &Sender<ScreenEvent>,
     network_tx: &Sender<NetworkControl>,
+    media_tx: &Sender<MediaOut>,
     shared: &SharedScreenState,
-    wake: &WakeFn,
 ) {
     match ctrl {
         ScreenControl::StartSharing {
@@ -1239,7 +1466,6 @@ fn handle_control(
                     event_tx
                         .send(ScreenEvent::Error(format!("Capture init: {e}")))
                         .ok();
-                    wake();
                     return;
                 }
             };
@@ -1251,7 +1477,6 @@ fn handle_control(
                         event_tx
                             .send(ScreenEvent::Error(format!("Encoder init: {e}")))
                             .ok();
-                        wake();
                         return;
                     }
                 };
@@ -1262,7 +1487,10 @@ fn handle_control(
             );
 
             // Start system audio capture (best-effort — non-fatal if unsupported)
-            let system_audio = match SystemAudioCapture::new(Arc::new(AudioStats::new())) {
+            let system_audio = match SystemAudioCapture::new(
+                Arc::new(AudioStats::new()),
+                system_audio_sink(media_tx),
+            ) {
                 Ok(mut cap) => match cap.start() {
                     Ok(()) => {
                         info!("System audio capture started for screen share");
@@ -1286,9 +1514,11 @@ fn handle_control(
                 seq: 0,
                 next_refresh: Instant::now(),
                 keyframe_burst_until: None,
+                flush_owed: false,
                 telemetry: (Instant::now(), 0, 0, 0, 0, 0),
                 keyframes_logged: 0,
                 system_audio,
+                system_audio_retry: None,
                 ladder: BitrateLadder::new(quality),
                 log: Sharing::new(Instant::now()),
                 offered_bytes: 0,
@@ -1312,11 +1542,8 @@ fn handle_control(
                 },
             ));
             shared.is_sharing.store(true, Ordering::Relaxed);
-            shared.frames_encoded.store(0, Ordering::Relaxed);
             shared.fps_scale_pct.store(100, Ordering::Relaxed);
-            shared.bitrate_scale_pct.store(100, Ordering::Relaxed);
             shared.stream_loss_pct.store(0, Ordering::Relaxed);
-            shared.stream_rtt_ms.store(0, Ordering::Relaxed);
             shared.stream_viewers.store(0, Ordering::Relaxed);
             *shared.current_quality.lock().unwrap() = Some(quality);
 
@@ -1330,16 +1557,13 @@ fn handle_control(
             });
 
             event_tx.send(ScreenEvent::SharingStarted { quality }).ok();
-            wake();
         }
 
         ScreenControl::StopSharing => {
             if st.capture.take().is_some() {
                 shared.is_sharing.store(false, Ordering::Relaxed);
                 shared.fps_scale_pct.store(100, Ordering::Relaxed);
-                shared.bitrate_scale_pct.store(100, Ordering::Relaxed);
                 shared.stream_loss_pct.store(0, Ordering::Relaxed);
-                shared.stream_rtt_ms.store(0, Ordering::Relaxed);
                 shared.stream_viewers.store(0, Ordering::Relaxed);
                 let _ = network_tx.send(NetworkControl::ScreenShareStop);
                 let _ = network_tx.try_send(NetworkControl::TelemetrySharing(None));
@@ -1348,15 +1572,13 @@ fn handle_control(
                 ));
                 *shared.current_quality.lock().unwrap() = None;
                 event_tx.send(ScreenEvent::SharingStopped).ok();
-                wake();
                 info!("Screen share stopped");
             }
         }
 
-        // ── Jitter buffer push (the critical change) ────────────────
-        // Previously this called decode_incoming_frame() which blocked
-        // on FFmpeg decode. Now it just pushes into the BTreeMap —
-        // nanoseconds instead of milliseconds.
+        // ── Jitter buffer push ──────────────────────────────────────
+        // Decoding happens in `drain_and_decode`; this only appends to
+        // the buffer, so a burst of frames never blocks the channel.
         ScreenControl::IncomingVideoFrame {
             client_id,
             seq,
@@ -1407,13 +1629,26 @@ fn handle_control(
                                 "Video decoder init failed: {e}"
                             )))
                             .ok();
-                        wake();
                         return;
                     }
                 }
             }
 
+            let seen = st.sees(client_id);
             if let Some(stream) = st.peer_streams.get_mut(&client_id) {
+                // Nobody can see the picture: a phone in the background
+                // or a minimized viewer. Decoding on (IOS-SPEC D42,
+                // ANDROID-SPEC D43) kept the first picture back current,
+                // at the price of every frame decoded — and on Android
+                // ~3 MB of planes copied out per 1080p frame — for as
+                // long as the app was away. Dropping them costs one
+                // keyframe on return, asked for at once (`SetVisible`),
+                // and the sharer sends one every 2 s anyway. The stream
+                // stays, so its audio (packets of its own) plays on.
+                if !seen {
+                    stream.log.on_unseen();
+                    return;
+                }
                 stream.jitter_buffer.push(BufferedPacket {
                     seq,
                     is_keyframe,
@@ -1441,17 +1676,18 @@ fn handle_control(
                     height,
                 })
                 .ok();
-            wake();
         }
 
         ScreenControl::Watch { client_id } => {
             st.unwatched.remove(&client_id);
+            st.minimized.remove(&client_id);
         }
 
         ScreenControl::StopWatching { client_id } => {
             // As below: the decoder, the buffer and the stream's audio
             // go; a new viewer starts from the next keyframe.
             st.unwatched.insert(client_id);
+            st.minimized.remove(&client_id);
             if st.peer_streams.remove(&client_id).is_some() {
                 log::debug!("stopped decoding peer {client_id}: viewer closed");
             }
@@ -1463,11 +1699,13 @@ fn handle_control(
             st.peer_streams.remove(&client_id);
             st.decoder_failed.remove(&client_id);
             st.unwatched.remove(&client_id);
+            st.minimized.remove(&client_id);
             event_tx
                 .send(ScreenEvent::PeerStoppedSharing { client_id })
                 .ok();
-            wake();
         }
+
+        ScreenControl::SetVisible { client_id, visible } => st.set_visible(client_id, visible),
 
         ScreenControl::IncomingSystemAudio {
             client_id,
@@ -1475,7 +1713,8 @@ fn handle_control(
             data,
         } => {
             if !st.unwatched.contains(&client_id) {
-                decode_incoming_system_audio(client_id, seq, data, &mut st.peer_streams);
+                let output = &shared.stream_output;
+                decode_incoming_system_audio(client_id, seq, data, &mut st.peer_streams, output);
             }
         }
 
@@ -1497,33 +1736,14 @@ fn handle_control(
 
         ScreenControl::RestartSystemAudio => {
             if let Some(state) = &mut st.capture {
-                // Stop the old capture (drops the dead WASAPI loopback stream)
-                if let Some(mut old) = state.system_audio.take() {
-                    old.stop();
-                    info!("System audio capture stopped for device rebuild");
-                }
-
-                // Rebuild — best-effort, non-fatal
-                match SystemAudioCapture::new(Arc::new(AudioStats::new())) {
-                    Ok(mut cap) => match cap.start() {
-                        Ok(()) => {
-                            info!("System audio capture restarted after device change");
-                            state.system_audio = Some(cap);
-                        }
-                        Err(e) => {
-                            warn!("System audio capture restart failed: {e}");
-                        }
-                    },
-                    Err(e) => {
-                        warn!("System audio capture unavailable after device change: {e}");
-                    }
-                }
+                restart_system_audio(state, media_tx, "device change");
             }
         }
 
         ScreenControl::ForceKeyframe => {
             if let Some(state) = &mut st.capture {
-                info!("Viewer requested keyframe — forcing IDR");
+                // Counted into the sharer's summary line.
+                state.log.on_keyframe_asked();
                 state.keyframe_requests += 1;
                 state.forced_keyframes += 1;
                 state.encoder.force_keyframe();
@@ -1547,9 +1767,6 @@ fn handle_control(
             shared
                 .stream_loss_pct
                 .store(worst_loss_pct.to_bits(), Ordering::Relaxed);
-            shared
-                .stream_rtt_ms
-                .store(worst_rtt_ms.to_bits(), Ordering::Relaxed);
             shared
                 .stream_viewers
                 .store(u32::from(viewers), Ordering::Relaxed);
@@ -1600,7 +1817,7 @@ fn handle_control(
                     kbps_up,
                     kbps_offered,
                 };
-                adapt_bitrate(state, now, link, shared);
+                adapt_bitrate(state, now, link);
                 recover_pace(state, now, shared);
             }
         }
@@ -1614,6 +1831,7 @@ fn handle_control(
 fn capture_and_encode(
     state: &mut CaptureState,
     network_tx: &Sender<NetworkControl>,
+    media_tx: &Sender<MediaOut>,
     shared: &SharedScreenState,
 ) {
     // Capture. For the streaming backend this is a non-blocking channel
@@ -1643,17 +1861,32 @@ fn capture_and_encode(
         CaptureStatus::Empty => {}
     }
     report_share_telemetry(state, network_tx, shared);
+    revive_system_audio(state, media_tx);
     let repeat = match status {
         CaptureStatus::Fresh => false,
         CaptureStatus::Unchanged => {
             // Nothing changed on screen. Encode anyway only if a viewer
-            // is waiting on a forced IDR or the periodic refresh is due
-            // — otherwise skip entirely: no swscale, no encoder work,
-            // no bytes on the wire, and no seq consumed.
+            // is waiting on a forced IDR, the periodic refresh is due, or
+            // the last change is stuck inside an encoder that hands out
+            // output only when given a frame (AMF: one repeat of the held
+            // frame brings it out, and the next tick's drain sends it).
+            // Otherwise skip: no swscale, no encoder work, no seq
+            // consumed — only what the encoder has finished goes out.
             let bursting = state.keyframe_burst_until.is_some_and(|until| now < until);
-            if !state.encoder.keyframe_pending() && !bursting && now < state.next_refresh {
+            let flush = std::mem::take(&mut state.flush_owed);
+            if !state.encoder.keyframe_pending() && !bursting && !flush && now < state.next_refresh
+            {
                 state.telemetry.2 += 1;
-                shared.last_capture_us.store(capture_us, Ordering::Relaxed);
+                // A hardware encoder may still hold the last frames of
+                // the change: they leave now, not with the next change or
+                // the 1 s refresh (review P1-13).
+                if state.encoder.frames_in_flight() > 0 {
+                    match state.encoder.drain() {
+                        Ok(aus) => send_encoded(state, aus, media_tx, shared),
+                        // A broken encoder says so on the next encode.
+                        Err(e) => log::debug!("Encoder drain failed: {e}"),
+                    }
+                }
                 return;
             }
             true
@@ -1661,13 +1894,12 @@ fn capture_and_encode(
         // Nothing captured yet (streaming backend rebuilding with no
         // held frame) — nothing to encode this tick.
         CaptureStatus::Empty => {
-            shared.last_capture_us.store(capture_us, Ordering::Relaxed);
             return;
         }
     };
 
-    // A repeated frame gets its timestamp advanced to "now" so PTS,
-    // keyframe cadence, and rate control keep tracking real time.
+    // A repeated frame gets its timestamp advanced to "now" so PTS and
+    // rate control keep tracking real time.
     let Some(frame) = state.capturer.frame(repeat) else {
         return;
     };
@@ -1678,7 +1910,12 @@ fn capture_and_encode(
     // gets its own sequence number — the receiver's jitter buffer treats
     // seq gaps as loss, so skipped/empty encodes must not consume seqs.
     let t1 = Instant::now();
-    let encoded_frames = match state.encoder.encode(frame) {
+    let encoded = if repeat {
+        state.encoder.encode_repeat(frame)
+    } else {
+        state.encoder.encode(frame)
+    };
+    let encoded_frames = match encoded {
         Ok(e) => e,
         Err(e) => {
             warn!("Encode failed: {e}");
@@ -1697,32 +1934,38 @@ fn capture_and_encode(
         _ => state.telemetry.5 += 1,
     }
     state.next_refresh = now + STATIC_REFRESH_INTERVAL;
-
-    shared.last_capture_us.store(capture_us, Ordering::Relaxed);
+    // A change went in: if the encoder keeps its output until the next
+    // submission, the first still tick repeats the frame once.
+    state.flush_owed = !repeat && state.encoder.output_needs_input();
     shared.last_encode_us.store(encode_us, Ordering::Relaxed);
+    send_encoded(state, encoded_frames, media_tx, shared);
+}
 
+/// Hand the encoder's access units to the network, one sequence number
+/// each — except frames too large to carry, which are dropped before
+/// they take one.
+fn send_encoded(
+    state: &mut CaptureState,
+    encoded_frames: Vec<EncodedFrame>,
+    media_tx: &Sender<MediaOut>,
+    shared: &SharedScreenState,
+) {
     for encoded in encoded_frames {
         if encoded.data.is_empty() {
             continue;
         }
 
-        let seq = state.seq;
-        state.seq = state.seq.wrapping_add(1);
         state.telemetry.3 += 1;
-
-        if encoded.is_keyframe {
-            log::debug!("Sent keyframe #{seq}: {} bytes", encoded.data.len());
-        }
 
         shared
             .last_frame_bytes
             .store(encoded.data.len() as u32, Ordering::Relaxed);
-        shared.frames_encoded.fetch_add(1, Ordering::Relaxed);
 
-        // A frame the chunker can't carry must not become a silent seq
-        // gap: every viewer would freeze and burn a PLI round trip
-        // (~700 ms) recovering. Drop it AND restart the GOP on the next
-        // frame — a one-frame hiccup instead. The retried keyframe is
+        // A frame the chunker can't carry is dropped before it takes a
+        // sequence number: a number that never arrives is a gap, and
+        // every viewer would freeze until a keyframe (review P1-12; the
+        // number used to be taken first). The GOP restarts on the next
+        // frame instead — a one-frame hiccup. The retried keyframe is
         // not smaller by itself: on AMF it is a fresh session's first
         // frame, which ignores rate control (2026-10-08: 287–522 KB in
         // a row, 425 KB from a session at 2.1 Mbit/s). So the encoder
@@ -1732,13 +1975,13 @@ fn capture_and_encode(
             state.log.on_too_large(encoded.data.len());
             match state.encoder.frame_too_large() {
                 Some(qp) => warn!(
-                    "encoded frame seq={seq} too large to send ({} KB, max {} KB): \
+                    "encoded frame too large to send ({} KB, max {} KB): \
                      keyframes now encode at QP ≥ {qp}",
                     encoded.data.len() / 1000,
                     protocol::MAX_VIDEO_FRAME_BYTES / 1000,
                 ),
                 None => log::debug!(
-                    "encoded frame seq={seq} too large to send ({} bytes) — dropped",
+                    "encoded frame too large to send ({} bytes) — dropped",
                     encoded.data.len()
                 ),
             }
@@ -1750,7 +1993,10 @@ fn capture_and_encode(
             continue;
         }
 
+        let seq = state.seq;
+        state.seq = state.seq.wrapping_add(1);
         if encoded.is_keyframe {
+            log::debug!("Sent keyframe #{seq}: {} bytes", encoded.data.len());
             // A real IDR is going out — any burst has done its job.
             state.keyframe_burst_until = None;
             // Bitstream self-check: prove (or disprove) that keyframe
@@ -1768,7 +2014,7 @@ fn capture_and_encode(
         }
         state.offered_bytes += encoded.data.len() as u64;
         state.log.on_sent(encoded.data.len(), encoded.is_keyframe);
-        let _ = network_tx.try_send(NetworkControl::SendVideoFrame {
+        let _ = media_tx.try_send(MediaOut::VideoFrame {
             seq,
             is_keyframe: encoded.is_keyframe,
             width: encoded.width as u16,
@@ -1790,6 +2036,7 @@ fn decode_incoming_system_audio(
     seq: u32,
     data: Vec<u8>,
     peer_streams: &mut HashMap<u64, PeerStream>,
+    output: &audio::stream::OutputSelection,
 ) {
     let Some(stream) = peer_streams.get_mut(&client_id) else {
         // No PeerStream yet — waiting for first video keyframe.
@@ -1800,7 +2047,7 @@ fn decode_incoming_system_audio(
 
     // Lazy-init the stream decoder + playback on first system audio packet.
     if stream.stream_audio.is_none() {
-        match stream_decoder::spawn(None, 1.0) {
+        match stream_decoder::spawn(output.clone(), 1.0) {
             Ok(decoder) => {
                 info!("Started stream audio decoder for peer {client_id}");
                 stream.stream_audio = Some(decoder);
@@ -1877,6 +2124,92 @@ fn create_decoder() -> Result<Box<dyn VideoDecoder + Send>, CodecError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A command reaches the thread it is for, and only that one;
+    /// `Shutdown` reaches both (review P2-44).
+    #[test]
+    fn commands_go_to_the_thread_they_are_for() {
+        let (share, share_rx) = bounded(8);
+        let (watch, watch_rx) = bounded(8);
+        let tx = ScreenTx { share, watch };
+
+        tx.send(ScreenControl::ForceKeyframe).unwrap();
+        tx.try_send(ScreenControl::StopSharing).unwrap();
+        tx.send(ScreenControl::RestartSystemAudio).unwrap();
+        assert!(watch_rx.try_recv().is_err(), "nothing of the share's");
+        assert!(matches!(
+            share_rx.try_recv(),
+            Ok(ScreenControl::ForceKeyframe)
+        ));
+        assert!(matches!(
+            share_rx.try_recv(),
+            Ok(ScreenControl::StopSharing)
+        ));
+        assert!(matches!(
+            share_rx.try_recv(),
+            Ok(ScreenControl::RestartSystemAudio)
+        ));
+
+        tx.send(ScreenControl::Watch { client_id: 7 }).unwrap();
+        tx.try_send(ScreenControl::PeerStoppedSharing { client_id: 7 })
+            .unwrap();
+        tx.send(ScreenControl::SetVisible {
+            client_id: None,
+            visible: false,
+        })
+        .unwrap();
+        assert!(share_rx.try_recv().is_err(), "nothing of the viewers'");
+        assert!(matches!(
+            watch_rx.try_recv(),
+            Ok(ScreenControl::Watch { client_id: 7 })
+        ));
+        assert!(matches!(
+            watch_rx.try_recv(),
+            Ok(ScreenControl::PeerStoppedSharing { client_id: 7 })
+        ));
+        assert!(matches!(
+            watch_rx.try_recv(),
+            Ok(ScreenControl::SetVisible { .. })
+        ));
+
+        tx.send(ScreenControl::Shutdown).unwrap();
+        assert!(matches!(share_rx.try_recv(), Ok(ScreenControl::Shutdown)));
+        assert!(matches!(watch_rx.try_recv(), Ok(ScreenControl::Shutdown)));
+
+        // A viewer that is behind does not hold up the share's commands.
+        for _ in 0..8 {
+            tx.try_send(ScreenControl::Watch { client_id: 1 }).unwrap();
+        }
+        assert!(matches!(
+            tx.try_send(ScreenControl::Watch { client_id: 1 }),
+            Err(TrySendError::Full(_))
+        ));
+        tx.try_send(ScreenControl::ForceKeyframe).unwrap();
+    }
+
+    /// Both threads start idle, take their commands and stop on
+    /// `Shutdown`; the one handle joins both.
+    #[test]
+    fn both_threads_stop_on_shutdown() {
+        let (network_tx, _network_rx) = bounded(8);
+        let (media_tx, _media_rx) = bounded(8);
+        let mut handle = ScreenThreadHandle::spawn(network_tx, media_tx);
+        handle.tx.send(ScreenControl::StopSharing).unwrap();
+        handle
+            .tx
+            .send(ScreenControl::StopWatching { client_id: 3 })
+            .unwrap();
+        let started = Instant::now();
+        handle.shutdown();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(handle.join_handle.is_none());
+        // Stopped: nobody takes commands any more.
+        assert!(handle.tx.send(ScreenControl::ForceKeyframe).is_err());
+        assert!(handle
+            .tx
+            .send(ScreenControl::Watch { client_id: 3 })
+            .is_err());
+    }
 
     mod bitrate_ladder {
         use super::*;
@@ -2143,6 +2476,190 @@ mod tests {
                 }
             }
             assert_eq!(last, Some(35));
+        }
+    }
+
+    /// Who can see a stream, and when the loop wakes (review P1-7).
+    mod visibility {
+        use super::*;
+
+        const PEER: u64 = 7;
+
+        struct Harness {
+            st: ScreenState,
+            event_tx: Sender<ScreenEvent>,
+            _event_rx: Receiver<ScreenEvent>,
+            network_tx: Sender<NetworkControl>,
+            network_rx: Receiver<NetworkControl>,
+            media_tx: Sender<MediaOut>,
+            shared: SharedScreenState,
+        }
+
+        impl Harness {
+            fn new() -> Self {
+                let (event_tx, event_rx) = bounded(64);
+                let (network_tx, network_rx) = bounded(64);
+                let (media_tx, _media_rx) = bounded(64);
+                Self {
+                    st: ScreenState {
+                        capture: None,
+                        peer_streams: HashMap::new(),
+                        decoder_failed: HashSet::new(),
+                        unwatched: HashSet::new(),
+                        host_hidden: false,
+                        minimized: HashSet::new(),
+                        running: true,
+                    },
+                    event_tx,
+                    _event_rx: event_rx,
+                    network_tx,
+                    network_rx,
+                    media_tx,
+                    shared: SharedScreenState::new(),
+                }
+            }
+
+            fn control(&mut self, ctrl: ScreenControl) {
+                handle_control(
+                    ctrl,
+                    &mut self.st,
+                    &self.event_tx,
+                    &self.network_tx,
+                    &self.media_tx,
+                    &self.shared,
+                );
+            }
+
+            fn frame(&mut self, seq: u32, is_keyframe: bool) {
+                self.control(ScreenControl::IncomingVideoFrame {
+                    client_id: PEER,
+                    seq,
+                    is_keyframe,
+                    width: 64,
+                    height: 64,
+                    timestamp_ms: seq * 16,
+                    data: vec![0; 16],
+                });
+            }
+
+            fn depth(&self) -> usize {
+                self.st.peer_streams[&PEER].jitter_buffer.depth()
+            }
+
+            /// Keyframe requests the network thread was handed by one
+            /// drain pass.
+            fn requests_after_a_drain(&mut self) -> usize {
+                drain_and_decode(
+                    &mut self.st.peer_streams,
+                    &self.event_tx,
+                    &self.network_tx,
+                    &self.shared.present,
+                );
+                self.network_rx
+                    .try_iter()
+                    .filter(|c| {
+                        matches!(c, NetworkControl::RequestKeyframe { target_id } if *target_id == PEER)
+                    })
+                    .count()
+            }
+        }
+
+        #[test]
+        fn a_hidden_app_buffers_nothing_and_asks_for_a_keyframe_once_back() {
+            let mut h = Harness::new();
+            h.frame(0, true);
+            assert_eq!(h.depth(), 1);
+            h.control(ScreenControl::SetVisible {
+                client_id: None,
+                visible: false,
+            });
+            h.frame(1, false);
+            h.frame(2, false);
+            assert_eq!(h.depth(), 1, "unseen frames never reach the buffer");
+            assert_eq!(h.requests_after_a_drain(), 0);
+
+            h.control(ScreenControl::SetVisible {
+                client_id: None,
+                visible: true,
+            });
+            let buffer = &h.st.peer_streams[&PEER].jitter_buffer;
+            assert!(!buffer.is_primed(), "starts over from a keyframe");
+            assert_eq!(h.requests_after_a_drain(), 1);
+            assert_eq!(h.requests_after_a_drain(), 0, "asked once");
+            h.frame(3, true);
+            assert_eq!(h.depth(), 1);
+        }
+
+        #[test]
+        fn a_minimized_viewer_is_unseen_until_restored_or_closed() {
+            let mut h = Harness::new();
+            h.frame(0, true);
+            h.control(ScreenControl::SetVisible {
+                client_id: Some(PEER),
+                visible: false,
+            });
+            assert!(!h.st.sees(PEER));
+            assert!(h.st.sees(PEER + 1), "only that viewer");
+            h.control(ScreenControl::SetVisible {
+                client_id: Some(PEER),
+                visible: true,
+            });
+            assert!(h.st.sees(PEER));
+
+            h.control(ScreenControl::SetVisible {
+                client_id: Some(PEER),
+                visible: false,
+            });
+            h.control(ScreenControl::StopWatching { client_id: PEER });
+            assert!(h.st.sees(PEER), "a new viewer starts seen");
+        }
+
+        #[test]
+        fn a_stream_that_stays_seen_is_not_restarted() {
+            let mut h = Harness::new();
+            h.frame(0, true);
+            h.control(ScreenControl::SetVisible {
+                client_id: None,
+                visible: true,
+            });
+            assert!(h.st.peer_streams[&PEER].jitter_buffer.is_primed());
+        }
+
+        #[test]
+        fn nothing_to_do_blocks() {
+            let h = Harness::new();
+            assert_eq!(next_wake(&h.st, Instant::now(), Instant::now()), None);
+        }
+
+        #[test]
+        fn a_watched_stream_wakes_for_its_work_else_for_its_log() {
+            let mut h = Harness::new();
+            h.control(ScreenControl::SetVisible {
+                client_id: None,
+                visible: false,
+            });
+            h.frame(0, true); // the stream exists; the frame was dropped
+            let now = Instant::now();
+            let log_due = h.st.peer_streams[&PEER].log.next_due();
+            assert!(log_due > now);
+            assert_eq!(next_wake(&h.st, now, now), Some(log_due));
+
+            // Back on screen: the keyframe request is due at once.
+            h.control(ScreenControl::SetVisible {
+                client_id: None,
+                visible: true,
+            });
+            assert_eq!(next_wake(&h.st, now, now), Some(now));
+            assert_eq!(h.requests_after_a_drain(), 1);
+
+            // A frame: due at its playout slot, before the log line.
+            h.frame(1, true);
+            let frame_due = h.st.peer_streams[&PEER]
+                .jitter_buffer
+                .next_due(now)
+                .expect("buffered");
+            assert!(frame_due < log_due);
+            assert_eq!(next_wake(&h.st, now, now), Some(frame_due));
         }
     }
 }

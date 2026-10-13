@@ -1,8 +1,8 @@
 [package]
 name = "audio"
 version = "0.8.1"
-edition = "2021"
-license = "Apache-2.0"
+edition.workspace = true
+license.workspace = true
 description = "audio components for baucord"
 
 [lints]
@@ -48,7 +48,9 @@ realfft = "3.5"
 
 # Noise suppression (Mozilla RNNoise, pure Rust). Its VAD probability also
 # drives the speaking indicator, so no separate VAD dependency is needed.
-nnnoiseless = "0.5"
+# The library alone: its default features are a command-line tool
+# (clap 3, anyhow, hound) and a `dasp` adapter, nothing the engine calls.
+nnnoiseless = { version = "0.5", default-features = false }
 
 serde = { workspace = true, optional = true }
 
@@ -124,26 +126,24 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 wasapi = "0.24"
 # The endpoint form factor for echo cancellation (native/wasapi.rs,
 # AEC-SPEC.md §4.2): `wasapi` keeps its property accessor private. Same
-# 0.62 `wasapi` and `video` use, and only features `wasapi` already
-# turns on, so nothing new compiles.
-windows = { version = "0.62", features = [
+# 0.62 `wasapi` and `video` use, and features `wasapi` already turns on
+# — but the registry, read once per render open for the user's "during
+# calls" setting in the log (AEC-SPEC.md E14).
+windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Media_Audio",
     "Win32_Media_KernelStreaming",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
+    "Win32_System_Registry",
     "Win32_System_Variant",
     "Win32_UI_Shell_PropertiesSystem",
 ] }
 
 [dev-dependencies]
 # examples only — the library itself never initializes a logger
-env_logger = "0.11"
+env_logger.workspace = true
 
 [[example]]
 name = "latency_profile"
 path = "examples/latency.rs"
-
-[[example]]
-name = "sounds"
-path = "examples/play.rs"

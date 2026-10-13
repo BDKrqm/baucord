@@ -58,12 +58,22 @@ pub const LOBBY: u64 = 1 << 16;
 /// `Blocks`/`ReportAck`/`AccountDeleted`/`AccountDeleteRefused`, the
 /// Reports admin commands, and `DmFailReason::Unavailable`.
 pub const SAFETY: u64 = 1 << 17;
+/// The client needs no `VoiceReceiverReport` for an interval in which
+/// the relay expected none of its voice (1.2.1). A server sends the
+/// report every two seconds to everyone, the lobby included, and a
+/// client without this bit reads a missing one as a stalled link; with
+/// it, a session that says nothing is sent nothing on a clock — which
+/// is what lets a phone's radio rest in the lobby (review P2-49).
+pub const QUIET_REPORTS: u64 = 1 << 18;
+/// An admin listing longer than one message (1.2.1): the rows that do
+/// not fit `AdminResult` arrive before it, as `AdminRows` under the
+/// same request id, and the client joins them. A session without this
+/// bit is sent the first rows only — every shipped client dropped a
+/// larger answer unread (review P0-1).
+pub const ADMIN_PAGES: u64 = 1 << 19;
 
 /// What a 1.0 client can do.
 pub const CLIENT_1_0: u64 = TELEMETRY | IDENTITY;
-/// What a 1.0 server offers: it logs telemetry; it only *logs* client
-/// keys, so it does not announce [`IDENTITY`].
-pub const SERVER_1_0: u64 = TELEMETRY;
 /// What a 1.1 client can do: it logs in by key, presents invites,
 /// renders roles and restrictions, replays history, shows progress,
 /// and makes channels.
@@ -82,7 +92,9 @@ pub const CLIENT_1_1: u64 = CLIENT_1_0
     | ADMIN_PANEL
     | ADMIN_FEED
     | LOBBY
-    | SAFETY;
+    | SAFETY
+    | QUIET_REPORTS
+    | ADMIN_PAGES;
 /// What a 1.1 server offers: keys are the login, invites the door,
 /// roles decide what a session may do, and it keeps history.
 pub const SERVER_1_1: u64 = TELEMETRY
@@ -101,7 +113,9 @@ pub const SERVER_1_1: u64 = TELEMETRY
     | ADMIN_PANEL
     | ADMIN_FEED
     | LOBBY
-    | SAFETY;
+    | SAFETY
+    | QUIET_REPORTS
+    | ADMIN_PAGES;
 
 /// Bits both sides announced.
 #[must_use]
@@ -121,9 +135,10 @@ mod tests {
 
     #[test]
     fn negotiate_is_the_intersection() {
-        assert_eq!(negotiate(CLIENT_1_0, SERVER_1_0), TELEMETRY);
-        assert!(has(negotiate(CLIENT_1_0, SERVER_1_0), TELEMETRY));
-        assert!(!has(negotiate(CLIENT_1_0, SERVER_1_0), IDENTITY));
+        // A 1.0 server offered telemetry alone (it only logged keys).
+        assert_eq!(negotiate(CLIENT_1_0, TELEMETRY), TELEMETRY);
+        assert!(has(negotiate(CLIENT_1_0, TELEMETRY), TELEMETRY));
+        assert!(!has(negotiate(CLIENT_1_0, TELEMETRY), IDENTITY));
     }
 
     #[test]
@@ -147,6 +162,8 @@ mod tests {
             ADMIN_FEED,
             LOBBY,
             SAFETY,
+            QUIET_REPORTS,
+            ADMIN_PAGES,
         ];
         for (i, a) in all.iter().enumerate() {
             assert_eq!(a.count_ones(), 1);

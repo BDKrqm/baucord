@@ -7,15 +7,15 @@
 
 use std::time::Duration;
 
-use log::info;
+use log::{info, warn};
 use protocol::{
-    features, permissions, AdminCommand, AdminError, AdminOutcome, AuditEntry, BlobSummary,
-    ClientId, ServerMessage, StatsSummary, UserId,
+    permissions, AdminCommand, AdminError, AdminOutcome, AuditEntry, BlobSummary, ClientId,
+    ServerMessage, StatsSummary, UserId,
 };
 
-use super::{hex, ChatServer};
+use super::{hex, ChatServer, Waiting};
 use crate::{
-    persistence::{Answer, AskId, Command, Outcome, Query},
+    persistence::{Answer, Command, Outcome, Query},
     policy::RoleRecord,
 };
 
@@ -63,18 +63,17 @@ impl ChatServer {
             },
             self.now + AUDIT_DEADLINE,
         );
-        self.pending_audits.insert(ask, (client, request_id));
-    }
-
-    pub(super) fn is_audit_ask(&self, ask: AskId) -> bool {
-        self.pending_audits.contains_key(&ask)
+        self.waiting
+            .insert(ask, Waiting::Audit { client, request_id });
     }
 
     /// The store answered an audit read (or did not, in time).
-    pub(super) fn resolve_audit_answer(&mut self, ask: AskId, outcome: Outcome) {
-        let Some((client, request_id)) = self.pending_audits.remove(&ask) else {
-            return;
-        };
+    pub(super) fn resolve_audit_answer(
+        &mut self,
+        client: ClientId,
+        request_id: u32,
+        outcome: Outcome,
+    ) {
         let result = match outcome {
             Outcome::Answered(Answer::Audit(rows)) => Ok(AdminOutcome::Audit(
                 rows.into_iter()
@@ -96,18 +95,22 @@ impl ChatServer {
                 "the audit log did not answer in time".into(),
             )),
         };
-        self.send_msg(client, &ServerMessage::AdminResult { request_id, result });
+        self.send_admin_result(client, request_id, result);
     }
 
     /// An audit target as the panel should read it: a user's short id
     /// becomes their name, a role or channel id its name, a
     /// restriction or message id gets a `#`. Codes and hashes stay.
     pub(super) fn audit_target_name(&self, action: &str, target: &str) -> String {
+        // The target decoded once and compared as bytes: encoding every
+        // user's id for every row made some 200,000 strings for one
+        // audit page on a server with 1,000 users (review P3-10).
         let user_named = || {
+            let short = short_id(target)?;
             self.policy
                 .users
                 .iter()
-                .find(|(id, _)| hex(&id[..8]) == target)
+                .find(|(id, _)| id[..8] == short)
                 .map(|(_, u)| u.name.clone())
         };
         match action {
@@ -204,8 +207,7 @@ impl ChatServer {
                 AdminOutcome::Blobs(blobs)
             }),
             AdminCommand::DeleteBlob { blob_id } => need(permissions::RESTRICT).map(|()| {
-                if let Some(gone) = self.policy.blobs.remove(blob_id) {
-                    self.blob_bytes.remove(blob_id);
+                if let Some(gone) = self.forget_blob(blob_id) {
                     self.persist.send(Command::DeleteBlob { blob_id: *blob_id });
                     self.audit(
                         Some(actor),
@@ -418,7 +420,24 @@ impl ChatServer {
             }
         }
         self.policy.roles.remove(&id);
-        self.persist.send(Command::DeleteRole { id });
+        // The store revokes the invites that grant it and opens the
+        // channels gated on it in the same transaction; mirror that, so
+        // a live invite cannot admit someone into a role that is gone.
+        let now = self.wall_now();
+        for invite in self.policy.invites.values_mut() {
+            if invite.grants_role == id {
+                invite.revoked_at.get_or_insert(now);
+                invite.grants_role = protocol::permissions::ROLE_GUEST;
+            }
+        }
+        let mut gated = false;
+        for channel in &mut self.policy.channels {
+            if channel.min_role == Some(id) {
+                channel.min_role = None;
+                gated = true;
+            }
+        }
+        self.persist.send(Command::DeleteRole { id, ts: now });
         self.audit(
             Some(actor),
             "role.delete",
@@ -426,6 +445,9 @@ impl ChatServer {
             Some(role.name.clone()),
         );
         info!("role {} ({id}) deleted from the panel", role.name);
+        if gated && let Err(e) = self.rebuild_channel_list() {
+            warn!("channel list rebuild after a role delete failed: {e}");
+        }
         self.broadcast_roles();
         for user in holders {
             self.roles_changed(&user);
@@ -447,7 +469,38 @@ impl ChatServer {
     fn broadcast_roles(&mut self) {
         let roles = self.role_list();
         for peer in self.clients() {
-            self.send_if(peer, features::ROLE_LIST, &roles);
+            self.send_msg(peer, &roles);
         }
+    }
+}
+
+/// The first 8 bytes of a user id, from the 16 hex digits the audit
+/// log stores as a target; `None` for anything else.
+fn short_id(target: &str) -> Option<[u8; 8]> {
+    let digits = target.as_bytes();
+    if digits.len() != 16 {
+        return None;
+    }
+    let mut out = [0u8; 8];
+    for (byte, pair) in out.iter_mut().zip(digits.chunks_exact(2)) {
+        let high = char::from(pair[0]).to_digit(16)?;
+        let low = char::from(pair[1]).to_digit(16)?;
+        *byte = u8::try_from(high * 16 + low).ok()?;
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod short_id_tests {
+    use super::short_id;
+    use crate::persistence::hex;
+
+    #[test]
+    fn a_short_id_is_what_the_audit_log_wrote() {
+        let id = [0xab, 0x01, 0xff, 0x00, 0x7e, 0x10, 0x9c, 0x33];
+        assert_eq!(short_id(&hex(&id)), Some(id));
+        assert_eq!(short_id("abc"), None);
+        assert_eq!(short_id("zz01ff007e109c33"), None);
+        assert_eq!(short_id("é01ff007e109c33"), None);
     }
 }

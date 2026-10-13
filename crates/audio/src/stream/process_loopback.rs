@@ -12,8 +12,9 @@
 //! Availability: the API shipped with Windows 10 2004 (build 19041);
 //! Microsoft's ApplicationLoopback sample README claims build 20348+.
 //! We don't version-sniff — activation failure *is* the signal, and
-//! `input::SystemAudioCapture` falls back to the cpal endpoint-loopback
-//! backend when `start()` reports one.
+//! `input::SystemAudioCapture` then reports that the share has no
+//! sound (the endpoint-loopback fallback it once had sent peers' own
+//! voices back to them).
 //!
 //! ## Differences from endpoint loopback worth remembering
 //!
@@ -58,7 +59,7 @@ use wasapi::{
 };
 
 use super::input::SystemAudioBackend;
-use crate::stats::AudioStats;
+use crate::{latch::Ring, stats::AudioStats};
 
 /// Capture format: 48 kHz stereo f32 — exactly what the Opus encode
 /// worker wants, so `needs_resample` is false and rubato never runs.
@@ -100,11 +101,14 @@ pub(crate) struct ProcessLoopback {
     pump: Option<thread::JoinHandle<()>>,
     /// Signal to stop the pump thread.
     should_stop: Arc<AtomicBool>,
+    /// The pump left its loop without being told to
+    /// ([`SystemAudioBackend::failed`]).
+    failed: Arc<AtomicBool>,
     /// Ring producer, held until `start()` hands it to the pump thread.
     ring_producer: Option<Producer<f32>>,
     /// Wake latch to the encode worker — pinged after pushing samples so
     /// the worker can block instead of polling an empty ring.
-    wake_tx: Option<Sender<()>>,
+    wake_tx: Option<Ring>,
     /// Stats (shared with voice chat engine for unified reporting).
     stats: Arc<AudioStats>,
 }
@@ -114,14 +118,11 @@ impl ProcessLoopback {
     /// activation) happens in [`SystemAudioBackend::start`] so the caller
     /// can fall back to another backend when this build of Windows lacks
     /// process loopback.
-    pub(crate) fn new(
-        ring_producer: Producer<f32>,
-        wake_tx: Sender<()>,
-        stats: Arc<AudioStats>,
-    ) -> Self {
+    pub(crate) fn new(ring_producer: Producer<f32>, wake_tx: Ring, stats: Arc<AudioStats>) -> Self {
         Self {
             pump: None,
             should_stop: Arc::new(AtomicBool::new(false)),
+            failed: Arc::new(AtomicBool::new(false)),
             ring_producer: Some(ring_producer),
             wake_tx: Some(wake_tx),
             stats,
@@ -142,6 +143,7 @@ impl SystemAudioBackend for ProcessLoopback {
         self.should_stop.store(false, Ordering::Relaxed);
 
         let should_stop = self.should_stop.clone();
+        let failed = self.failed.clone();
         let stats = self.stats.clone();
 
         // One-shot handshake: the pump reports setup success or failure
@@ -151,7 +153,13 @@ impl SystemAudioBackend for ProcessLoopback {
 
         let pump = thread::Builder::new()
             .name("sysaudio-procloop".into())
-            .spawn(move || pump_thread(ring_producer, &wake_tx, &stats, &should_stop, &setup_tx))?;
+            .spawn(move || {
+                pump_thread(ring_producer, &wake_tx, &stats, &should_stop, &setup_tx);
+                // Out of its loop and nobody asked: it gave up.
+                if !should_stop.load(Ordering::Relaxed) {
+                    failed.store(true, Ordering::Relaxed);
+                }
+            })?;
 
         // Blocking recv with no timeout needed: the pump always reports
         // (a panic disconnects the channel, surfacing as RecvError).
@@ -187,6 +195,10 @@ impl SystemAudioBackend for ProcessLoopback {
     fn device_name(&self) -> String {
         "System mix (own process excluded)".into()
     }
+
+    fn failed(&self) -> bool {
+        self.failed.load(Ordering::Relaxed)
+    }
 }
 
 impl Drop for ProcessLoopback {
@@ -201,7 +213,7 @@ impl Drop for ProcessLoopback {
 /// object from activation to teardown.
 fn pump_thread(
     ring_producer: Producer<f32>,
-    wake_tx: &Sender<()>,
+    wake_tx: &Ring,
     stats: &AudioStats,
     should_stop: &AtomicBool,
     setup_tx: &Sender<SetupReport>,
@@ -290,7 +302,7 @@ fn run_pump(
     capture: &AudioCaptureClient,
     event: &Handle,
     mut ring_producer: Producer<f32>,
-    wake_tx: &Sender<()>,
+    wake_tx: &Ring,
     stats: &AudioStats,
     should_stop: &AtomicBool,
 ) {
@@ -351,9 +363,9 @@ fn run_pump(
                     let pushed =
                         push_interleaved(&mut ring_producer, &packet_buf[..got_bytes], stats);
                     if pushed > 0 {
-                        // Wake the encode worker; bounded(1) makes this a
-                        // latch — a pending token means no send occurs.
-                        let _ = wake_tx.try_send(());
+                        // Wake the encode worker (a latch: rings it has
+                        // not seen yet are one).
+                        wake_tx.ring();
                     }
                 }
                 Err(e) => {

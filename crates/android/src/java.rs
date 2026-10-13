@@ -21,22 +21,20 @@
 use std::{ffi::c_void, sync::OnceLock};
 
 #[cfg(feature = "app")]
-use jni::{errors::LogErrorAndDefault, objects::JClass, refs::Reference};
+use jni::{
+    errors::LogErrorAndDefault,
+    objects::{JClass, JValue},
+    refs::Reference,
+};
 use jni::{
     errors::Result as JniResult,
-    objects::{JObject, JObjectArray, JString, JValue},
+    objects::{JObject, JObjectArray, JString},
     sys::jobject,
     Env, JavaVM,
 };
 
 /// `PackageManager.PERMISSION_GRANTED`.
 const PERMISSION_GRANTED: i32 = 0;
-/// Our one request code; the answer is not handed back to native code
-/// (the next `Resume` re-checks, and the voice engine retries the
-/// microphone every 2 s until it opens).
-// Only the smoke test never asks; the imports it shares stay used.
-#[cfg_attr(feature = "hello", allow(dead_code))]
-const PERMISSION_REQUEST_CODE: i32 = 1;
 
 /// The `JavaVM` and the Activity (a global reference android-activity
 /// keeps alive for as long as the `AndroidApp` lives — the whole
@@ -53,12 +51,13 @@ pub fn init(vm: *mut c_void, activity: *mut c_void) {
 fn with_activity<R>(
     f: impl for<'j> FnOnce(&mut Env<'j>, &JObject<'j>) -> JniResult<R>,
 ) -> JniResult<R> {
-    let (vm_raw, activity_raw) = ACTIVITY.get().copied().unwrap_or_else(|| {
-        // Before `init` (never, in practice): ndk-context's — the
-        // Application, which answers the Context methods only.
-        let ctx = ndk_context::android_context();
-        (ctx.vm() as usize, ctx.context() as usize)
-    });
+    // `init` is the first thing `android_main` does: nothing calls in
+    // before it.
+    let Some((vm_raw, activity_raw)) = ACTIVITY.get().copied() else {
+        return Err(jni::errors::Error::NullPtr(
+            "the Activity: java::init has not run",
+        ));
+    };
     // SAFETY: a live JavaVM pointer for this process (android-activity's);
     // `from_raw` only wraps it.
     let vm = unsafe { JavaVM::from_raw(vm_raw as *mut jni::sys::JavaVM) };
@@ -109,20 +108,16 @@ pub fn request_permissions(names: &[&str]) -> Result<(), String> {
             let jname = env.new_string(name)?;
             array.set_element(env, i, &jname)?;
         }
-        let asked = env.call_method(
+        // `BaucordActivity.askPermissions`: the one Activity there is
+        // defines it. The answer is not handed back to native code (the
+        // next `Resume` re-checks, and the voice engine retries the
+        // microphone every 2 s until it opens).
+        env.call_method(
             activity,
             jni::jni_str!("askPermissions"),
             jni::jni_sig!("([Ljava/lang/String;)V"),
             &[(&array).into()],
-        );
-        if asked.is_err() {
-            env.call_method(
-                activity,
-                jni::jni_str!("requestPermissions"),
-                jni::jni_sig!("([Ljava/lang/String;I)V"),
-                &[(&array).into(), JValue::Int(PERMISSION_REQUEST_CODE)],
-            )?;
-        }
+        )?;
         Ok(())
     })
     .map_err(|e| e.to_string())
@@ -449,24 +444,82 @@ pub fn pick_file(mime: &str, max_bytes: u64) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
-/// `BaucordActivity.saveDownload(name, mime, bytes)`: the file in the
-/// public Downloads. Returns its `content://` URI and the name the user
-/// will find it under (`Download/report (1).pdf`).
+/// A file in the public Downloads: `BaucordActivity.beginDownload`
+/// makes its `MediaStore` row and hands over a file descriptor, the
+/// bytes are written here, and `endDownload` publishes the file (or
+/// removes the row if the write failed). Returns its `content://` URI
+/// and the name the user will find it under (`Download/report (1).pdf`).
+///
+/// The bytes do not cross into Java: they used to, whole, as a
+/// `byte[]` (review P2-27). A received file is saved off the UI thread
+/// (`frontend`'s save runs on a thread of its own); a picture saved
+/// from the viewer and an exported key are small and written from it.
 ///
 /// # Errors
-/// What `MediaStore` said, or any JNI failure, as text.
+/// What `MediaStore` or the write said, or any JNI failure, as text.
 #[cfg(feature = "app")]
 pub fn save_download(name: &str, mime: &str, bytes: &[u8]) -> Result<(String, String), String> {
+    use std::{
+        fs::File,
+        io::Write as _,
+        os::fd::{FromRawFd as _, RawFd},
+    };
+
     let reply = with_activity(|env, activity| {
         let jname = env.new_string(name)?;
         let jmime = env.new_string(mime)?;
-        let jbytes = env.byte_array_from_slice(bytes)?;
         let out = env
             .call_method(
                 activity,
-                jni::jni_str!("saveDownload"),
-                jni::jni_sig!("(Ljava/lang/String;Ljava/lang/String;[B)Ljava/lang/String;"),
-                &[(&jname).into(), (&jmime).into(), (&jbytes).into()],
+                jni::jni_str!("beginDownload"),
+                jni::jni_sig!("(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"),
+                &[(&jname).into(), (&jmime).into()],
+            )?
+            .l()?;
+        let out = env.cast_local::<JString>(out)?;
+        out.try_to_string(env)
+    })
+    .map_err(|e| e.to_string())?;
+    let (uri, fd) = match reply.split_once('\n') {
+        Some(("error", message)) => return Err(message.to_string()),
+        Some((uri, fd)) => (uri.to_string(), fd.parse::<RawFd>()),
+        None => return Err(reply),
+    };
+    let Ok(fd) = fd else {
+        let _ = end_download(&uri, false);
+        return Err("Downloads gave no file descriptor".to_string());
+    };
+    // SAFETY: the descriptor `beginDownload` detached for this call:
+    // open, nobody else's, and closed by the `File`.
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    let written = file.write_all(bytes);
+    // Closed before the row is published (or removed).
+    drop(file);
+    if let Err(e) = written {
+        let _ = end_download(&uri, false);
+        return Err(e.to_string());
+    }
+    let mut shown = end_download(&uri, true)?;
+    // The folder alone: the name could not be read back; it is the one
+    // asked for unless the system renamed it.
+    if shown.ends_with('/') {
+        shown.push_str(name);
+    }
+    Ok((uri, shown))
+}
+
+/// `BaucordActivity.endDownload(uri, keep)`: publish a written
+/// download (the name it is shown under comes back) or remove its row.
+#[cfg(feature = "app")]
+fn end_download(uri: &str, keep: bool) -> Result<String, String> {
+    let reply = with_activity(|env, activity| {
+        let juri = env.new_string(uri)?;
+        let out = env
+            .call_method(
+                activity,
+                jni::jni_str!("endDownload"),
+                jni::jni_sig!("(Ljava/lang/String;Z)Ljava/lang/String;"),
+                &[(&juri).into(), JValue::Bool(keep)],
             )?
             .l()?;
         let out = env.cast_local::<JString>(out)?;
@@ -475,8 +528,7 @@ pub fn save_download(name: &str, mime: &str, bytes: &[u8]) -> Result<(String, St
     .map_err(|e| e.to_string())?;
     match reply.split_once('\n') {
         Some(("error", message)) => Err(message.to_string()),
-        Some((uri, shown)) => Ok((uri.to_string(), shown.to_string())),
-        None => Err(reply),
+        _ => Ok(reply),
     }
 }
 

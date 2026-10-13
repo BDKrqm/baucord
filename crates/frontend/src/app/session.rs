@@ -21,19 +21,23 @@ impl AppState {
                 self.open_channel_prompt(channel_id, true);
             }
             client::ChannelDenyReason::ChannelFull => {
-                self.pending_channel_join = None;
+                self.session.pending_channel_join = None;
                 self.show_toast(ToastKind::Warning, &t!("channel-full"));
             }
-            client::ChannelDenyReason::NoSuchChannel | client::ChannelDenyReason::NotPermitted => {
-                self.pending_channel_join = None;
-                self.show_error(reason.describe());
+            client::ChannelDenyReason::NoSuchChannel => {
+                self.session.pending_channel_join = None;
+                self.show_error(&t!("channel-deny-missing"));
+            }
+            client::ChannelDenyReason::NotPermitted => {
+                self.session.pending_channel_join = None;
+                self.show_error(&t!("channel-deny-not-permitted"));
             }
         }
     }
 
     /// Open the channel password prompt for `channel_id`.
     pub(super) fn open_channel_prompt(&mut self, channel_id: u16, wrong: bool) {
-        self.pending_channel_join = Some(channel_id);
+        self.session.pending_channel_join = Some(channel_id);
         let name = self.channel_name(channel_id);
         let state = self.main.global::<State>();
         state.set_channel_prompt_name(name.into());
@@ -52,11 +56,11 @@ impl AppState {
         if Some(channel_id) == self.our_channel() {
             return;
         }
-        let Some(meta) = self.channels.iter().find(|c| c.id == channel_id) else {
+        let Some(meta) = self.session.channels.iter().find(|c| c.id == channel_id) else {
             return;
         };
         if !meta.locked {
-            self.pending_channel_join = Some(channel_id);
+            self.session.pending_channel_join = Some(channel_id);
             self.network
                 .tx
                 .send(NetworkControl::JoinChannel {
@@ -75,7 +79,7 @@ impl AppState {
             .and_then(|server| server.channel_passwords.get(&name).cloned());
         match saved {
             Some(password) => {
-                self.pending_channel_join = Some(channel_id);
+                self.session.pending_channel_join = Some(channel_id);
                 self.network
                     .tx
                     .send(NetworkControl::JoinChannel {
@@ -92,7 +96,7 @@ impl AppState {
     /// entry, then retry the join. The prompt closes when the server
     /// echoes our move (or reopens on `WrongPassword`).
     pub(super) fn channel_password_ok(&mut self) {
-        let Some(channel_id) = self.pending_channel_join else {
+        let Some(channel_id) = self.session.pending_channel_join else {
             self.main.global::<State>().set_channel_prompt_open(false);
             return;
         };
@@ -120,7 +124,7 @@ impl AppState {
     }
 
     pub(super) fn channel_password_cancel(&mut self) {
-        self.pending_channel_join = None;
+        self.session.pending_channel_join = None;
         let state = self.main.global::<State>();
         state.set_channel_prompt_open(false);
         state.set_channel_password("".into());
@@ -130,52 +134,54 @@ impl AppState {
     /// disconnects.
     pub(super) fn teardown_connection(&mut self) {
         self.connected = false;
-        self.permissions = 0;
-        self.our_user_id = None;
-        self.server_persistent = true;
-        self.details.clear();
-        self.pending_admin.clear();
-        self.server_muted = None;
-        self.text_muted = None;
-        self.oldest_history_id = None;
-        self.channel_details.clear();
-        self.telemetry_notes.clear();
-        self.moderation = None;
-        self.profiles.clear();
-        self.author_looks.clear();
-        self.lurkers.clear();
-        self.avatar_fetches.clear();
-        self.own_avatar_blob = None;
-        self.reset_safety();
+        // The session got as far as an engine of its own (`Init`).
+        let session_engine = self.session.our_client_id.is_some();
+        // No session, no keybinds: the key watcher stops (review P1-3).
+        if let Some(hotkeys) = &mut self.hotkeys {
+            hotkeys.set_connected(false);
+        }
+        // Before the conversations go: their cards are repainted.
+        self.clear_transfers();
         self.reset_chat_flow();
-        self.is_testing_mic = false;
-        self.channels.clear();
-        self.channel_infos.clear();
-        self.channel_options.set_vec(Vec::new());
+        // Everything else the session held, in one step (review P2-51):
+        // who was here, what we may do, the server's channels and
+        // roles, our own mute and deafen. What follows only tells the
+        // window, the voice engine and the screen thread.
+        self.session = Session::default();
+        self.reset_safety();
+        // A test ends with the session it may have started in.
+        if std::mem::take(&mut self.is_testing_mic) {
+            crate::settingsui::test_ended(self);
+        }
         self.main.global::<State>().set_moderation_open(false);
         self.push_permissions();
-        self.pending_channel_join = None;
         {
             let state = self.main.global::<State>();
             state.set_channel_prompt_open(false);
             state.set_channel_password("".into());
         }
-        // Also clear the shared flag the voice loop reads — leaving it
-        // set (disconnect during a mic test) kept the loop gating
-        // outgoing audio after the next connect.
-        self.is_testing_mic_shared.store(false, Ordering::Relaxed);
+        // Also bring the shared flag the voice loop reads up to date —
+        // leaving it set (disconnect during a mic test) kept the loop
+        // gating outgoing audio after the next connect.
+        self.sync_voice_room();
+        // The Audio tab's meter is showing: it goes on, on an engine of
+        // its own — the session's would carry the session's mute into
+        // a meter with nothing left to mute for.
+        if self.audio_tab_open && session_engine {
+            self.start_sessionless_engine();
+        }
 
         // Play the leave sound for ourselves too. The server's UserLeft
         // broadcast is never sent to the leaver — and stopping the
         // engine immediately would cut the sound off, so the Stop is
-        // deferred. Its closure skips the Stop if a new session or mic
-        // test started in the meantime.
+        // deferred. Its closure skips the Stop if a new session, a mic
+        // test or the Audio tab's meter started in the meantime.
         self.play_chime(SoundType::UserLeft);
         let weak = APP.with(|a| a.borrow().as_ref().map(Rc::downgrade));
         if let Some(weak) = weak {
             slint::Timer::single_shot(Duration::from_millis(900), move || {
                 with_app(&weak, |app| {
-                    if !app.connected && !app.is_testing_mic {
+                    if !app.connected && !app.mic_previewing() {
                         app.voice.tx.send(VoiceControl::Stop).ok();
                     }
                 });
@@ -186,22 +192,23 @@ impl AppState {
         if self.screen.shared.is_sharing.load(Ordering::Relaxed) {
             self.screen.tx.send(ScreenControl::StopSharing).ok();
         }
-        self.active_sharers.clear();
-        self.sharer_ids.clear();
-        for (_, viewer) in self.viewers.drain() {
+        // Closing a viewer only hides it: the screen thread must be told
+        // too, or it keeps the stream's decoder, buffers and audio for
+        // the rest of the process — the sharer's id is gone with the
+        // session, so nothing else would ever end it.
+        for (client_id, viewer) in self.viewers.drain() {
             viewer.close();
+            self.screen
+                .tx
+                .send(ScreenControl::StopWatching { client_id })
+                .ok();
         }
         crate::viewers::close_gallery(self);
         self.gifs.clear();
 
-        self.users.clear();
-        self.our_client_id = None;
         Self::clear_call_notice();
-        self.is_muted = false;
-        self.is_deafened = false;
         // A menu open on a row that is about to vanish.
         self.close_menu();
-        self.roles = builtin_role_table();
 
         let s = self.main.global::<State>();
         s.set_muted(false);
@@ -218,6 +225,21 @@ impl AppState {
         s.set_resource_line(" ".into());
         s.set_users_count_label(t!("users-count", "count" => 0u32).into());
         self.users_model.set_vec(Vec::new());
+    }
+
+    /// Transfers end with the session: nothing more arrives for them.
+    /// Left in place, Save did nothing for that file for the rest of
+    /// the run (it read as already under way), pictures caught in
+    /// flight never loaded after the reconnect, and cards kept a ring
+    /// that would never move (review P2-13).
+    fn clear_transfers(&mut self) {
+        // The cards first: each loses its ring where it is shown.
+        let shown: Vec<(Option<client::UserId>, u64)> =
+            self.session.transfers.shown.keys().copied().collect();
+        for (conv, msg_id) in shown {
+            self.set_transfer(conv, msg_id, None);
+        }
+        self.session.transfers = Transfers::default();
     }
 
     pub(super) fn handle_disconnect(&mut self) {
@@ -241,8 +263,12 @@ impl AppState {
         self.kept_alive = None;
         let first = !self.startup_done;
         self.startup_done = true;
-        let stay_hidden = first && self.settings.startup.start_minimized && cfg!(feature = "tray");
-        if !stay_hidden {
+        // Shown at launch only (unless that starts in the tray). A
+        // session ending later — a lost connection, a kick — changes
+        // the view where the window is and takes no focus from
+        // whatever the user is in (review P2-17).
+        let stay_hidden = self.settings.startup.start_minimized && cfg!(feature = "tray");
+        if first && !stay_hidden {
             self.show_main();
         }
         if first && self.settings.startup.auto_connect {
@@ -258,29 +284,29 @@ impl AppState {
     // ════════════════════════════════════════════════════════════════
 
     pub(crate) fn handle_toggle_mute(&mut self) {
-        if self.is_muted && self.server_muted.is_some() {
+        if self.session.is_muted && self.session.server_muted.is_some() {
             self.show_toast(ToastKind::Warning, &t!("chat-server-muted-locked"));
             return;
         }
-        self.set_muted(!self.is_muted);
+        self.set_muted(!self.session.is_muted);
     }
 
     /// Set the mute state and tell the voice thread, the server and
     /// the UI.
     pub(super) fn set_muted(&mut self, muted: bool) {
-        self.is_muted = muted;
+        self.session.is_muted = muted;
         self.voice
             .tx
-            .send(VoiceControl::SetMuted(self.is_muted))
+            .send(VoiceControl::SetMuted(self.session.is_muted))
             .ok();
         self.network
             .tx
             .send(NetworkControl::SendAudioState {
-                muted: self.is_muted,
-                deafened: self.is_deafened,
+                muted: self.session.is_muted,
+                deafened: self.session.is_deafened,
             })
             .ok();
-        self.main.global::<State>().set_muted(self.is_muted);
+        self.main.global::<State>().set_muted(self.session.is_muted);
         self.push_self_audio();
         self.update_user_list();
     }
@@ -288,24 +314,26 @@ impl AppState {
     /// Mute and deafen to every stream window's own buttons (D43).
     fn push_self_audio(&self) {
         for viewer in self.viewers.values() {
-            viewer.set_self_audio(self.is_muted, self.is_deafened);
+            viewer.set_self_audio(self.session.is_muted, self.session.is_deafened);
         }
     }
 
     pub(crate) fn handle_toggle_deafen(&mut self) {
-        self.is_deafened = !self.is_deafened;
+        self.session.is_deafened = !self.session.is_deafened;
         self.voice
             .tx
-            .send(VoiceControl::SetDeafened(self.is_deafened))
+            .send(VoiceControl::SetDeafened(self.session.is_deafened))
             .ok();
         self.network
             .tx
             .send(NetworkControl::SendAudioState {
-                muted: self.is_muted,
-                deafened: self.is_deafened,
+                muted: self.session.is_muted,
+                deafened: self.session.is_deafened,
             })
             .ok();
-        self.main.global::<State>().set_deafened(self.is_deafened);
+        self.main
+            .global::<State>()
+            .set_deafened(self.session.is_deafened);
         self.push_self_audio();
         self.update_user_list();
     }
@@ -345,6 +373,7 @@ impl AppState {
             "share hotkey pressed outside Baucord — starting immediately with saved \
              settings: {quality}, monitor {monitor_index}, everyone={everyone}"
         );
+        video::capture::set_pointer_shown(self.settings.share.pointer);
         self.screen
             .tx
             .send(ScreenControl::StartSharing {
@@ -416,47 +445,109 @@ impl AppState {
         // Capture this BEFORE flipping is_testing_mic — checking
         // afterwards made the "start the engine for a mic test while
         // disconnected" branch unreachable.
-        let voice_already_running = self.connected || self.is_testing_mic;
-
+        let voice_already_running = self.engine_wanted();
         self.is_testing_mic = enabled;
-        self.is_testing_mic_shared.store(enabled, Ordering::Relaxed);
-
-        if enabled {
-            if !voice_already_running {
-                self.voice_in_room = true;
-                self.voice
-                    .tx
-                    .send(VoiceControl::Start {
-                        settings: Box::new(self.settings.clone()),
-                        our_client_id: 0,
-                        in_room: true,
-                    })
-                    .ok();
-            }
-            self.voice.tx.send(VoiceControl::SetLoopback(true)).ok();
-        } else {
-            self.voice.tx.send(VoiceControl::SetLoopback(false)).ok();
-            if !self.connected {
-                self.voice.tx.send(VoiceControl::Stop).ok();
-            }
-        }
         // A test needs the microphone, in the lobby too.
-        self.sync_voice_room();
+        self.mic_preview_changed(voice_already_running);
+        // Behind a Start on the same channel; nothing to tell an engine
+        // that was just stopped.
+        self.voice.tx.send(VoiceControl::SetLoopback(enabled)).ok();
         self.sync_keep_alive(false);
     }
 
-    /// Tell the voice engine whether we are in a voice room (or testing
-    /// the microphone), when that changes. On a phone the microphone
-    /// and the call path go with it: nothing records in the lobby
-    /// (ANDROID-SPEC.md D53, IOS-SPEC.md D51). The desktop keeps its
-    /// streams as they were.
+    /// Settings' Audio tab came on screen or left it. While it shows
+    /// the microphone is open for its meter wherever we are — not
+    /// connected, in the lobby, on a phone that otherwise records
+    /// nothing there — so the microphone can be set up before there is
+    /// anyone to talk to. Out of a voice room nothing it hears leaves
+    /// the device; in one, nothing changes. Not connected, mute and
+    /// push-to-talk do not hold it shut either (an engine with no
+    /// session, `VoiceControl::Start`); in a session they do, as in a
+    /// room. Unlike a test it never outlives the screen: a hidden app
+    /// or a closed tab ends it.
+    pub fn set_audio_tab_open(&mut self, open: bool) {
+        if open == self.audio_tab_open {
+            return;
+        }
+        let voice_already_running = self.engine_wanted();
+        self.audio_tab_open = open;
+        log::info!(
+            "settings: audio tab {}",
+            if open { "on screen" } else { "off screen" }
+        );
+        self.mic_preview_changed(voice_already_running);
+    }
+
+    /// The microphone is open for this device's own sake: a test, or
+    /// the Audio tab's meter.
+    pub(super) fn mic_previewing(&self) -> bool {
+        self.is_testing_mic || self.audio_tab_open
+    }
+
+    /// An engine should be running: a session's, which it gets with
+    /// its client id (`Init`) — not on `Connected`, a moment earlier,
+    /// when there is none to hand the microphone to yet — or one for a
+    /// preview without a session.
+    fn engine_wanted(&self) -> bool {
+        self.session.our_client_id.is_some() || self.mic_previewing()
+    }
+
+    /// A test or the Audio tab's meter began or ended: start the engine
+    /// for it where no session has one running, stop it when the last
+    /// reason for it went, and tell a running one where it stands.
+    fn mic_preview_changed(&mut self, was_running: bool) {
+        let wanted = self.engine_wanted();
+        self.sync_voice_room();
+        // One line a change, each saying which engine and why: with
+        // the voice thread's own (`Voice started`, `Voice stopped`) a
+        // pasted log shows which of the two did not do its part.
+        let (tab, test) = (self.audio_tab_open, self.is_testing_mic);
+        match (was_running, wanted) {
+            (false, true) => {
+                log::info!(
+                    "microphone: no engine yet, starting one for this device alone \
+                     (Audio tab {tab}, test {test})"
+                );
+                self.start_sessionless_engine();
+            }
+            (true, false) => {
+                log::info!("microphone: nothing needs it, stopping the engine");
+                self.voice.tx.send(VoiceControl::Stop).ok();
+            }
+            (true, true) if self.session.our_client_id.is_some() => log::info!(
+                "microphone: the session's engine has it (in a voice room {}, Audio tab {tab}, \
+                 test {test})",
+                self.in_voice_room()
+            ),
+            (true, true) => log::info!(
+                "microphone: the engine started for this device alone carries on \
+                 (Audio tab {tab}, test {test})"
+            ),
+            (false, false) => {}
+        }
+    }
+
+    /// An engine for the microphone alone, with no session: what it
+    /// hears is never sent.
+    fn start_sessionless_engine(&mut self) {
+        self.voice_in_room = true;
+        self.voice
+            .tx
+            .send(VoiceControl::Start {
+                settings: Box::new(self.settings.clone()),
+                our_client_id: None,
+                in_room: true,
+            })
+            .ok();
+    }
+
     /// Tell the host what keeps the session alive off screen, when that
     /// changes: connected in a voice room (the microphone open) or in
     /// the lobby (D63). `force` says it again as it is — on a phone
     /// brought back to the screen, where a room's microphone type that
     /// was refused in the background can now be granted.
     pub(super) fn sync_keep_alive(&mut self, force: bool) {
-        if !self.connected || self.our_client_id.is_none() {
+        if !self.connected || self.session.our_client_id.is_none() {
             return;
         }
         let in_room = !self.in_lobby() || self.is_testing_mic;
@@ -466,17 +557,39 @@ impl AppState {
         }
     }
 
+    /// Tell the voice engine whether we are in a voice room (or testing
+    /// the microphone, or showing its meter), when that changes. On a
+    /// phone the microphone and the call path go with it: nothing
+    /// records in the lobby (ANDROID-SPEC.md D53, IOS-SPEC.md D51). The
+    /// desktop keeps its streams and drops what the microphone hears,
+    /// so nothing is encoded and sent for the relay to throw away
+    /// (review P1-6).
+    ///
+    /// And where what it hears may go: a test keeps it on this device
+    /// anywhere, the meter does wherever there is no room to talk into
+    /// — the lobby and the AFK room, where the relay would drop it too,
+    /// and nothing lights us up as speaking for it.
     pub(super) fn sync_voice_room(&mut self) {
-        // Disconnected, the engine is on its way out (the deferred
-        // Stop) or a microphone test owns it: leave it as it is.
-        if !audio::RELEASES_MIC || (!self.connected && !self.is_testing_mic) {
+        self.sync_mic_local();
+        // No session's engine, no test and no meter: there is none yet
+        // (`Connected`, before `Init` starts it with where we are), or
+        // it is on its way out (the deferred Stop). Leave it as it is.
+        if !self.engine_wanted() {
             return;
         }
-        let in_room = !self.in_lobby() || self.is_testing_mic;
+        let in_room = self.voice_room_wanted();
         if in_room != self.voice_in_room {
             self.voice_in_room = in_room;
             self.voice.tx.send(VoiceControl::SetInRoom(in_room)).ok();
         }
+    }
+
+    /// What the network thread reads before it sends a voice packet:
+    /// what the microphone hears stays here during a test, and while
+    /// the Audio tab's meter has it open out of a voice room.
+    pub(super) fn sync_mic_local(&self) {
+        let local = self.is_testing_mic || (self.audio_tab_open && !self.in_voice_room());
+        self.is_testing_mic_shared.store(local, Ordering::Relaxed);
     }
 
     /// Send the composer draft: shortcodes rendered, control chars
@@ -490,19 +603,19 @@ impl AppState {
             .chars()
             .take(app_core::chat::MAX_MESSAGE_CHARS)
             .collect();
-        if let Some(edit) = self.editing.take() {
+        if let Some(edit) = self.session.chat.editing.take() {
             // Rewriting one of ours: an empty result is a cancel, not
             // a deletion.
             self.main.global::<State>().set_editing(false);
-            if !text.is_empty() && self.own_texts.get(&edit.msg_id) != Some(&text) {
+            if !text.is_empty() && self.session.chat.own_texts.get(&edit.msg_id) != Some(&text) {
                 self.network
                     .tx
-                    .send(NetworkControl::EditMessage {
+                    .send(NetworkControl::Send(ClientMessage::EditMessage {
                         msg_id: edit.msg_id,
                         text,
-                    })
+                    }))
                     .ok();
-                self.pending_edit = Some(edit.msg_id);
+                self.session.chat.pending_edit = Some(edit.msg_id);
                 Self::arm_apply_timeout(edit.msg_id, false);
             }
             self.main.global::<State>().set_draft("".into());
@@ -521,10 +634,10 @@ impl AppState {
             && let Some((command, args)) = split_command(rest)
         {
             self.handle_slash_command(command, args);
-        } else if let Some(to) = self.active_dm {
+        } else if let Some(to) = self.session.chat.active_dm {
             self.send_dm(to, text);
             self.main.invoke_chat_pin_bottom();
-        } else if let Some(TextMute { until }) = self.text_muted {
+        } else if let Some(TextMute { until }) = self.session.text_muted {
             // The server would drop it anyway; say so here instead.
             let until = format!(" {}", describe_until(until));
             self.show_toast(

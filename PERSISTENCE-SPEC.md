@@ -27,9 +27,10 @@ the media path.
    never tells the server what it is. There is no client-side field
    that influences a role, a permission, or a display badge.
 3. **Additive wire only.** Every new message is a new enum variant
-   behind a feature bit; 1.0 clients keep working against a 1.1 server
-   (they see no history, no DMs, no roles, and are treated as guests).
-   The ALPN string does not change.
+   behind a feature bit. 1.0 clients, which log in with the shared
+   room password instead of a device key, are the one exception: a 1.1
+   server refuses them with `BadHello` and they are told to update
+   (§3.4). The ALPN string does not change.
 4. **Live state stays in memory.** Channels, memberships, roles and
    restrictions are loaded once at startup and on change; the tick
    consults RAM. The database is the source of truth across restarts,
@@ -85,9 +86,17 @@ not the other restores to dangling references; `server restore`,
 **CLI against a running server** (persistence on only — with
 persistence off there is no CLI; administration is over the wire,
 §8): the CLI writes SQLite; the persistence thread polls `PRAGMA
-data_version` every 2 s and, on an external change, reloads the policy
-tables and hands the tick a fresh snapshot behind an `Arc` swap. This
-also covers an operator editing the database by hand.
+data_version` every 2 s and, on an external change, applies the writes
+already queued, reloads the policy tables and hands the tick a fresh
+snapshot, which it diffs against the old one: only users whose roles
+changed get a `UserDetails`, only sessions whose permissions changed a
+`Session`, and `RoleList` goes out only if the roles table changed. This
+also covers an operator editing the database by hand. The CLI's
+listings (users, roles, restrictions, invites, telemetry, the `<who>`
+lookup, `db check`) open the database read-only, and the built-in role
+sync skips rows that already match, so reading is not a change (1.2.1,
+review P1-22). With the server's socket wait capped at 1 s (review
+P1-2), a change reaches live sessions within about 3 s.
 Migrations are forward-only, recorded in `schema_version`; a downgrade
 refuses to start rather than guess.
 
@@ -187,7 +196,11 @@ telemetry_events (ts, user_id, key_hash, kind, event BLOB)
 ```
 
 Indexes: `messages(conv_id, msg_id)`, `messages(ts)`, `restrictions(user_id)`,
-`restrictions(key_hash)`, `telemetry_samples(user_id, ts)`, `blobs(refs)`.
+`restrictions(key_hash)`, `telemetry_samples(user_id, ts)`, `blobs(refs)`;
+since 1.2.1 `messages(user_id)` and `conversations(user_b)` (migration
+5, with the `counters` table that keeps the message-id watermark) and
+`messages(blob_id)` (migration 6, for the reference recount at
+startup). The schema is at version 6.
 
 ### 2.1 Ids and keys
 
@@ -532,7 +545,11 @@ ServerMessage::Conversations { dms: Vec<{ user_id, name, unread, last_ts }> }
   right after `Init`; DMs on demand from the conversation list.
   Images and files in history are blob references.
 - Retention prunes messages older than `history.retain_days`; blobs
-  with `refs = 0` are deleted after `files.retain_days`.
+  with `refs = 0` are deleted after `files.retain_days`. A pruned
+  message gives its file reference back in the same transaction (it
+  used to keep it, so a file posted once was never deleted), and the
+  server recounts every file's references from the stored rows at
+  startup, so a count that drifted is corrected by a restart.
 
 ## 7. Files and images
 
@@ -541,7 +558,7 @@ special case of it (rendered inline), everything else is a card.
 
 ```rust
 ClientMessage::UploadBegin  { upload_id, name, mime, size, sha256 }  // Signal lane
-ServerMessage::UploadAccept { upload_id, needed: bool }               // false = server already has this hash
+ServerMessage::UploadAccept { upload_id, needed: bool }               // false = the server has it and knows you hold it
 ClientMessage::UploadChunk  { upload_id, index, count, data }         // Media lane, paced (existing path)
 ServerMessage::UploadDone   { upload_id, blob_id } | UploadRejected { upload_id, reason }
 ServerMessage::Message { …, attachment: Some(Attachment { blob_id, name, mime, size }) }
@@ -549,8 +566,14 @@ ClientMessage::FetchBlob    { blob_id }                               // Signal
 ServerMessage::Blob… on a Media stream (existing paced relay), sha verified by the client as today
 ```
 
-- **Dedup by content:** `UploadBegin` carries the hash; a known blob is
-  acknowledged without transfer (`needed: false`), then referenced.
+- **Dedup by content:** `UploadBegin` carries the hash. A known blob is
+  acknowledged without transfer (`needed: false`) for its uploader,
+  and for anyone who has already sent the same bytes during this run
+  of the server; it is then referenced. Anyone else is asked for the
+  bytes once (`needed: true`): sending them is the proof that they
+  hold the file, and only then may they post it. Knowing a hash is not
+  enough to attach someone else's file (review P0-4). The proofs live
+  in memory, so after a restart a second poster uploads once more.
 - **Without persistence** a memory-mode server relays pictures live
   to everyone online through the paced Media path (the 1.0
   `ImageMessage` relay) and refuses other files; nothing is stored.
@@ -723,8 +746,8 @@ persistence off.
 
 Talking and sharing count only with someone else there, so an empty
 room farms nothing. **Level is derived from xp, never stored:** the
-next level costs `250 × level^1.5` xp (levels 1–10 ≈ four hours of
-ordinary use, 20 ≈ a couple of months). Changing the curve later is a
+next level costs `13 × level^1.5` xp (`protocol/src/progress.rs`;
+level 10 ≈ four hours of ordinary use, 20 ≈ a day). Changing the curve later is a
 formula change, not a migration.
 
 Wire: `UserDetails` carries `level`; `ProgressUpdate { xp, level }`
@@ -741,8 +764,9 @@ existing structs.** So nothing here adds a field: everything is a
 `UserJoined` and as a batch after `Init`; `ChannelDetails { stable id,
 min_role, owner, permanent, afk_after_min }` after `Init` and
 `ChannelListUpdated`; `Removed`, `Restricted`, `ProfileUpdated`,
-`ProgressUpdate`, `MessageEdited`, `MessageDeleted`, `History` (paged
-in ≤64 KiB batches, `more: true`), and so on. Where earlier sections
+`ProgressUpdate`, `MessageEdited`, `MessageDeleted`, `History` (one
+message per page, cut to the newest rows that fit the 17 KiB message
+bound, `more: true` when anything was left out — 1.2.1), and so on. Where earlier sections
 wrote `Welcome.permissions` or `ChannelInfo.channel_id`, read them as
 these variants.
 

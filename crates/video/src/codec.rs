@@ -57,6 +57,8 @@ extern crate ffmpeg_next as ffmpeg;
 
 use std::{
     collections::VecDeque,
+    ffi::c_int,
+    ptr,
     time::{Duration, Instant},
 };
 
@@ -92,8 +94,17 @@ const MIN_IDR_REOPEN_INTERVAL_MS: u64 = KEYFRAME_INTERVAL_MS;
 /// if that logic ever fails. Kept long so the two mechanisms don't fight.
 const GOP_BACKSTOP_SECS: u32 = 8;
 
-/// Encoder names to try, in priority order.
-const ENCODER_PRIORITY: &[&str] = &["h264_nvenc", "h264_qsv", "h264_amf", "libx264"];
+/// Encoder names to try, in priority order: the hardware ones (each
+/// exists in the `FFmpeg` build of the systems that can have it — the
+/// first three on Windows and Linux, `VideoToolbox` on macOS), then
+/// software. One that is absent, or will not open, is passed over.
+const ENCODER_PRIORITY: &[&str] = &[
+    "h264_nvenc",
+    "h264_qsv",
+    "h264_amf",
+    "h264_videotoolbox",
+    "libx264",
+];
 
 /// Hard per-access-unit cap for AMF, in bits: 250 KB, under the
 /// transport's 275,400 B chunking limit with room for the AUD/SPS/PPS
@@ -190,6 +201,9 @@ pub struct FfmpegEncoder {
     logged_session: Option<(u32, u32, u32, u32, u32)>,
     /// Capture timestamp of the last IDR we forced (drives cadence).
     last_keyframe_ms: Option<u64>,
+    /// Capture timestamp of the last frame submitted: what a repeated
+    /// frame's still time is measured from ([`Self::encode_repeat`]).
+    last_frame_ms: Option<u64>,
     /// Last PTS handed to the encoder — used to keep PTS strictly increasing.
     last_pts: Option<i64>,
     /// Index into [`QP_FLOORS`] once a frame came out too large to send,
@@ -213,8 +227,6 @@ struct EncSession {
     bitrate_scale_pct: u32,
     /// The quantizer floor it was opened with (`qmin`), if any.
     qp_floor: Option<u32>,
-    /// Reusable `FFmpeg` frame for RGBA input (source resolution).
-    rgba_frame: VideoFrame,
     /// Reusable `FFmpeg` frame for YUV420P — fed to the encoder.
     yuv_frame: VideoFrame,
     /// Reusable packet for receiving encoder output.
@@ -252,7 +264,7 @@ impl FfmpegEncoder {
             // behind it exists. (The probe's pixel format is arbitrary —
             // this session is discarded; the real one opens lazily from
             // the first frame's actual dimensions and format.)
-            match open_session(
+            let probe = open_session(
                 codec,
                 name,
                 quality,
@@ -261,8 +273,9 @@ impl FfmpegEncoder {
                 quality.width(),
                 quality.height(),
                 PixelFormat::Rgba,
-            ) {
-                Ok(_probe) => {
+            );
+            match probe {
+                Ok(_) => {
                     log::info!("Using FFmpeg encoder: {name}");
                     return Ok(Self {
                         codec,
@@ -274,6 +287,7 @@ impl FfmpegEncoder {
                         last_idr_reopen_ms: None,
                         logged_session: None,
                         last_keyframe_ms: None,
+                        last_frame_ms: None,
                         last_pts: None,
                         qp_floor: None,
                         qp_floor_moved: None,
@@ -391,10 +405,25 @@ impl FfmpegEncoder {
         Ok(())
     }
 
-    /// Encode one RGBA frame. See [`VideoEncoder::encode`] for the output
-    /// contract (zero or more access units, one `EncodedFrame` each).
-    pub fn encode(&mut self, frame: &Frame) -> Result<Vec<EncodedFrame>, CodecError> {
+    fn encode_frame(
+        &mut self,
+        frame: &Frame,
+        still: bool,
+    ) -> Result<Vec<EncodedFrame>, CodecError> {
         let mut out = Vec::new();
+
+        if still {
+            let since_last = self
+                .last_frame_ms
+                .map_or(0, |last| frame.timestamp_ms.saturating_sub(last));
+            for at in [&mut self.last_keyframe_ms, &mut self.last_idr_out_ms]
+                .into_iter()
+                .flatten()
+            {
+                *at += since_last;
+            }
+        }
+        self.last_frame_ms = Some(frame.timestamp_ms);
 
         // Reopen-for-IDR backstop. Some encoders (FFmpeg's AMF wrapper
         // <= 7.1) cannot force an IDR: frame-level pict_type is ignored
@@ -452,10 +481,10 @@ impl FfmpegEncoder {
         // Strictly increasing PTS in the 1/1000 time base. Capture
         // timestamps are ms-resolution, so a burst can repeat a value.
         let mut pts = frame.timestamp_ms as i64;
-        if let Some(last) = self.last_pts {
-            if pts <= last {
-                pts = last + 1;
-            }
+        if let Some(last) = self.last_pts
+            && pts <= last
+        {
+            pts = last + 1;
         }
         self.last_pts = Some(pts);
 
@@ -475,18 +504,16 @@ impl FfmpegEncoder {
 
         let session = self.session.as_mut().expect("ensure_session sets this");
 
-        fill_rgba_frame(
-            &mut session.rgba_frame,
+        // RGBA/BGRA (src) → YUV (out) via swscale, resize and colorspace
+        // in one pass, read straight from the captured frame (review
+        // P1-11: it was copied into an AVFrame first, 8 MB a 1080p frame).
+        scale_packed(
+            &mut session.sws,
             &frame.data,
             frame.width,
             frame.height,
+            &mut session.yuv_frame,
         )?;
-
-        // RGBA(src) → YUV420P(out) via swscale: resize + colorspace in one pass
-        session
-            .sws
-            .run(&session.rgba_frame, &mut session.yuv_frame)
-            .map_err(|e| CodecError::ColorConversion(e.to_string()))?;
 
         session.yuv_frame.set_pts(Some(pts));
         if make_keyframe {
@@ -535,68 +562,15 @@ impl FfmpegEncoder {
         Ok(out)
     }
 
-    /// Force the next encoded frame to be an IDR keyframe.
-    ///
-    /// Call this when a new viewer subscribes or reports an unrecoverable
-    /// gap, so they immediately get a decodable frame with SPS/PPS.
-    pub fn force_keyframe(&mut self) {
-        self.force_next_keyframe = true;
-    }
-
-    /// Whether a forced keyframe is queued but not yet encoded.
-    #[must_use]
-    pub fn keyframe_pending(&self) -> bool {
-        self.force_next_keyframe
-    }
-
-    /// See [`VideoEncoder::frame_too_large`]: the next quantizer floor,
-    /// applied by the session [`Self::ensure_session`] opens next.
-    pub fn frame_too_large(&mut self) -> Option<u32> {
-        let next = qp_floor_after_oversize(self.qp_floor)?;
-        self.qp_floor = Some(next);
-        self.qp_floor_moved = Some(Instant::now());
-        Some(QP_FLOORS[next])
-    }
-
-    /// The quantizer floor in force, if any.
-    #[must_use]
-    pub fn qp_floor(&self) -> Option<u32> {
-        self.qp_floor.map(|i| QP_FLOORS[i])
-    }
-
     /// One step back down after [`QP_FLOOR_RELAX_AFTER`] without a
     /// frame too large.
     fn relax_qp_floor(&mut self, now: Instant) {
-        if let (Some(i), Some(moved)) = (self.qp_floor, self.qp_floor_moved) {
-            if now.duration_since(moved) >= QP_FLOOR_RELAX_AFTER {
-                self.qp_floor = i.checked_sub(1);
-                self.qp_floor_moved = Some(now);
-            }
+        if let (Some(i), Some(moved)) = (self.qp_floor, self.qp_floor_moved)
+            && now.duration_since(moved) >= QP_FLOOR_RELAX_AFTER
+        {
+            self.qp_floor = i.checked_sub(1);
+            self.qp_floor_moved = Some(now);
         }
-    }
-
-    /// See [`VideoEncoder::supports_forced_keyframes`]: everything we
-    /// use honors `pict_type=I` except `FFmpeg`'s AMF wrapper (<= 7.1).
-    #[must_use]
-    pub fn supports_forced_keyframes(&self) -> bool {
-        self.enc_name != "h264_amf"
-    }
-
-    #[must_use]
-    pub fn quality(&self) -> Quality {
-        self.quality
-    }
-
-    /// See [`VideoEncoder::set_bitrate_scale_pct`]. Only records the
-    /// request; [`Self::ensure_session`] reopens on the next encode if
-    /// the running session was opened at a different scale.
-    pub fn set_bitrate_scale_pct(&mut self, pct: u32) {
-        self.bitrate_scale_pct = crate::clamp_bitrate_scale_pct(pct);
-    }
-
-    #[must_use]
-    pub fn bitrate_scale_pct(&self) -> u32 {
-        self.bitrate_scale_pct
     }
 
     /// Returns the name of the active encoder (e.g. "`h264_nvenc`", "libx264").
@@ -604,49 +578,101 @@ impl FfmpegEncoder {
     pub fn encoder_name(&self) -> &'static str {
         self.enc_name
     }
-
-    /// The output dimensions of the current session, if one exists.
-    #[must_use]
-    pub fn output_dimensions(&self) -> Option<(u32, u32)> {
-        self.session.as_ref().map(|s| (s.out_w, s.out_h))
-    }
 }
 
 impl VideoEncoder for FfmpegEncoder {
+    /// Encode one RGBA frame. See [`VideoEncoder::encode`] for the output
+    /// contract (zero or more access units, one `EncodedFrame` each).
     fn encode(&mut self, frame: &Frame) -> Result<Vec<EncodedFrame>, CodecError> {
-        self.encode(frame)
+        self.encode_frame(frame, false)
     }
 
-    fn quality(&self) -> Quality {
-        self.quality
+    /// See [`VideoEncoder::encode_repeat`]: the time since the last
+    /// frame was spent on a still picture and does not count towards
+    /// the next keyframe. A still share used to send a full IDR every
+    /// [`KEYFRAME_INTERVAL_MS`] — every second refresh — and on AMF
+    /// reopened its session for one every two intervals (review P2-41).
+    /// A viewer who needs a keyframe asks, and
+    /// [`Self::force_keyframe`] still gets one out at once.
+    fn encode_repeat(&mut self, frame: &Frame) -> Result<Vec<EncodedFrame>, CodecError> {
+        self.encode_frame(frame, true)
     }
 
+    /// See [`VideoEncoder::frames_in_flight`].
+    fn frames_in_flight(&self) -> usize {
+        self.session.as_ref().map_or(0, |s| s.pending_ts.len())
+    }
+
+    /// See [`VideoEncoder::drain`].
+    ///
+    /// # Errors
+    /// When the encoder fails while handing its output out.
+    fn drain(&mut self) -> Result<Vec<EncodedFrame>, CodecError> {
+        let mut out = Vec::new();
+        let Some(session) = self.session.as_mut() else {
+            return Ok(out);
+        };
+        if session.pending_ts.is_empty() {
+            return Ok(out);
+        }
+        drain_packets(session, &mut out)?;
+        if let Some(keyframe) = out.iter().find(|f| f.is_keyframe) {
+            // Ground truth for the reopen-for-IDR backstop, as in encode.
+            self.last_idr_out_ms = Some(keyframe.timestamp_ms);
+        }
+        Ok(out)
+    }
+
+    /// See [`VideoEncoder::output_needs_input`]: `FFmpeg` 7.1's AMF
+    /// wrapper (`ff_amf_receive_packet`) returns at once, without asking
+    /// AMF for output, when no new frame is queued — so a drain hands
+    /// out only what an earlier submission already collected.
+    fn output_needs_input(&self) -> bool {
+        self.enc_name == "h264_amf"
+    }
+
+    /// Force the next encoded frame to be an IDR keyframe.
+    ///
+    /// Call this when a new viewer subscribes or reports an unrecoverable
+    /// gap, so they immediately get a decodable frame with SPS/PPS.
     fn force_keyframe(&mut self) {
-        self.force_keyframe();
+        self.force_next_keyframe = true;
     }
 
+    /// Whether a forced keyframe is queued but not yet encoded.
     fn keyframe_pending(&self) -> bool {
-        self.keyframe_pending()
+        self.force_next_keyframe
     }
 
+    /// See [`VideoEncoder::frame_too_large`]: the next quantizer floor,
+    /// applied by the session [`Self::ensure_session`] opens next.
+    fn frame_too_large(&mut self) -> Option<u32> {
+        let next = qp_floor_after_oversize(self.qp_floor)?;
+        self.qp_floor = Some(next);
+        self.qp_floor_moved = Some(Instant::now());
+        Some(QP_FLOORS[next])
+    }
+
+    /// The quantizer floor in force, if any.
+    fn qp_floor(&self) -> Option<u32> {
+        self.qp_floor.map(|i| QP_FLOORS[i])
+    }
+
+    /// See [`VideoEncoder::supports_forced_keyframes`]: everything we
+    /// use honors `pict_type=I` except `FFmpeg`'s AMF wrapper (<= 7.1).
     fn supports_forced_keyframes(&self) -> bool {
-        self.supports_forced_keyframes()
+        self.enc_name != "h264_amf"
     }
 
+    /// See [`VideoEncoder::set_bitrate_scale_pct`]. Only records the
+    /// request; [`Self::ensure_session`] reopens on the next encode if
+    /// the running session was opened at a different scale.
     fn set_bitrate_scale_pct(&mut self, pct: u32) {
-        self.set_bitrate_scale_pct(pct);
+        self.bitrate_scale_pct = crate::clamp_bitrate_scale_pct(pct);
     }
 
     fn bitrate_scale_pct(&self) -> u32 {
-        self.bitrate_scale_pct()
-    }
-
-    fn frame_too_large(&mut self) -> Option<u32> {
-        self.frame_too_large()
-    }
-
-    fn qp_floor(&self) -> Option<u32> {
-        self.qp_floor()
+        self.bitrate_scale_pct
     }
 }
 
@@ -696,11 +722,21 @@ pub struct FfmpegDecoder {
     /// frame right before we convert it. So we receive here and swap on
     /// success; the terminating EAGAIN only ever clears the scratch.
     scratch_frame: VideoFrame,
-    /// Reusable `FFmpeg` frame for RGBA conversion output.
+    /// RGBA conversion output for widths that cannot be converted
+    /// straight into a tight buffer (see [`DIRECT_WIDTH_MULTIPLE`]);
+    /// made when first needed.
     rgba_frame: Option<VideoFrame>,
     /// The split of the last call that produced a picture.
     last_timing: Option<crate::DecodeTiming>,
 }
+
+/// Decoded widths that are a multiple of this convert straight into the
+/// pooled buffer: every swscale path writes such a row exactly. Its
+/// SIMD writes whole blocks — 8 pixels on x86, 16 on aarch64 — and on
+/// other widths runs past the row's end, or (x86's unscaled YUV → RGB,
+/// when the stride leaves no room) stops short of it. Checked against
+/// `FFmpeg` 7.1's `libswscale` sources.
+const DIRECT_WIDTH_MULTIPLE: u32 = 16;
 
 /// The scaler plus the source parameters it was built for.
 struct DecoderSws {
@@ -815,31 +851,37 @@ impl FfmpegDecoder {
                 color_space,
                 color_range,
             });
-            self.rgba_frame = Some(VideoFrame::new(Pixel::RGBA, w, h));
+            self.rgba_frame = None;
         }
 
-        let rgba_frame = self.rgba_frame.as_mut().expect("built above");
         let sws = self.sws.as_mut().expect("built above");
-
-        sws.ctx
-            .run(&self.decoded_frame, rgba_frame)
-            .map_err(|e| CodecError::ColorConversion(e.to_string()))?;
-
-        // Stride-aware copy into the output buffer. Reuses a recycled
-        // buffer's allocation (`crate::pool`); rows are appended with
-        // `extend_from_slice` so the buffer is never redundantly
-        // zero-filled first (resize(n, 0) would memset multiple MB per
-        // frame just to immediately overwrite every byte).
-        let stride = rgba_frame.stride(0);
-        let src = rgba_frame.data(0);
-        let row_bytes = w as usize * 4;
-        let rgba_size = row_bytes * h as usize;
-
-        let mut data = crate::pool::take(rgba_size);
-        for row in 0..h as usize {
-            let src_start = row * stride;
-            data.extend_from_slice(&src[src_start..src_start + row_bytes]);
-        }
+        let data = if w.is_multiple_of(DIRECT_WIDTH_MULTIPLE) {
+            // Straight into the buffer that goes to the present thread
+            // (review P1-11: a scratch frame and a row copy before).
+            convert_into_pool(&mut sws.ctx, &self.decoded_frame, w, h)?
+        } else {
+            // swscale's SIMD paths write whole blocks of pixels: past the
+            // end of a row (and of a tight buffer) or short of it (the
+            // x86 one, when the stride does not leave room). An AVFrame's
+            // rows are padded for it; a width like 1366 takes this path.
+            let rgba_frame = self
+                .rgba_frame
+                .get_or_insert_with(|| VideoFrame::new(Pixel::RGBA, w, h));
+            sws.ctx
+                .run(&self.decoded_frame, rgba_frame)
+                .map_err(|e| CodecError::ColorConversion(e.to_string()))?;
+            // Reuses a recycled buffer's allocation (`crate::pool`); rows
+            // are appended, so nothing is zero-filled first.
+            let stride = rgba_frame.stride(0);
+            let src = rgba_frame.data(0);
+            let row_bytes = w as usize * 4;
+            let mut data = crate::pool::take(row_bytes * h as usize);
+            for row in 0..h as usize {
+                let src_start = row * stride;
+                data.extend_from_slice(&src[src_start..src_start + row_bytes]);
+            }
+            data
+        };
         self.last_timing = Some(crate::DecodeTiming {
             codec: decoded,
             output: started.elapsed().saturating_sub(decoded),
@@ -853,20 +895,11 @@ impl FfmpegDecoder {
             format: crate::PictureFormat::Rgba,
         }))
     }
-
-    /// Return a previously-decoded buffer for reuse (`crate::pool`).
-    pub fn return_buffer(&mut self, buf: Vec<u8>) {
-        crate::pool::recycle(buf);
-    }
 }
 
 impl VideoDecoder for FfmpegDecoder {
     fn decode(&mut self, encoded: &EncodedFrame) -> Result<Option<DecodedFrame>, CodecError> {
         self.decode(encoded)
-    }
-
-    fn return_buffer(&mut self, buf: Vec<u8>) {
-        self.return_buffer(buf);
     }
 
     fn last_timing(&self) -> Option<crate::DecodeTiming> {
@@ -927,7 +960,9 @@ fn drain_before_submit(name: &str) -> bool {
 /// interleaved chroma). swscale converts RGBA to either directly.
 fn encoder_pix_fmt(name: &str) -> Pixel {
     match name {
-        "h264_qsv" => Pixel::NV12,
+        // VideoToolbox takes planar frames too, and converts them; NV12
+        // is what its hardware reads.
+        "h264_qsv" | "h264_videotoolbox" => Pixel::NV12,
         _ => Pixel::YUV420P,
     }
 }
@@ -1033,7 +1068,6 @@ fn open_session(
         0, // YUV output is limited range
     );
 
-    let rgba_frame = VideoFrame::new(in_pix, src_w, src_h);
     let mut yuv_frame = VideoFrame::new(pix_fmt, out_w, out_h);
     // Tag the frames we hand to the encoder with the same colorimetry.
     unsafe {
@@ -1054,7 +1088,6 @@ fn open_session(
         out_h,
         bitrate_scale_pct,
         qp_floor,
-        rgba_frame,
         yuv_frame,
         pkt: Packet::empty(),
         pending_ts: VecDeque::new(),
@@ -1155,17 +1188,48 @@ fn codec_options(name: &str, rc: RateControl) -> Dictionary<'static> {
             opts.set("maxrate", &format!("{maxrate}"));
             opts.set("bufsize", &format!("{vbv_bufsize}"));
             opts.set("forced-idr", "1");
+            // Hand each access unit out on the call that submitted its
+            // frame. The default holds output back until that many
+            // frames are queued (`delay`, stored as `async_depth`: INT_MAX,
+            // capped at the surface count − 1, in FFmpeg 7.1's
+            // nvenc_h264.c / nvenc.c `output_ready`), so a still screen's
+            // last change waited for the next refresh (review P1-13).
+            opts.set("delay", "0");
         }
         "h264_qsv" => {
             opts.set("preset", "veryfast");
             opts.set("low_power", "1");
             opts.set("maxrate", &format!("{maxrate}"));
             opts.set("bufsize", &format!("{vbv_bufsize}"));
+            // A packet leaves only once `async_depth` frames are queued
+            // (default 4; FFmpeg 7.1's qsvenc.h / `ff_qsv_encode`): 1 hands
+            // each out on the call that submitted its frame (review P1-13).
+            opts.set("async_depth", "1");
             // No-op on FFmpeg <= 7.1 (the option doesn't exist there;
             // unknown dict keys are silently ignored) but honored by
             // FFmpeg 8's rewritten amfenc — kept so an ffmpeg upgrade
             // restores on-demand IDRs without a code change.
             opts.set("forced_idr", "1");
+        }
+        "h264_videotoolbox" => {
+            // The Mac's hardware encoder. The release build has had it
+            // all along and the list never tried it, so a Mac encoded
+            // its share with x264 on the CPU (review P2-42).
+            //
+            // Hardware or nothing: a Mac without one fails the probe
+            // and gets libx264, tuned above, not VideoToolbox's own
+            // software encoder.
+            opts.set("allow_sw", "0");
+            // No lookahead, no reordering: a frame is encoded as it
+            // arrives. It finishes after the call that submitted it;
+            // the next call, or the next tick's `drain`, hands it out.
+            opts.set("realtime", "1");
+            opts.set("profile", "high");
+            // Besides the target, the one bound VideoToolbox takes: a
+            // data-rate limit over a second. `bufsize` means nothing
+            // to it. A frame forced to `I` is an IDR with its
+            // parameter sets, as `FFmpeg` writes it out.
+            opts.set("maxrate", &format!("{maxrate}"));
         }
         "h264_amf" => {
             // NO usage preset — deliberately. FFmpeg's AMF wrapper
@@ -1260,30 +1324,94 @@ fn set_sws_colorspace(sws: &mut SwsContext, coeffs: *const i32, src_range: i32, 
     }
 }
 
-/// Copy RGBA pixel data into an ffmpeg `VideoFrame` (stride-aware).
-fn fill_rgba_frame(
-    frame: &mut VideoFrame,
-    rgba: &[u8],
+/// Convert a decoded `w × h` picture to tightly packed RGBA straight into
+/// a buffer from `crate::pool` (rows `w × 4` bytes apart). Only for
+/// widths that are a multiple of [`DIRECT_WIDTH_MULTIPLE`].
+fn convert_into_pool(
+    sws: &mut SwsContext,
+    src: &VideoFrame,
+    w: u32,
+    h: u32,
+) -> Result<Vec<u8>, CodecError> {
+    let row_bytes = w as usize * 4;
+    let len = row_bytes * h as usize;
+    let mut data = crate::pool::take(len);
+    let planes: [*mut u8; 4] = [
+        data.as_mut_ptr(),
+        ptr::null_mut(),
+        ptr::null_mut(),
+        ptr::null_mut(),
+    ];
+    let strides: [c_int; 4] = [row_bytes as c_int, 0, 0, 0];
+    // SAFETY: the scaler was built for `src`'s format and size with a
+    // `w × h` RGBA output (`decode` rebuilds it when either changes);
+    // `src` is a decoded frame whose planes FFmpeg owns, and `data` has
+    // room for `h` rows of `row_bytes`, which is exactly what a width
+    // that is a multiple of `DIRECT_WIDTH_MULTIPLE` makes it write.
+    let rows = unsafe {
+        let input = src.as_ptr();
+        ffmpeg::ffi::sws_scale(
+            sws.as_mut_ptr(),
+            (*input).data.as_ptr().cast(),
+            (*input).linesize.as_ptr(),
+            0,
+            h as c_int,
+            planes.as_ptr(),
+            strides.as_ptr(),
+        )
+    };
+    if rows != h as c_int {
+        crate::pool::recycle(data);
+        return Err(CodecError::ColorConversion(format!(
+            "sws_scale wrote {rows} of {h} rows"
+        )));
+    }
+    // SAFETY: every one of the `h` rows of `row_bytes` was written
+    // (checked above), so the first `len` bytes are initialised.
+    unsafe { data.set_len(len) };
+    Ok(data)
+}
+
+/// Run the encoder's scaler on a tightly packed 4-byte-per-pixel frame
+/// (`width × height`, the size the scaler was built for) into `dst`.
+fn scale_packed(
+    sws: &mut SwsContext,
+    src: &[u8],
     width: u32,
     height: u32,
+    dst: &mut VideoFrame,
 ) -> Result<(), CodecError> {
     let row_bytes = width as usize * 4;
     let needed = row_bytes * height as usize;
-    if rgba.len() < needed {
+    if src.len() < needed {
         return Err(CodecError::Encode(format!(
-            "frame data too small: {} bytes for {width}x{height} RGBA (need {needed})",
-            rgba.len()
+            "frame data too small: {} bytes for {width}x{height} (need {needed})",
+            src.len()
         )));
     }
-
-    let stride = frame.stride(0);
-    let dst = frame.data_mut(0);
-
-    for row in 0..height as usize {
-        let src_start = row * row_bytes;
-        let dst_start = row * stride;
-        dst[dst_start..dst_start + row_bytes]
-            .copy_from_slice(&rgba[src_start..src_start + row_bytes]);
+    let planes: [*const u8; 4] = [src.as_ptr(), ptr::null(), ptr::null(), ptr::null()];
+    let strides: [c_int; 4] = [row_bytes as c_int, 0, 0, 0];
+    // SAFETY: the scaler was built for a `width × height` packed input
+    // (`open_session`) and `src` holds that many rows of `row_bytes`
+    // (checked above); `dst` is the session's own frame, allocated by
+    // `VideoFrame::new` at the scaler's output size and format, so its
+    // planes and line sizes are what `sws_scale` writes through.
+    let rows = unsafe {
+        let out = dst.as_mut_ptr();
+        ffmpeg::ffi::sws_scale(
+            sws.as_mut_ptr(),
+            planes.as_ptr(),
+            strides.as_ptr(),
+            0,
+            height as c_int,
+            (*out).data.as_ptr(),
+            (*out).linesize.as_ptr(),
+        )
+    };
+    if rows <= 0 {
+        return Err(CodecError::ColorConversion(format!(
+            "sws_scale wrote no rows ({rows})"
+        )));
     }
     Ok(())
 }

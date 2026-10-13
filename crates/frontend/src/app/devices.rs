@@ -68,6 +68,7 @@ impl AppState {
         if diff.rebuild_output && !SINGLE_WINDOW_HOST {
             self.settings.audio.output.device = None;
             self.voice.tx.send(VoiceControl::SetOutputDevice(None)).ok();
+            self.sync_stream_output();
             // WASAPI loopback captures from the default output device,
             // so when that device changes the capture stream dies too.
             // Restart it if a screen share is currently active.
@@ -75,6 +76,11 @@ impl AppState {
                 self.screen.tx.send(ScreenControl::RestartSystemAudio).ok();
             }
         }
+
+        // The pickers in Settings show what is there now, with the
+        // selection the lines above may have just moved.
+        let names = |devices: &[(String, bool)]| devices.iter().map(|(n, _)| n.clone()).collect();
+        crate::settingsui::refresh_devices(self, names(&new_input), names(&new_output));
 
         self.last_input_devices = new_input;
         self.last_output_devices = new_output;
@@ -125,23 +131,51 @@ impl AppState {
             .tx
             .send(VoiceControl::SetOutputDevice(device))
             .ok();
+        self.sync_stream_output();
         self.refresh_device_warning();
+    }
+
+    /// Stream audio plays on the voice output picked here, and moves
+    /// with it (review P1-19): the screen thread's decoders read this.
+    /// A phone's pick is a call route the decoders ignore.
+    pub(super) fn sync_stream_output(&self) {
+        self.screen
+            .shared
+            .stream_output
+            .set(self.settings.audio.output.device.as_deref());
     }
 
     pub fn voice_tx(&self) -> &crossbeam_channel::Sender<VoiceControl> {
         &self.voice.tx
     }
 
-    pub fn voice_levels(
-        &self,
-    ) -> (
-        Arc<std::sync::atomic::AtomicU32>,
-        Arc<std::sync::atomic::AtomicU32>,
-    ) {
-        (
-            self.voice.shared.output_level.clone(),
-            self.voice.shared.denoised_level.clone(),
-        )
+    /// The voice engine's meters, for the Settings meter loop.
+    pub fn voice_levels(&self) -> client::voice::SharedAudioState {
+        self.voice.shared.clone()
+    }
+
+    /// Once per install: a user whose other apps Windows is lowering
+    /// because of our call streams — Windows 10, which cannot be asked
+    /// not to — is told that it is Windows, and where the way out is
+    /// (AEC-SPEC.md E15). From the device poll; waits until the window
+    /// is where the toast can be read.
+    pub fn tell_lowering_once(&mut self) {
+        if self.settings.audio.lowering_told || !self.main_on_screen() {
+            return;
+        }
+        let lowering = self.voice.shared.aec.lock().is_ok_and(|report| {
+            report
+                .as_ref()
+                .is_some_and(audio::AecReport::lowering_others)
+        });
+        if !lowering {
+            return;
+        }
+        self.settings.audio.lowering_told = true;
+        self.settings.save();
+        let text = t!("aec-lowering-told");
+        self.push_activity(&text);
+        self.show_toast(ToastKind::Warning, &text);
     }
 
     /// What echo cancellation the voice session got (`None` = none
@@ -176,6 +210,7 @@ impl AppState {
             .ok();
         self.voice.tx.send(VoiceControl::SetInputDevice(None)).ok();
         self.voice.tx.send(VoiceControl::SetOutputDevice(None)).ok();
+        self.sync_stream_output();
         if let Some(hotkeys) = &mut self.hotkeys {
             hotkeys.update(&self.settings);
         }
@@ -197,8 +232,22 @@ impl AppState {
 
     pub fn set_keybind(&mut self, action: BindableAction, bind: String) {
         self.settings.set_bind(action, bind);
+        self.refresh_hotkeys();
+    }
+
+    /// The keybinds or push-to-talk changed: the push-to-talk key is
+    /// watched only while push-to-talk is on (review P1-3).
+    pub fn refresh_hotkeys(&mut self) {
         if let Some(hotkeys) = &mut self.hotkeys {
             hotkeys.update(&self.settings);
+        }
+    }
+
+    /// The permission to watch keys was just granted: bindings that
+    /// were registered as hotkeys meanwhile are watched from here on.
+    pub fn rearm_hotkeys(&mut self) {
+        if let Some(hotkeys) = &mut self.hotkeys {
+            hotkeys.rearm();
         }
     }
 

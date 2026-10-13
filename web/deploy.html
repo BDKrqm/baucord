@@ -442,7 +442,9 @@ sudo chmod +x scripts/*.sh</code></pre>
               kernel's receive backlog
               (<code>/etc/sysctl.d/99-baucord-udp.conf</code>), connection
               tracking sized for Docker's port publishing, NIC ring
-              buffers and RPS at boot, and no cloud-init network hotplug;
+              buffers and RPS at boot, and no cloud-init network hotplug
+              (for the whole host; <code>KEEP_CLOUD_INIT_HOTPLUG=1</code>
+              leaves cloud-init as it is);
             </li>
             <li>
               pulls the image and starts the server
@@ -757,6 +759,15 @@ tail -f /var/log/baucord-net.log</code></pre>
         above about 30 % for long means packet processing is out of CPU.
         <code>ct_count</code> nearing <code>ct_max</code> means connection
         tracking is about to start refusing new people.
+      </p>
+      <p>
+        To sample other containers too, set
+        <code>CONTAINERS="baucord other"</code> for the script
+        (<code>CONTAINERS=""</code> samples the host only). On a host
+        you set up by hand, run it yourself while there is load,
+        <code>sudo nohup scripts/monitor-net.sh 10 &gt;/dev/null
+        2&gt;&amp;1 &amp;</code>, and give
+        <code>/var/log/baucord-net.log</code> a logrotate rule.
       </p>
 
       <h2 id="data">Your server, your data</h2>

@@ -1,14 +1,17 @@
 // settingsui.rs — the settings window: populate, wire, and the two
-// live loops (8 Hz level meters, keybind capture).
+// live loops (the level meters, keybind capture).
 
 use std::{
     cell::{Cell, OnceCell, RefCell},
     collections::HashSet,
-    sync::atomic::Ordering,
     time::{Duration, Instant},
 };
 
-use app_core::{chat::human_size, logfile};
+use app_core::{
+    chat::human_size,
+    logfile,
+    meter::{Meter, Run as MeterRun},
+};
 use client::{
     config::{build_bind_string, BindableAction, ServerEntry},
     network::{NetworkControl, LOG_UPLOAD_MIN_INTERVAL},
@@ -71,11 +74,30 @@ impl<'a> SettingsSurface<'a> {
         }
     }
 
+    /// Whether anyone can see it: the window up and not minimized, or
+    /// the page open.
+    fn showing(&self) -> bool {
+        match self {
+            Self::Window(w) => w.window().is_visible() && !w.window().is_minimized(),
+            Self::Page(m) => m.global::<State>().get_settings_open(),
+        }
+    }
+
     /// The selected nav tab (`TAB_*`).
     fn tab(&self) -> i32 {
         match self {
             Self::Window(w) => w.get_tab(),
             Self::Page(m) => m.global::<State>().get_settings_tab(),
+        }
+    }
+
+    /// Whether the selected tab's contents are what shows. The narrow
+    /// page (D28) is either its section list or one section: the tab
+    /// stays selected behind the list.
+    fn section_showing(&self) -> bool {
+        match self {
+            Self::Window(_) => true,
+            Self::Page(m) => !m.get_narrow() || m.global::<State>().get_settings_section_open(),
         }
     }
 
@@ -145,6 +167,8 @@ fn route_label(name: &str) -> String {
 /// Licenses 9) — the connect view's pencil jumps here. Mirrors the `NavItem`s in
 /// settings.slint.
 pub const TAB_SERVERS: i32 = 5;
+/// Nav index of the Audio tab, whose meters the settings timer drives.
+const TAB_AUDIO: i32 = 2;
 /// Nav index of the Debug tab, whose log view the settings timer
 /// refreshes while it shows.
 const TAB_DEBUG: i32 = 8;
@@ -153,11 +177,22 @@ const TAB_DEBUG: i32 = 8;
 const LOG_TAIL_LINES: usize = 100;
 /// …read from at most the log's last this many bytes.
 const LOG_TAIL_BYTES: usize = 128 * 1024;
-/// How often the log view reads the file again, in settings-timer
-/// ticks (125 ms): every 2 s while the Debug tab shows.
-const LOG_REFRESH_TICKS: u32 = 16;
+/// The settings timer on the Audio tab: the meters' 20 readings a
+/// second, held by `app_core::meter` and set only when a bar moved; the
+/// bar itself glides to each one (`widgets.slint`). At 8 a second and
+/// drawn as read they stepped (first iPhone look, 2026-10-12).
+const METER_TICK: Duration = Duration::from_millis(50);
+/// The Audio tab's echo-cancellation line, which changes when streams
+/// reopen: looked at this often, not with every meter reading.
+const AEC_TICK: Duration = Duration::from_millis(250);
+/// …and on every other tab, or off screen: the Debug tab's log view
+/// reads the file again this often.
+const IDLE_TICK: Duration = Duration::from_secs(2);
 
 thread_local! {
+    /// The Audio tab's meters are on screen: since when, and what was
+    /// seen of them, for the log line when they leave.
+    static METER_RUN: Cell<Option<(Instant, MeterRun)>> = const { Cell::new(None) };
     /// When this run last sent its log: the server takes one per
     /// `LOG_UPLOAD_MIN_INTERVAL`, and the network thread drops a second
     /// one silently, so the button says so instead.
@@ -196,7 +231,7 @@ fn palette(app: &AppState) -> Vec<u32> {
     let mut colors = NAME_COLORS.to_vec();
     // The band follows the permission, not the role: a custom role
     // may hold it, and an "everything but gold" role may not.
-    if client::permissions::has(app.permissions, client::permissions::GOLD_NAME) {
+    if client::permissions::has(app.session.permissions, client::permissions::GOLD_NAME) {
         colors.push(GOLD);
     }
     colors
@@ -339,9 +374,11 @@ pub fn refresh_role_line(app: &AppState) {
 pub fn refresh_safety(app: &AppState) {
     let Some(sf) = surface(app) else { return };
     let s = sf.state();
-    let on = app.connected && app.safety;
+    let on = app.connected && app.session.safety.on;
     s.set_safety(on);
     let mut rows: Vec<BlockedRow> = app
+        .session
+        .safety
         .blocked
         .iter()
         .map(|(user, name)| BlockedRow {
@@ -453,9 +490,14 @@ fn format_sensitivity(threshold: f32) -> String {
         "threshold" => format!("{threshold:.3}"))
 }
 
-/// Open the settings UI: the window (created on first use) on
-/// desktop, the page on a single-window host.
+/// Open the settings UI where it was left: the window (created on
+/// first use) on desktop, the page on a single-window host.
 pub fn open(app: &mut AppState) {
+    open_on(app, None);
+}
+
+/// Open the settings UI, on `tab` (`TAB_*`) if one is asked for.
+pub fn open_on(app: &mut AppState, tab: Option<i32>) {
     if !app::SINGLE_WINDOW_HOST && app.settings_win.is_none() {
         let win = match SettingsWindow::new() {
             Ok(w) => w,
@@ -484,7 +526,15 @@ pub fn open(app: &mut AppState) {
 
     if let Some(sf) = surface(app) {
         sf.show();
+        if let Some(tab) = tab {
+            sf.set_tab(tab);
+        }
     }
+    // Opened on the Audio tab: its microphone now, not a tick later —
+    // and only once the tab asked for is the one selected, or a look
+    // at the servers would open the microphone the Audio tab was left
+    // with.
+    sync_audio_tab(app);
 }
 
 /// Wire the page's callbacks on a single-window host — once, at
@@ -492,6 +542,33 @@ pub fn open(app: &mut AppState) {
 /// is first created.
 pub(crate) fn wire_page(main: &MainWindow) {
     wire(&SettingsSurface::Page(main));
+}
+
+/// The page's plain switches, one row each: the `SettingsState`
+/// setter, the `SettingsLogic` handler, and the field of `Settings`
+/// both stand for (then what to refresh, where a change shows at
+/// once). `populate` and `wire` each expand the table, so a switch
+/// cannot be shown from one field and saved into another, and a new
+/// one is a line here — it was a setter in one function and a closure
+/// 350 lines further down (review P3-35).
+macro_rules! switches {
+    ($apply:ident) => {
+        $apply! {
+            set_auto_connect, on_auto_connect_changed => startup.auto_connect;
+            set_start_minimized, on_start_minimized_changed => startup.start_minimized;
+            set_check_updates, on_check_updates_changed => startup.check_updates;
+            set_sounds_enabled, on_sounds_enabled_changed => sounds.enabled;
+            set_join_leave_sounds, on_join_leave_sounds_changed => sounds.join_leave;
+            set_mention_sound, on_mention_sound_changed => sounds.mention;
+            set_dm_sound, on_dm_sound_changed => sounds.direct_message;
+            set_share_started_sound, on_share_started_sound_changed => sounds.share_started;
+            set_viewer_joined_sound, on_viewer_joined_sound_changed => sounds.viewer_joined;
+            set_notify_messages, on_notify_messages_changed => notifications.messages;
+            set_notify_first_join, on_notify_first_join_changed => notifications.first_join;
+            set_show_timestamps, on_show_timestamps_changed => ui.show_timestamps, push_ui_prefs;
+            set_compact_rows, on_compact_rows_changed => ui.compact_rows, push_ui_prefs;
+        }
+    };
 }
 
 /// Fill every `SettingsState` property from current settings + devices.
@@ -542,22 +619,15 @@ pub fn populate(app: &mut AppState) {
     // Debug: what the last send or clear said belongs to that visit.
     s.set_debug_status("".into());
     refresh_log(app);
-    // Startup / sounds / chat.
-    s.set_auto_connect(settings.startup.auto_connect);
-    s.set_start_minimized(settings.startup.start_minimized);
+    // Startup / sounds / chat: the switches, each from its field.
+    macro_rules! show {
+        ($($set:ident, $on:ident => $($field:ident).+ $(, $then:ident)?;)*) => {
+            $( s.$set(settings.$($field).+); )*
+        };
+    }
+    switches!(show);
     s.set_tray_available(cfg!(feature = "tray"));
-    s.set_check_updates(settings.startup.check_updates);
-    s.set_sounds_enabled(settings.sounds.enabled);
-    s.set_join_leave_sounds(settings.sounds.join_leave);
-    s.set_mention_sound(settings.sounds.mention);
-    s.set_dm_sound(settings.sounds.direct_message);
-    s.set_share_started_sound(settings.sounds.share_started);
-    s.set_viewer_joined_sound(settings.sounds.viewer_joined);
     s.set_notifications_available(crate::host::notifies());
-    s.set_notify_messages(settings.notifications.messages);
-    s.set_notify_first_join(settings.notifications.first_join);
-    s.set_show_timestamps(settings.ui.show_timestamps);
-    s.set_compact_rows(settings.ui.compact_rows);
     let sizes: Vec<slint::SharedString> = IMAGE_SIZES
         .iter()
         .map(|(label, _)| {
@@ -584,6 +654,9 @@ pub fn populate(app: &mut AppState) {
     s.set_transmission_modes(ModelRc::new(VecModel::from(modes)));
     s.set_transmission_index(i32::from(settings.audio.push_to_talk));
     s.set_ptt_bind(settings.bind_for(BindableAction::PushToTalk).into());
+    // macOS without the Accessibility permission: the Keyboard tab
+    // says what that costs and offers the prompt.
+    s.set_keybinds_need_access(!crate::hotkeys::access_granted());
     // Echo cancellation: the picker in AecMode::ALL order, and what the
     // running session got (refreshed by the meter timer).
     let aec_modes: Vec<slint::SharedString> = audio::AecMode::ALL
@@ -592,14 +665,18 @@ pub fn populate(app: &mut AppState) {
         .collect();
     s.set_aec_modes(ModelRc::new(VecModel::from(aec_modes)));
     s.set_aec_index(i32::try_from(settings.audio.echo_cancellation.index()).unwrap_or(0));
-    let aec = app.voice_aec();
-    s.set_aec_status(aec_status(aec.lock().ok().and_then(|g| g.clone()).as_ref()).into());
+    let report = app.voice_aec().lock().ok().and_then(|g| g.clone());
+    s.set_aec_status(aec_status(report.as_ref()).into());
+    s.set_aec_lowering(
+        report
+            .as_ref()
+            .is_some_and(audio::AecReport::lowering_others),
+    );
 
     // Profile (spec §7.1): what this device keeps.
     s.set_nickname(settings.user.nickname.as_str().into());
     s.set_initial(app_core::roster::initial_of(&settings.user.nickname).into());
     let palette = palette(app);
-    s.set_is_admin(palette.len() > NAME_COLORS.len());
     let colors: Vec<slint::Color> = palette
         .iter()
         .map(|rgb| {
@@ -643,54 +720,12 @@ pub fn populate(app: &mut AppState) {
     push_server_rows(app);
     fill_server_editor(app);
 
-    // Device lists: "System default" first, saved selection restored.
-    let sys_default = t!("audio-system-default");
-    let input_devices = audio::VoiceChat::list_input_devices().unwrap_or_default();
-    let output_devices = audio::VoiceChat::list_output_devices().unwrap_or_default();
-    let dev_model = |devices: &[(String, bool)]| -> Vec<slint::SharedString> {
-        std::iter::once(sys_default.as_str().into())
-            .chain(devices.iter().map(|(n, _)| n.as_str().into()))
-            .collect()
-    };
-    // A phone's outputs are routes (audio::route): "Automatic" first,
-    // the built-in ones in the user's language. The setting keeps the
-    // engine's names; only the shown text changes.
-    let output_model: Vec<slint::SharedString> = if app::SINGLE_WINDOW_HOST {
-        std::iter::once(t!("audio-route-auto").into())
-            .chain(output_devices.iter().map(|(n, _)| route_label(n).into()))
-            .collect()
-    } else {
-        dev_model(&output_devices)
-    };
-    let dev_index = |devices: &[(String, bool)], saved: Option<&str>| -> i32 {
-        saved
-            .and_then(|name| devices.iter().position(|(n, _)| n == name))
-            .map_or(0, |i| i32::try_from(i + 1).unwrap_or(0))
-    };
-    s.set_input_devices(ModelRc::new(VecModel::from(dev_model(&input_devices))));
-    s.set_output_devices(ModelRc::new(VecModel::from(output_model)));
-    s.set_input_index(dev_index(
-        &input_devices,
-        settings.audio.input.device.as_deref(),
-    ));
-    s.set_output_index(dev_index(
-        &output_devices,
-        settings.audio.output.device.as_deref(),
-    ));
-
     s.set_input_gain(settings.audio.input.gain);
     s.set_output_gain(settings.audio.output.gain);
     s.set_gate_threshold(settings.audio.gate_threshold);
     s.set_sensitivity_line(format_sensitivity(settings.audio.gate_threshold).into());
     s.set_testing_mic(app.is_testing_mic);
-    s.set_test_hint(
-        if app.is_testing_mic {
-            t!("audio-testing-hint")
-        } else {
-            t!("audio-test-hint")
-        }
-        .into(),
-    );
+    s.set_test_hint(test_hint(app.is_testing_mic).into());
     s.set_mic_level(0.0);
     s.set_out_level(0.0);
     s.set_capturing(false);
@@ -709,6 +744,59 @@ pub fn populate(app: &mut AppState) {
     set_credits(&s);
     set_about(&s);
     set_licenses(&s);
+
+    let names = |devices: Vec<(String, bool)>| devices.into_iter().map(|(n, _)| n).collect();
+    refresh_devices(
+        app,
+        names(audio::VoiceChat::list_input_devices().unwrap_or_default()),
+        names(audio::VoiceChat::list_output_devices().unwrap_or_default()),
+    );
+}
+
+/// The device pickers: "System default" first, the saved selection
+/// restored. Filled with Settings and again whenever a device comes or
+/// goes (`AppState::handle_devices_changed`), and the names shown are
+/// kept: a pick is an index into the list on screen. Resolving it
+/// against a fresh enumeration, as before, picked the neighbour of the
+/// device the user clicked once something had been plugged in with
+/// Settings open (review P3-35).
+pub fn refresh_devices(app: &mut AppState, inputs: Vec<String>, outputs: Vec<String>) {
+    if let Some(sf) = surface(app) {
+        let s = sf.state();
+        let sys_default = t!("audio-system-default");
+        let dev_model = |devices: &[String]| -> Vec<slint::SharedString> {
+            std::iter::once(sys_default.as_str().into())
+                .chain(devices.iter().map(|n| n.as_str().into()))
+                .collect()
+        };
+        // A phone's outputs are routes (audio::route): "Automatic"
+        // first, the built-in ones in the user's language. The setting
+        // keeps the engine's names; only the shown text changes.
+        let output_model: Vec<slint::SharedString> = if app::SINGLE_WINDOW_HOST {
+            std::iter::once(t!("audio-route-auto").into())
+                .chain(outputs.iter().map(|n| route_label(n).into()))
+                .collect()
+        } else {
+            dev_model(&outputs)
+        };
+        let dev_index = |devices: &[String], saved: Option<&str>| -> i32 {
+            saved
+                .and_then(|name| devices.iter().position(|n| n == name))
+                .map_or(0, |i| i32::try_from(i + 1).unwrap_or(0))
+        };
+        s.set_input_devices(ModelRc::new(VecModel::from(dev_model(&inputs))));
+        s.set_output_devices(ModelRc::new(VecModel::from(output_model)));
+        s.set_input_index(dev_index(
+            &inputs,
+            app.settings.audio.input.device.as_deref(),
+        ));
+        s.set_output_index(dev_index(
+            &outputs,
+            app.settings.audio.output.device.as_deref(),
+        ));
+    }
+    app.picker_inputs = inputs;
+    app.picker_outputs = outputs;
 }
 
 /// Wire `SettingsLogic` callbacks (once per surface).
@@ -870,51 +958,21 @@ fn wire(sf: &SettingsSurface<'_>) {
             refresh_log(app);
         });
     });
-    logic.on_sounds_enabled_changed(|on| {
-        app::with_current(move |app| app.settings.sounds.enabled = on);
-    });
-    logic.on_join_leave_sounds_changed(|on| {
-        app::with_current(move |app| app.settings.sounds.join_leave = on);
-    });
-    logic.on_mention_sound_changed(|on| {
-        app::with_current(move |app| app.settings.sounds.mention = on);
-    });
-    logic.on_dm_sound_changed(|on| {
-        app::with_current(move |app| app.settings.sounds.direct_message = on);
-    });
-    logic.on_share_started_sound_changed(|on| {
-        app::with_current(move |app| app.settings.sounds.share_started = on);
-    });
-    logic.on_viewer_joined_sound_changed(|on| {
-        app::with_current(move |app| app.settings.sounds.viewer_joined = on);
-    });
-    logic.on_notify_messages_changed(|on| {
-        app::with_current(move |app| app.settings.notifications.messages = on);
-    });
-    logic.on_notify_first_join_changed(|on| {
-        app::with_current(move |app| app.settings.notifications.first_join = on);
-    });
-    logic.on_auto_connect_changed(|on| {
-        app::with_current(move |app| app.settings.startup.auto_connect = on);
-    });
-    logic.on_start_minimized_changed(|on| {
-        app::with_current(move |app| app.settings.startup.start_minimized = on);
-    });
-    logic.on_check_updates_changed(|on| {
-        app::with_current(move |app| app.settings.startup.check_updates = on);
-    });
-    logic.on_show_timestamps_changed(|on| {
-        app::with_current(move |app| {
-            app.settings.ui.show_timestamps = on;
-            app.push_ui_prefs();
-        });
-    });
-    logic.on_compact_rows_changed(|on| {
-        app::with_current(move |app| {
-            app.settings.ui.compact_rows = on;
-            app.push_ui_prefs();
-        });
-    });
+    // The switches: each saves into the field `populate` showed it
+    // from.
+    macro_rules! save {
+        ($($set:ident, $on:ident => $($field:ident).+ $(, $then:ident)?;)*) => {
+            $(
+                logic.$on(|on| {
+                    app::with_current(move |app| {
+                        app.settings.$($field).+ = on;
+                        $( app.$then(); )?
+                    });
+                });
+            )*
+        };
+    }
+    switches!(save);
     logic.on_image_size_selected(|index| {
         app::with_current(move |app| {
             if let Some((_, kb)) = usize::try_from(index).ok().and_then(|i| IMAGE_SIZES.get(i)) {
@@ -926,8 +984,16 @@ fn wire(sf: &SettingsSurface<'_>) {
         app::with_current(move |app| {
             app.settings.audio.push_to_talk = index == 1 && !app::SINGLE_WINDOW_HOST;
             app.apply_push_to_talk();
+            app.refresh_hotkeys();
         });
     });
+    logic.on_open_sound_settings(|| {
+        if let Err(e) = crate::host::open_sound_settings() {
+            log::warn!("sound settings: {e}");
+        }
+    });
+    // The one place the system's prompt comes from (review P2-30).
+    logic.on_ask_keybind_access(crate::hotkeys::ask_for_access);
     logic.on_aec_selected(|index| {
         app::with_current(move |app| {
             let mode = audio::AecMode::from_index(usize::try_from(index).unwrap_or(0));
@@ -972,7 +1038,6 @@ fn wire(sf: &SettingsSurface<'_>) {
             app.settings.servers.push(ServerEntry {
                 name,
                 address: String::new(),
-                password: None,
                 invite_code: None,
                 fingerprint: None,
                 channel_passwords: std::collections::HashMap::new(),
@@ -1176,13 +1241,13 @@ fn wire(sf: &SettingsSurface<'_>) {
 
     logic.on_input_device_selected(|index| {
         app::with_current(move |app| {
-            let device = device_at(&audio::VoiceChat::list_input_devices(), index);
+            let device = device_at(&app.picker_inputs, index);
             app.set_input_device(device);
         });
     });
     logic.on_output_device_selected(|index| {
         app::with_current(move |app| {
-            let device = device_at(&audio::VoiceChat::list_output_devices(), index);
+            let device = device_at(&app.picker_outputs, index);
             app.set_output_device(device);
         });
     });
@@ -1193,6 +1258,7 @@ fn wire(sf: &SettingsSurface<'_>) {
             app.voice_tx().send(VoiceControl::SetInputGain(gain)).ok();
         });
     });
+    logic.on_tab_shown(|| app::with_current(sync_audio_tab));
     logic.on_output_gain_changed(|gain| {
         app::with_current(move |app| {
             app.settings.audio.output.gain = gain;
@@ -1219,14 +1285,7 @@ fn wire(sf: &SettingsSurface<'_>) {
             if let Some(sf) = surface(app) {
                 let s = sf.state();
                 s.set_testing_mic(enable);
-                s.set_test_hint(
-                    if enable {
-                        t!("audio-testing-hint")
-                    } else {
-                        t!("audio-test-hint")
-                    }
-                    .into(),
-                );
+                s.set_test_hint(test_hint(enable).into());
             }
         });
     });
@@ -1308,18 +1367,11 @@ fn update_selected_address(app: &mut AppState) {
     push_server_rows(app);
 }
 
-/// `index` 0 = system default; otherwise the (index-1)-th device.
-/// Error-generic: only the Ok shape matters here, so the real crate's
-/// error type (Box<dyn Error>) and any future change both fit.
-fn device_at<E>(devices: &Result<Vec<(String, bool)>, E>, index: i32) -> Option<String> {
-    if index <= 0 {
-        return None;
-    }
-    devices
-        .as_ref()
-        .ok()
-        .and_then(|list| usize::try_from(index - 1).ok().and_then(|i| list.get(i)))
-        .map(|(name, _)| name.clone())
+/// `index` 0 = system default; otherwise the (index-1)-th of the
+/// devices the picker is showing (`refresh_devices`).
+fn device_at(shown: &[String], index: i32) -> Option<String> {
+    let index = usize::try_from(index).ok()?.checked_sub(1)?;
+    shown.get(index).cloned()
 }
 
 fn set_row_recording(s: &SettingsState, index: i32, recording: bool) {
@@ -1469,42 +1521,159 @@ fn populate_binds_only(app: &mut AppState) {
     app.apply_push_to_talk();
 }
 
-/// 8 Hz meter loop while the window is open (the FLTK build's
-/// `MeterUpdate` tick); every 2 s of it, the Debug tab's log view.
+/// The settings timer: the Audio tab's meters 20 times a second and
+/// its echo-cancellation line 4 times, the Debug tab's log view every
+/// 2 s — and nothing but a 2 s look elsewhere, minimized, or with the
+/// app in the background. It ran at 8 Hz on every tab for as long as
+/// Settings was open (review P2-40). `tab-shown` re-paces it at once on
+/// a tab change ([`pace_meter_timer`]); coming back on screen is
+/// noticed by the next slow tick.
 fn start_meter_timer(app: &mut AppState) {
-    let (output_level, denoised_level) = app.voice_levels();
+    let levels = app.voice_levels();
     let aec = app.voice_aec();
-    let mut ticks = 0u32;
-    app.meter_timer.start(
-        slint::TimerMode::Repeated,
-        Duration::from_millis(125),
-        move || {
-            ticks = ticks.wrapping_add(1);
-            if ticks.is_multiple_of(LOG_REFRESH_TICKS) {
-                app::with_current(|app| {
-                    if surface(app).is_some_and(|sf| sf.tab() == TAB_DEBUG) {
-                        refresh_log(app);
+    let (mut mic_bar, mut out_bar) = (Meter::new(), Meter::new());
+    let mut read_at = Instant::now();
+    let mut aec_at: Option<Instant> = None;
+    app.meter_timer
+        .start(slint::TimerMode::Repeated, METER_TICK, move || {
+            app::with_current(|app| {
+                if !pace_meter_timer(app) {
+                    return;
+                }
+                // The permission is granted in System Settings, not
+                // here: while the note about it shows, look whether it
+                // has been, and watch the keys from then on.
+                let granted = surface(app).is_some_and(|sf| {
+                    let waiting = sf.state().get_keybinds_need_access();
+                    if waiting && crate::hotkeys::access_granted() {
+                        sf.state().set_keybinds_need_access(false);
+                        return true;
                     }
+                    false
                 });
-            }
-            let mic = f32::from_bits(denoised_level.load(Ordering::Relaxed));
-            let out = f32::from_bits(output_level.load(Ordering::Relaxed));
-            // Reopening the streams (a headset plugged in, the setting
-            // changed) changes this; property sets of an equal string
-            // cost nothing visible.
-            let aec_line = aec_status(aec.lock().ok().and_then(|g| g.clone()).as_ref());
-            app::with_current(move |app| {
-                if let Some(sf) = surface(app) {
-                    let s = sf.state();
-                    s.set_mic_level(mic);
-                    s.set_out_level(out);
-                    if s.get_aec_status() != aec_line.as_str() {
-                        s.set_aec_status(aec_line.into());
+                if granted {
+                    app.rearm_hotkeys();
+                }
+                let Some(sf) = surface(app) else { return };
+                if !sf.section_showing() {
+                    return;
+                }
+                match sf.tab() {
+                    TAB_DEBUG => refresh_log(app),
+                    TAB_AUDIO => {
+                        let now = Instant::now();
+                        let since = now.duration_since(read_at);
+                        read_at = now;
+                        // No engine reads as silence on the bars.
+                        let heard = levels.meters();
+                        let (mic, out) = heard.unwrap_or((0.0, 0.0));
+                        let s = sf.state();
+                        // A bar that did not move is not drawn again:
+                        // a quiet room costs no frames.
+                        let mic = mic_bar.read(mic, since);
+                        let out = out_bar.read(out, since);
+                        if let Some(level) = mic {
+                            s.set_mic_level(level);
+                        }
+                        if let Some(level) = out {
+                            s.set_out_level(level);
+                        }
+                        if let Some((began, mut run)) = METER_RUN.get() {
+                            run.note(
+                                now.duration_since(began),
+                                heard.map(|(mic, _)| mic),
+                                app.is_testing_mic,
+                                mic.is_some() || out.is_some(),
+                            );
+                            METER_RUN.set(Some((began, run)));
+                        }
+                        if aec_at.is_some_and(|at| now.duration_since(at) < AEC_TICK) {
+                            return;
+                        }
+                        aec_at = Some(now);
+                        // Reopening the streams (a headset plugged in,
+                        // the setting changed) changes this; property
+                        // sets of an equal string cost nothing visible.
+                        let report = aec.lock().ok().and_then(|g| g.clone());
+                        let aec_line = aec_status(report.as_ref());
+                        // Read again each time for the same reason, and
+                        // one more: the way out is a Windows setting
+                        // the user may have just changed.
+                        let lowering = report
+                            .as_ref()
+                            .is_some_and(audio::AecReport::lowering_others);
+                        if s.get_aec_status() != aec_line.as_str() {
+                            s.set_aec_status(aec_line.into());
+                        }
+                        if s.get_aec_lowering() != lowering {
+                            s.set_aec_lowering(lowering);
+                        }
                     }
+                    _ => {}
                 }
             });
-        },
-    );
+        });
+}
+
+/// Set the settings timer's pace for what is showing now, open or
+/// close the Audio tab's microphone to match, and say whether Settings
+/// is on screen at all.
+fn pace_meter_timer(app: &mut AppState) -> bool {
+    let Some(sf) = surface(app) else {
+        return false;
+    };
+    let showing = app::host_visible() && sf.showing();
+    let audio = showing && sf.tab() == TAB_AUDIO && sf.section_showing();
+    let pace = if audio { METER_TICK } else { IDLE_TICK };
+    if app.meter_timer.running() && app.meter_timer.interval() != pace {
+        app.meter_timer.set_interval(pace);
+    }
+    // The meter is the microphone's: while the tab shows, it is open —
+    // not connected and in the lobby too (`set_audio_tab_open`).
+    app.set_audio_tab_open(audio);
+    note_meter_run(audio);
+    showing
+}
+
+/// The meters came on screen or left it: start counting, or log what
+/// the run came to.
+fn note_meter_run(on_screen: bool) {
+    match (on_screen, METER_RUN.get()) {
+        (true, None) => METER_RUN.set(Some((Instant::now(), MeterRun::default()))),
+        (false, Some((began, run))) => {
+            METER_RUN.set(None);
+            log::info!("settings: {}", run.summary(began.elapsed()));
+        }
+        _ => {}
+    }
+}
+
+/// What is on screen changed — a tab, the narrow page's section, the
+/// app back from the background: the meter's pace and its microphone
+/// follow now.
+pub(crate) fn sync_audio_tab(app: &mut AppState) {
+    pace_meter_timer(app);
+}
+
+/// A microphone test ended without its button (the session it ran in
+/// closed): the button and its hint say so.
+pub(crate) fn test_ended(app: &AppState) {
+    if let Some(sf) = surface(app) {
+        let s = sf.state();
+        s.set_testing_mic(false);
+        s.set_test_hint(test_hint(false).into());
+    }
+}
+
+/// The line beside the Test microphone button. Where the test plays the
+/// voice back late (a phone, `audio::LOOPBACK_DELAY`), it says so:
+/// silence after speaking reads as a test that is broken.
+fn test_hint(testing: bool) -> String {
+    match (testing, audio::LOOPBACK_DELAY.is_zero()) {
+        (false, _) => t!("audio-test-hint"),
+        (true, true) => t!("audio-testing-hint"),
+        (true, false) => t!("audio-testing-hint-delayed"),
+    }
 }
 
 // ── Debug ───────────────────────────────────────────────────────────────
@@ -1677,6 +1846,9 @@ fn close(app: &mut AppState) {
         }
     }
     app.meter_timer.stop();
+    // Nothing shows the meter any more: its microphone closes.
+    app.set_audio_tab_open(false);
+    note_meter_run(false);
     // Collapse blank token fields and repair the default pointer
     // before the edits hit disk.
     app.settings.normalize_servers();

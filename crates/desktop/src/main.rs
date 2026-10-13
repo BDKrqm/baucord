@@ -19,7 +19,7 @@ fn main() {
     // the operator's word and the setting stays out of it.
     #[cfg(debug_assertions)]
     {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("trace")).init();
+        logger().init();
         if std::env::var_os("RUST_LOG").is_none() {
             log::set_max_level(log::LevelFilter::Info);
         }
@@ -27,35 +27,18 @@ fn main() {
 
     #[cfg(not(debug_assertions))]
     {
-        use std::fs::{self, OpenOptions};
+        use std::fs::OpenOptions;
 
         use env_logger::Target;
 
         // Single append-mode log: every run keeps writing baucord.log.
-        // One-time migration: sweep the per-run baucord-<timestamp>.log
-        // files an older scheme left behind (exact prefix + suffix, so
-        // nothing else can match).
-        if let Ok(entries) = fs::read_dir(".") {
-            for name in entries
-                .flatten()
-                .filter_map(|e| e.file_name().into_string().ok())
-                .filter(|n| n.starts_with("baucord-") && n.ends_with(".log"))
-            {
-                let _ = fs::remove_file(name);
-            }
-        }
-
         match OpenOptions::new()
             .create(true)
             .append(true)
             .open("baucord.log")
         {
             Ok(log_file) => {
-                env_logger::Builder::from_env(
-                    env_logger::Env::default().default_filter_or("trace"),
-                )
-                .target(Target::Pipe(Box::new(log_file)))
-                .init();
+                logger().target(Target::Pipe(Box::new(log_file))).init();
                 // Settings → Debug shows, sends and clears it.
                 if let Ok(dir) = std::env::current_dir() {
                     frontend::logfile::set_path(dir.join("baucord.log"));
@@ -64,10 +47,7 @@ fn main() {
             Err(e) => {
                 // Read-only install dir etc. — run without file logging
                 // rather than dying before the window exists.
-                env_logger::Builder::from_env(
-                    env_logger::Env::default().default_filter_or("trace"),
-                )
-                .init();
+                logger().init();
                 log::warn!("could not open baucord.log ({e}); logging to stderr");
             }
         }
@@ -92,29 +72,9 @@ fn main() {
         return;
     }
 
-    // A release build aborts on panic and a GUI process has no stderr,
-    // so without this a crash on any thread leaves nothing behind but a
-    // log that stops mid-sentence. Write the panic — thread, message,
-    // location, backtrace — to the log before the abort.
-    std::panic::set_hook(Box::new(|info| {
-        let thread = std::thread::current()
-            .name()
-            .unwrap_or("<unnamed>")
-            .to_owned();
-        let message = info
-            .payload()
-            .downcast_ref::<&str>()
-            .map(|s| (*s).to_string())
-            .or_else(|| info.payload().downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "<non-string panic payload>".to_string());
-        let location = info.location().map_or_else(
-            || "<unknown location>".to_string(),
-            |l| format!("{}:{}:{}", l.file(), l.line(), l.column()),
-        );
-        let backtrace = std::backtrace::Backtrace::force_capture();
-        log::error!("PANIC in thread '{thread}' at {location}: {message}\n{backtrace}");
-        log::logger().flush();
-    }));
+    // A release build aborts on panic and a GUI process has no stderr:
+    // the panic goes to the log first.
+    frontend::logfile::install_panic_hook();
 
     app::run();
 
@@ -122,6 +82,21 @@ fn main() {
     // normal return from main() would hang waiting for them.
     // Settings are already saved by this point.
     std::process::exit(0);
+}
+
+/// The logger every build starts from: wide open (the comment in
+/// `main`), except the `wasapi` crate, capped at info. It traces from
+/// inside the audio pump threads, once per 10 ms period, and with the
+/// log level set to trace or debug each of those was a write to the log
+/// file on a real-time thread (review P2-37). `RUST_LOG` still decides
+/// when it is set.
+fn logger() -> env_logger::Builder {
+    let mut builder =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("trace"));
+    if std::env::var_os("RUST_LOG").is_none() {
+        builder.filter_module("wasapi", log::LevelFilter::Info);
+    }
+    builder
 }
 
 /// `--config-dir <dir>`, `--config-dir=<dir>`, `--profile <name>`,

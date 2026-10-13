@@ -22,7 +22,7 @@
 //! - Render asks for a 20 ms engine buffer — two periods; that *is*
 //!   latency on the render side, so it stays small.
 //! - Every packet's `DATA_DISCONTINUITY` flag is counted into
-//!   `AudioStats` (rate-limited log), `SILENT` packets become zeros so the
+//!   `AudioStats` (the stats line shows it), `SILENT` packets become zeros so the
 //!   timeline stays continuous, and `AUDCLNT_E_DEVICE_INVALIDATED` sets
 //!   the stream-failed flag for the device supervisor instead of dying
 //!   silently.
@@ -35,15 +35,17 @@
 //! **Echo cancellation** (`AEC-SPEC.md` §4): when the session wants the
 //! voice-call path, both streams open in the `Communications` stream
 //! category — the one Windows runs the endpoint's voice chain (the OEM
-//! or inbox AEC effect) on — and "default" means the Default
-//! Communications Device. Capture then points the canceller at our
-//! render endpoint (Windows 11 22H2+) and reads the effect list back to
-//! report whether an AEC effect is actually on (D5). The output's form
-//! factor ([`output_kind`]) is what Auto decides by.
+//! or inbox AEC effect) on. Unless the setting is Off, "default" means
+//! the Default Communications Device, for the form factor Auto decides
+//! by ([`output_kind`]) as for the streams (review P1-18). Capture then
+//! points the canceller at the output the user picked, or, none picked,
+//! has Windows follow the communications default itself (Windows 11
+//! 22H2+), and reads the effect list back to report whether an AEC
+//! effect is actually on (D5).
 
 use std::{
     sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, Ordering},
         Arc,
     },
     thread::JoinHandle,
@@ -65,6 +67,7 @@ use windows::Win32::Media::{
 use crate::{
     aec::{self, OutputKind},
     input_config::InputConfig,
+    latch::Ring,
     stats::AudioStats,
     OPUS_SAMPLE_RATE,
 };
@@ -86,14 +89,14 @@ const MAX_CONSECUTIVE_ERRORS: u32 = 10;
 pub struct CaptureStartError {
     pub reason: String,
     pub producer: Producer<f32>,
-    pub wake_tx: Sender<()>,
+    pub wake_tx: Ring,
 }
 
 /// Native render could not start; same idea as [`CaptureStartError`].
 pub struct RenderStartError {
     pub reason: String,
     pub consumer: Consumer<f32>,
-    pub wake_tx: Sender<()>,
+    pub wake_tx: Ring,
 }
 
 // ── Opened stream description ───────────────────────────────────────────
@@ -209,6 +212,36 @@ fn find_device(
             .map_err(|e| format!("{direction} device collection: {e}"))?
             .get_device_with_name(name)
             .map_err(|e| format!("{direction} device '{name}': {e}")),
+    }
+}
+
+/// The device a stream opens: `name`, or the default `communications`
+/// chooses ([`role_for`]). Windows counts every stream opened on the
+/// device object it hands out for the Communications role as a call,
+/// whatever its category, and lowers the other apps for as long as it
+/// runs. A plain stream (`voice` false: headphones under Automatic)
+/// must not do that (AEC-SPEC.md D3, E14), so it looks the same
+/// endpoint up again by its id, which carries no role.
+fn stream_device(
+    enumerator: &DeviceEnumerator,
+    direction: Direction,
+    name: Option<&str>,
+    communications: bool,
+    voice: bool,
+) -> Result<wasapi::Device, String> {
+    let device = find_device(enumerator, direction, name, role_for(communications))?;
+    if voice || !communications || name.is_some() {
+        return Ok(device);
+    }
+    match device.get_id().and_then(|id| enumerator.get_device(&id)) {
+        Ok(plain) => Ok(plain),
+        Err(e) => {
+            warn!(
+                "{direction}: the communications default would not open by its id ({e}); \
+                 Windows may lower other apps"
+            );
+            Ok(device)
+        }
     }
 }
 
@@ -333,26 +366,31 @@ fn open_with_fallback(
     }
 }
 
-/// The role "default" means for this session.
-fn role_for(voice: bool) -> Role {
-    if voice {
+/// The role "default" means for this session: the Communications one
+/// unless echo cancellation is Off (`communications_default` in lib.rs).
+fn role_for(communications: bool) -> Role {
+    if communications {
         Role::Communications
     } else {
         Role::Console
     }
 }
 
-/// On the voice-call path: ask Windows not to lower other apps while
-/// this stream runs (AEC-SPEC.md E11). A `Communications` stream is what
-/// Windows' "communications activity" ducking reacts to — by default
-/// every other app drops 80 % for as long as we are in voice — and
+/// Ask Windows not to lower other apps while this stream runs
+/// (AEC-SPEC.md E11). A `Communications` stream is what Windows'
+/// "communications activity" ducking reacts to — by default every other
+/// app drops 80 % for as long as we are in voice — and
 /// `IAudioClientDuckingControl` is the per-stream opt-out. It exists
 /// from Windows 10 build 20348 (Windows 11); before that the service is
 /// missing and only the user's Sound settings help. Microsoft documents
-/// it for render streams; capture is asked too, and the stream's log
-/// line says what each answered. Call after `Initialize` (an
-/// uninitialized client refuses services) and before `Start`, on the
-/// thread that owns the client. Returns the word for the log line.
+/// it for render streams; capture is asked too, and so is a plain stream
+/// (it should lower nobody as it is, [`stream_device`]; asking costs
+/// nothing), and the stream's log line says what each answered. Call
+/// after `Initialize` (an uninitialized client refuses services) and
+/// before `Start`, on the thread that owns the client. Returns the word
+/// for the log line.
+const DUCK_REQUESTED: &str = "requested";
+
 fn ask_not_to_duck(client: &AudioClient, what: &str) -> &'static str {
     use windows::Win32::Media::Audio::{
         IAudioClientDuckingControl, AUDIO_DUCKING_OPTIONS_DO_NOT_DUCK_OTHER_STREAMS,
@@ -377,7 +415,7 @@ fn ask_not_to_duck(client: &AudioClient, what: &str) -> &'static str {
     match unsafe {
         control.SetDuckingOptionsForCurrentStream(AUDIO_DUCKING_OPTIONS_DO_NOT_DUCK_OTHER_STREAMS)
     } {
-        Ok(()) => "requested",
+        Ok(()) => DUCK_REQUESTED,
         Err(e) => {
             warn!("{what}: Windows refused \"do not duck other streams\": {e}");
             "refused"
@@ -385,37 +423,171 @@ fn ask_not_to_duck(client: &AudioClient, what: &str) -> &'static str {
     }
 }
 
+/// The other half: ask Windows never to lower *this app's* sound on the
+/// endpoint `client` plays on (AEC-SPEC.md E14). Windows lowers every
+/// session that is not part of a call while one runs — ours included,
+/// when the call is another app's, or our own on another endpoint — and
+/// `IAudioSessionControl2::SetDuckingPreference` is the session's
+/// opt-out, on every Windows we run on. The session is the process's on
+/// that endpoint, so a watched stream's own output there (cpal's) is
+/// covered with the voice. Call after `Initialize`. Returns the word for
+/// the log line.
+fn keep_own_volume(client: &AudioClient) -> &'static str {
+    match client
+        .get_audiosessioncontrol()
+        .and_then(|session| session.set_ducking_preference(true))
+    {
+        Ok(()) => "kept",
+        Err(e) => {
+            debug!("render: no ducking preference for our session ({e})");
+            "unavailable"
+        }
+    }
+}
+
+/// [`keep_own_volume`] for an output this backend did not open — a
+/// watched stream's own (cpal's), which may be on another endpoint than
+/// the voice: `name`, or the console default. Every session of this
+/// process on that endpoint is asked. Call once the stream exists (its
+/// session does then); runs on a thread of its own, COM being per
+/// thread, and nobody waits for it.
+pub fn keep_own_volume_on(name: Option<&str>) {
+    let name = name.map(String::from);
+    drop(crate::platform::spawn_named("own-volume", move || {
+        if wasapi::initialize_mta().ok().is_err() {
+            return;
+        }
+        let asked = (|| -> Result<usize, String> {
+            let enumerator = DeviceEnumerator::new().map_err(|e| e.to_string())?;
+            let device = find_device(
+                &enumerator,
+                Direction::Render,
+                name.as_deref(),
+                Role::Console,
+            )?;
+            let sessions = device
+                .get_iaudiosessionmanager()
+                .and_then(|manager| manager.get_audiosessionenumerator())
+                .map_err(|e| e.to_string())?;
+            let ours = std::process::id();
+            let mut asked = 0;
+            for i in 0..sessions.get_count().map_err(|e| e.to_string())? {
+                let Ok(session) = sessions.get_session(i) else {
+                    continue;
+                };
+                if session.get_process_id().ok() == Some(ours)
+                    && session.set_ducking_preference(true).is_ok()
+                {
+                    asked += 1;
+                }
+            }
+            Ok(asked)
+        })();
+        wasapi::deinitialize();
+        match asked {
+            Ok(n) => debug!("stream audio output: {n} session(s) keep their volume during calls"),
+            Err(e) => debug!("stream audio output: ducking preference not set ({e})"),
+        }
+    }));
+}
+
+/// The user's Sound settings → Communications choice, as Windows keeps
+/// it: 0 mute, 1 reduce by 80 %, 2 reduce by 50 %, 3 do nothing. `None`
+/// until the user changes it; Windows' default is 80 %.
+fn ducking_preference() -> Option<u32> {
+    use windows::{
+        core::w,
+        Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD},
+    };
+    let mut value = 0u32;
+    let mut size = 4u32;
+    // SAFETY: `value` and `size` outlive the call, `size` is `value`'s
+    // size, and the flag makes the call fail on anything but a DWORD.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!("Software\\Microsoft\\Multimedia\\Audio"),
+            w!("UserDuckingPreference"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some(std::ptr::from_mut(&mut value).cast()),
+            Some(&raw mut size),
+        )
+    };
+    status.is_ok().then_some(value)
+}
+
+/// [`ducking_preference`] in words, for the render stream's log line:
+/// with a report of "everything got quieter", this and `do-not-duck=`
+/// say whether Windows did it.
+fn windows_ducking_setting() -> &'static str {
+    match ducking_preference() {
+        None => "reduce by 80 % (default)",
+        Some(0) => "mute",
+        Some(1) => "reduce by 80 %",
+        Some(2) => "reduce by 50 %",
+        Some(3) => "do nothing",
+        Some(_) => "unknown",
+    }
+}
+
+/// Windows is set to lower other apps while a call runs: anything but
+/// "Do nothing" (`aec::system_lowers_others`).
+#[must_use]
+pub fn lowers_others_in_calls() -> bool {
+    ducking_preference() != Some(3)
+}
+
 /// After capture opened in the `Communications` category: point the
 /// canceller at our render endpoint and say whether one is running
-/// (AEC-SPEC.md §4.1 step 5).
+/// (AEC-SPEC.md §4.1 step 5), and whether the reference was set.
 fn engage_platform_aec(
     client: &AudioClient,
     enumerator: &DeviceEnumerator,
     reference: Option<&str>,
-) -> Result<(), &'static str> {
-    // Windows 11 22H2+: the reference is ours to name. Elsewhere (and
-    // when this fails) the effect picks its own, usually the default
-    // communications render device — which is what we opened.
+) -> (Result<(), &'static str>, bool) {
+    // Windows 11 22H2+: the reference is ours to name. A picked output
+    // by its id; none picked, `None` has Windows follow the Default
+    // Communications Device itself — the one render opened — also when
+    // that default changes later, which an id looked up here would not
+    // (review P1-18). Elsewhere (and when this fails) the effect picks
+    // its own, usually the default communications render device.
+    let mut named = false;
     match client.get_aec_control() {
         Ok(control) => {
-            let id = find_device(
-                enumerator,
-                Direction::Render,
-                reference,
-                Role::Communications,
-            )
-            .and_then(|d| d.get_id().map_err(|e| e.to_string()))
-            .ok();
-            match control.set_echo_cancellation_render_endpoint(id.clone()) {
-                Ok(()) => info!(
-                    "AEC reference endpoint set ({})",
-                    id.as_deref().unwrap_or("auto")
-                ),
-                Err(e) => debug!("AEC reference endpoint not set: {e}"),
+            let id = match reference {
+                None => Ok(None),
+                Some(name) => find_device(
+                    enumerator,
+                    Direction::Render,
+                    Some(name),
+                    Role::Communications,
+                )
+                .and_then(|d| d.get_id().map_err(|e| e.to_string()))
+                .map(Some),
+            };
+            match id {
+                Ok(id) => match control.set_echo_cancellation_render_endpoint(id.clone()) {
+                    Ok(()) => {
+                        named = true;
+                        info!(
+                            "AEC reference endpoint set ({})",
+                            id.as_deref()
+                                .unwrap_or("follows the communications default")
+                        );
+                    }
+                    Err(e) => debug!("AEC reference endpoint not set: {e}"),
+                },
+                Err(e) => debug!("AEC reference endpoint not found: {e}"),
             }
         }
         Err(e) => debug!("AEC control unavailable ({e}); the effect picks its reference"),
     }
+    (verified_aec(client), named)
+}
+
+/// Whether an AEC effect runs on the capture stream (D5).
+fn verified_aec(client: &AudioClient) -> Result<(), &'static str> {
     // Verified, not assumed (D5). No effects manager (Windows 10): the
     // category is set and the OEM chain may still cancel — say on.
     match client
@@ -442,11 +614,13 @@ fn engage_platform_aec(
 }
 
 /// The render endpoint's form factor as an [`OutputKind`]
-/// (AEC-SPEC.md §4.2): `name`, or the console default. Runs on a
+/// (AEC-SPEC.md §4.2): `name`, or the default playback opens — the
+/// communications one when `communications`, the console one otherwise
+/// (the same device the streams then open, review P1-18). Runs on a
 /// short-lived thread of its own so COM is initialised wherever the
 /// caller is. `Unknown` when anything fails.
 #[must_use]
-pub fn output_kind(name: Option<&str>) -> OutputKind {
+pub fn output_kind(name: Option<&str>, communications: bool) -> OutputKind {
     let name = name.map(String::from);
     let worker = crate::platform::spawn_named("output-kind", move || {
         if wasapi::initialize_mta().ok().is_err() {
@@ -458,7 +632,7 @@ pub fn output_kind(name: Option<&str>) -> OutputKind {
                 &enumerator,
                 Direction::Render,
                 name.as_deref(),
-                Role::Console,
+                role_for(communications),
             )?;
             let id = device.get_id().map_err(|e| e.to_string())?;
             form_factor(&id).map_err(|e| e.to_string())
@@ -501,11 +675,38 @@ fn form_factor(id: &str) -> windows::core::Result<u32> {
     }
 }
 
+/// An event wait timed out: is the device gone? An endpoint that went
+/// away — a USB or Bluetooth headset unplugged — stops signalling, so
+/// the loops, which only ever asked the engine anything after an event,
+/// waited on it for good: a picked device stayed silent until the UI's
+/// device poll reset the pick (review P2-21). One cheap question to the
+/// engine per timeout answers it; a capture device that is merely
+/// quiet, or a render stream between events, answers without error.
+fn stopped_signalling(client: &AudioClient, what: &str) -> bool {
+    match client.get_current_padding() {
+        Err(e) if is_device_gone(&e) => {
+            error!("Native {what} lost the device (it stopped signalling): {e}");
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The endpoint under a stream went away (unplugged, disabled, its
+/// format changed): the stream is dead and the supervisor reopens.
+/// Matched on the HRESULT; it was a search of the error's text for the
+/// code in hex (review P3-27).
 fn is_device_gone(e: &WasapiError) -> bool {
-    // AUDCLNT_E_DEVICE_INVALIDATED = 0x88890004; the crate wraps HRESULTs
-    // in its Windows error variant, whose Display includes the code.
-    let text = e.to_string();
-    text.contains("0x88890004") || text.to_lowercase().contains("invalidated")
+    use windows::Win32::Media::Audio::{
+        AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_E_RESOURCES_INVALIDATED,
+    };
+    match e {
+        WasapiError::Windows(e) => {
+            let code = e.code();
+            code == AUDCLNT_E_DEVICE_INVALIDATED || code == AUDCLNT_E_RESOURCES_INVALIDATED
+        }
+        _ => false,
+    }
 }
 
 // ── Capture ─────────────────────────────────────────────────────────────
@@ -522,34 +723,38 @@ pub struct NativeCapture {
     /// On the voice-call path: whether an AEC effect is running on the
     /// endpoint (`Err` = why not). `None` = a plain stream.
     pub aec_verdict: Option<Result<(), &'static str>>,
+    /// On the voice-call path: the canceller's reference was set (to
+    /// the picked output, or to follow the communications default).
+    pub aec_reference_named: bool,
 }
 
 /// What the capture thread reports once the device is open: rate,
-/// endpoint name, and the AEC verdict (voice-call path only).
-type CaptureSetup = (u32, String, Option<Result<(), &'static str>>);
+/// endpoint name, the AEC verdict (voice-call path only) and whether
+/// the reference was set.
+type CaptureSetup = (u32, String, Option<Result<(), &'static str>>, bool);
 
 struct CaptureParts {
     producer: Producer<f32>,
-    wake_tx: Sender<()>,
+    wake_tx: Ring,
     stats: Arc<AudioStats>,
     config: Arc<InputConfig>,
-    input_level: Arc<AtomicU32>,
 }
 
 type SetupReport<T> = Result<T, String>;
 
 impl NativeCapture {
-    /// Open `device_name` (or the default capture endpoint) on a new
-    /// MMCSS thread and start pumping into `producer`.
+    /// Open `device_name` (or the default capture endpoint: the
+    /// communications one when `communications`) on a new MMCSS thread
+    /// and start pumping into `producer`.
     #[allow(clippy::too_many_arguments)]
     pub fn start(
         device_name: Option<&str>,
         voice: Option<Option<String>>,
+        communications: bool,
         producer: Producer<f32>,
-        wake_tx: Sender<()>,
+        wake_tx: Ring,
         stats: Arc<AudioStats>,
         config: Arc<InputConfig>,
-        input_level: Arc<AtomicU32>,
     ) -> Result<Self, CaptureStartError> {
         let should_stop = Arc::new(AtomicBool::new(false));
         let (setup_tx, setup_rx) = bounded::<SetupReport<CaptureSetup>>(1);
@@ -560,17 +765,23 @@ impl NativeCapture {
         let stop = should_stop.clone();
 
         let thread = crate::platform::spawn_named("voice-capture-wasapi", move || {
-            capture_thread(name.as_deref(), voice.as_ref(), &setup_tx, &parts_rx, &stop);
+            capture_thread(
+                name.as_deref(),
+                voice.as_ref(),
+                communications,
+                &setup_tx,
+                &parts_rx,
+                &stop,
+            );
         });
 
         match setup_rx.recv() {
-            Ok(Ok((sample_rate, device_name, aec_verdict))) => {
+            Ok(Ok((sample_rate, device_name, aec_verdict, aec_reference_named))) => {
                 let parts = CaptureParts {
                     producer,
                     wake_tx,
                     stats,
                     config,
-                    input_level,
                 };
                 if let Err(returned) = parts_tx.send(parts) {
                     // Thread died between setup and hand-off; the parts
@@ -590,6 +801,7 @@ impl NativeCapture {
                     sample_rate,
                     device_name,
                     aec_verdict,
+                    aec_reference_named,
                 })
             }
             other => {
@@ -619,10 +831,12 @@ impl Drop for NativeCapture {
 
 /// `voice`: `Some(reference)` = open on the voice-call path with the
 /// AEC reference set to the render endpoint `reference` (`None` inside
-/// = the default communications device); `None` = a plain stream.
+/// = follow the default communications device); `None` = a plain
+/// stream. `communications`: what "default" means ([`role_for`]).
 fn capture_thread(
     device_name: Option<&str>,
     voice: Option<&Option<String>>,
+    communications: bool,
     setup_tx: &Sender<SetupReport<CaptureSetup>>,
     parts_rx: &crossbeam_channel::Receiver<CaptureParts>,
     should_stop: &AtomicBool,
@@ -636,15 +850,17 @@ fn capture_thread(
     let _rt = crate::platform::promote_current_thread(480, OPUS_SAMPLE_RATE);
 
     let mut aec_verdict = None;
+    let mut aec_reference_named = false;
     let mut ducking = "n/a";
     let opened =
         (|| -> Result<(AudioClient, AudioCaptureClient, Handle, Negotiated, String), String> {
             let enumerator = DeviceEnumerator::new().map_err(|e| format!("enumerator: {e}"))?;
-            let device = find_device(
+            let device = stream_device(
                 &enumerator,
                 Direction::Capture,
                 device_name,
-                role_for(voice.is_some()),
+                communications,
+                voice.is_some(),
             )?;
             let friendly = device.get_friendlyname().unwrap_or_else(|_| "?".into());
             let (client, negotiated) = open_with_fallback(
@@ -655,13 +871,12 @@ fn capture_thread(
                 voice.is_some(),
             )?;
             if let Some(reference) = voice {
-                aec_verdict = Some(engage_platform_aec(
-                    &client,
-                    &enumerator,
-                    reference.as_deref(),
-                ));
-                ducking = ask_not_to_duck(&client, "capture");
+                let (verdict, named) =
+                    engage_platform_aec(&client, &enumerator, reference.as_deref());
+                aec_verdict = Some(verdict);
+                aec_reference_named = named;
             }
+            ducking = ask_not_to_duck(&client, "capture");
             let event = client
                 .set_get_eventhandle()
                 .map_err(|e| format!("capture event handle: {e}"))?;
@@ -683,7 +898,12 @@ fn capture_thread(
         }
     };
     if setup_tx
-        .send(Ok((negotiated.sample_rate, friendly.clone(), aec_verdict)))
+        .send(Ok((
+            negotiated.sample_rate,
+            friendly.clone(),
+            aec_verdict,
+            aec_reference_named,
+        )))
         .is_err()
     {
         wasapi::deinitialize();
@@ -716,7 +936,7 @@ fn capture_thread(
 }
 
 fn run_capture(
-    _client: &AudioClient,
+    client: &AudioClient,
     capture: &AudioCaptureClient,
     event: &Handle,
     negotiated: Negotiated,
@@ -728,18 +948,22 @@ fn run_capture(
         wake_tx,
         stats,
         config,
-        input_level,
     } = parts;
     let mut packet_buf: Vec<u8> = Vec::new();
     let mut consecutive_errors = 0u32;
-    let mut last_glitch_log: Option<Instant> = None;
     let ch = negotiated.channels;
     let bpf = negotiated.bytes_per_frame;
 
     while !should_stop.load(Ordering::Relaxed) {
         match event.wait_for_event(EVENT_WAIT_MS) {
             Ok(()) => {}
-            Err(WasapiError::EventTimeout) => continue,
+            Err(WasapiError::EventTimeout) => {
+                if stopped_signalling(client, "capture") {
+                    stats.input_stream_failed.store(true, Ordering::Relaxed);
+                    break;
+                }
+                continue;
+            }
             Err(e) => {
                 error!("Native capture event wait failed: {e}");
                 stats.input_stream_failed.store(true, Ordering::Relaxed);
@@ -784,20 +1008,16 @@ fn run_capture(
             consecutive_errors = 0;
             let got = got as usize;
 
+            // Counted, not logged: the 10-second stats line shows the
+            // total (`Overruns`), and a log line written from this
+            // thread is a file write on the one thread that must not
+            // wait — up to one a second while a game starved it, which
+            // is when it could least afford to (review P2-37).
             if info.flags.data_discontinuity {
                 stats.input_overruns.fetch_add(1, Ordering::Relaxed);
-                let now = Instant::now();
-                if last_glitch_log.is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1)) {
-                    last_glitch_log = Some(now);
-                    warn!(
-                        "Native capture discontinuity (total {})",
-                        stats.input_overruns.load(Ordering::Relaxed)
-                    );
-                }
             }
 
-            if config.muted.load(Ordering::Relaxed) {
-                input_level.store(0.0_f32.to_bits(), Ordering::Relaxed);
+            if config.silenced() {
                 continue;
             }
 
@@ -812,7 +1032,6 @@ fn run_capture(
             if want == 0 {
                 continue;
             }
-            let mut rms_acc = 0.0f32;
             let Ok(chunk) = producer.write_chunk_uninit(want) else {
                 continue;
             };
@@ -823,21 +1042,16 @@ fn run_capture(
                     .chunks_exact(bpf)
                     .take(want)
                     .map(|frame| {
-                        let mono = if silent {
+                        if silent {
                             0.0
                         } else {
                             layout.frame_to_mono(frame, ch)
-                        };
-                        rms_acc += mono * mono;
-                        mono
+                        }
                     });
                 chunk.fill_from_iter(&mut it);
             }
 
-            #[allow(clippy::cast_precision_loss)]
-            let rms = (rms_acc / want as f32).sqrt();
-            input_level.store((rms * 3.0).clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
-            let _ = wake_tx.try_send(());
+            wake_tx.ring();
         }
     }
 }
@@ -852,34 +1066,49 @@ pub struct NativeRender {
     /// conversion).
     pub sample_rate: u32,
     pub device_name: String,
+    /// Windows took "do not lower the other apps" for this stream
+    /// ([`ask_not_to_duck`]); false on Windows 10, which cannot be
+    /// asked.
+    pub keeps_others: bool,
 }
 
 struct RenderParts {
     consumer: Consumer<f32>,
-    wake_tx: Sender<()>,
+    wake_tx: Ring,
     stats: Arc<AudioStats>,
 }
 
 impl NativeRender {
+    /// Open `device_name` (or the default render endpoint: the
+    /// communications one when `communications`) on a new MMCSS thread
+    /// and start playing from `consumer`.
     pub fn start(
         device_name: Option<&str>,
         voice: bool,
+        communications: bool,
         consumer: Consumer<f32>,
-        wake_tx: Sender<()>,
+        wake_tx: Ring,
         stats: Arc<AudioStats>,
     ) -> Result<Self, RenderStartError> {
         let should_stop = Arc::new(AtomicBool::new(false));
-        let (setup_tx, setup_rx) = bounded::<SetupReport<(u32, String)>>(1);
+        let (setup_tx, setup_rx) = bounded::<SetupReport<(u32, String, bool)>>(1);
         let (parts_tx, parts_rx) = bounded::<RenderParts>(1);
         let name = device_name.map(String::from);
         let stop = should_stop.clone();
 
         let thread = crate::platform::spawn_named("voice-render-wasapi", move || {
-            render_thread(name.as_deref(), voice, &setup_tx, &parts_rx, &stop);
+            render_thread(
+                name.as_deref(),
+                voice,
+                communications,
+                &setup_tx,
+                &parts_rx,
+                &stop,
+            );
         });
 
         match setup_rx.recv() {
-            Ok(Ok((sample_rate, device_name))) => {
+            Ok(Ok((sample_rate, device_name, keeps_others))) => {
                 let parts = RenderParts {
                     consumer,
                     wake_tx,
@@ -900,6 +1129,7 @@ impl NativeRender {
                     thread: Some(thread),
                     sample_rate,
                     device_name,
+                    keeps_others,
                 })
             }
             other => {
@@ -930,7 +1160,8 @@ impl Drop for NativeRender {
 fn render_thread(
     device_name: Option<&str>,
     voice: bool,
-    setup_tx: &Sender<SetupReport<(u32, String)>>,
+    communications: bool,
+    setup_tx: &Sender<SetupReport<(u32, String, bool)>>,
     parts_rx: &crossbeam_channel::Receiver<RenderParts>,
     should_stop: &AtomicBool,
 ) {
@@ -941,10 +1172,17 @@ fn render_thread(
     let _rt = crate::platform::promote_current_thread(480, OPUS_SAMPLE_RATE);
 
     let mut ducking = "n/a";
+    let mut own_volume = "n/a";
     let opened =
         (|| -> Result<(AudioClient, AudioRenderClient, Handle, Negotiated, String), String> {
             let enumerator = DeviceEnumerator::new().map_err(|e| format!("enumerator: {e}"))?;
-            let device = find_device(&enumerator, Direction::Render, device_name, role_for(voice))?;
+            let device = stream_device(
+                &enumerator,
+                Direction::Render,
+                device_name,
+                communications,
+                voice,
+            )?;
             let friendly = device.get_friendlyname().unwrap_or_else(|_| "?".into());
             let (client, negotiated) = open_with_fallback(
                 &device,
@@ -953,9 +1191,8 @@ fn render_thread(
                 "render",
                 voice,
             )?;
-            if voice {
-                ducking = ask_not_to_duck(&client, "render");
-            }
+            ducking = ask_not_to_duck(&client, "render");
+            own_volume = keep_own_volume(&client);
             let event = client
                 .set_get_eventhandle()
                 .map_err(|e| format!("render event handle: {e}"))?;
@@ -983,7 +1220,11 @@ fn render_thread(
         }
     };
     if setup_tx
-        .send(Ok((negotiated.sample_rate, friendly.clone())))
+        .send(Ok((
+            negotiated.sample_rate,
+            friendly.clone(),
+            ducking == DUCK_REQUESTED,
+        )))
         .is_err()
     {
         wasapi::deinitialize();
@@ -996,12 +1237,13 @@ fn render_thread(
 
     info!(
         "Native WASAPI render: {friendly} @ {} Hz, {}ch, {:?}, {} ms engine buffer, category={}, \
-         do-not-duck={ducking}",
+         do-not-duck={ducking}, own-volume={own_volume}, Windows during calls: {}",
         negotiated.sample_rate,
         negotiated.channels,
         negotiated.layout,
         RENDER_BUFFER_HNS / 10_000,
-        if voice { "Communications" } else { "Other" }
+        if voice { "Communications" } else { "Other" },
+        windows_ducking_setting()
     );
     run_render(&client, &render, &event, negotiated, parts, should_stop);
     if let Err(e) = client.stop_stream() {
@@ -1036,7 +1278,13 @@ fn run_render(
     while !should_stop.load(Ordering::Relaxed) {
         match event.wait_for_event(EVENT_WAIT_MS) {
             Ok(()) => {}
-            Err(WasapiError::EventTimeout) => continue,
+            Err(WasapiError::EventTimeout) => {
+                if stopped_signalling(client, "render") {
+                    stats.output_stream_failed.store(true, Ordering::Relaxed);
+                    break;
+                }
+                continue;
+            }
             Err(e) => {
                 error!("Native render event wait failed: {e}");
                 stats.output_stream_failed.store(true, Ordering::Relaxed);
@@ -1103,8 +1351,8 @@ fn run_render(
             }
         }
 
-        // Ring space freed — refill promptly rather than on the tick.
-        let _ = wake_tx.try_send(());
+        // Ring space freed — the worker refills on this ring alone.
+        wake_tx.ring();
     }
 }
 
@@ -1122,9 +1370,10 @@ pub struct DeviceWatcher {
 }
 
 impl DeviceWatcher {
-    /// `communications`: the session is on the voice-call path, so the
-    /// default that matters is the Default Communications Device
-    /// (AEC-SPEC.md §4.5); otherwise Console/Multimedia, as ever.
+    /// `communications`: "default" means the Default Communications
+    /// Device for the open streams (echo cancellation not Off,
+    /// AEC-SPEC.md §4.5, review P1-18); otherwise Console/Multimedia,
+    /// as ever.
     pub fn start(stats: Arc<AudioStats>, communications: Arc<AtomicBool>) -> Result<Self, String> {
         let (stop_tx, stop_rx) = bounded::<()>(1);
         let (setup_tx, setup_rx) = bounded::<Result<(), String>>(1);
@@ -1186,8 +1435,8 @@ fn register(
         let communications = communications.clone();
         callbacks.set_default_device_callback(move |direction, role, id| {
             // Console/Multimedia are what "default device" means for apps;
-            // Communications is a separate user setting — the one that
-            // applies while we are on the voice-call path.
+            // Communications is a separate user setting — the one our
+            // streams follow unless echo cancellation is Off.
             let relevant = if communications.load(Ordering::Relaxed) {
                 matches!(role, Role::Communications)
             } else {

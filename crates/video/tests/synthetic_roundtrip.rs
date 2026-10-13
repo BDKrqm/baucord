@@ -6,7 +6,7 @@
 
 use video::{
     codec::{FfmpegDecoder, FfmpegEncoder, KEYFRAME_INTERVAL_MS},
-    Frame, PixelFormat, Quality,
+    Frame, PixelFormat, Quality, VideoEncoder,
 };
 
 /// Synthetic RGBA frame: gradient background + a moving white square, so
@@ -96,7 +96,7 @@ fn synthetic_roundtrip() {
             if let Some(d) = decoder.decode(&ef).expect("decode") {
                 assert_eq!((d.width, d.height), (1152, 720));
                 decoded += 1;
-                decoder.return_buffer(d.data);
+                video::pool::recycle(d.data);
             }
         }
     }
@@ -131,7 +131,7 @@ fn synthetic_roundtrip() {
             if let Some(d) = decoder.decode(&ef).expect("decode after resize") {
                 assert_eq!((d.width, d.height), (800, 600));
                 saw_new_dims = true;
-                decoder.return_buffer(d.data);
+                video::pool::recycle(d.data);
             }
         }
     }
@@ -178,6 +178,177 @@ fn synthetic_roundtrip() {
             );
         }
     }
+}
+
+/// Decoded pictures are tight RGBA whatever the width, every pixel
+/// written, the right edge included: a width that is a multiple of 16 is
+/// converted straight into the pooled buffer, others (a 1366-wide laptop
+/// screen, a portrait window) through a padded frame first (review
+/// P1-11, `codec::DIRECT_WIDTH_MULTIPLE`). Decoded buffers go back to the
+/// pool between sizes, so a pixel left unwritten would show an older
+/// picture's bytes.
+#[test]
+fn every_width_decodes_to_a_whole_tight_picture() {
+    let rgb = [60u8, 200, 60];
+    for (w, h) in [(1360u32, 768u32), (1366, 768), (404, 720), (1360, 768)] {
+        let mut encoder = match FfmpegEncoder::new(Quality::FHD30) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("SKIP: no usable H.264 encoder in this environment: {e}");
+                return;
+            }
+        };
+        let mut decoder = FfmpegDecoder::new().expect("decoder init");
+        let mut last = None;
+        for j in 0..5u64 {
+            for ef in encoder
+                .encode(&solid_frame(w, h, rgb, j * 33))
+                .expect("encode")
+            {
+                assert_eq!((ef.width, ef.height), (w, h));
+                if let Some(d) = decoder.decode(&ef).expect("decode")
+                    && let Some(old) = last.replace(d.data)
+                {
+                    video::pool::recycle(old);
+                }
+            }
+        }
+        let data = last.expect("decoded at least one frame");
+        assert_eq!(data.len(), (w * h * 4) as usize, "{w}x{h}: tight RGBA");
+        for row in [0, h / 2, h - 1] {
+            for col in [0, w / 2, w - 8, w - 2, w - 1] {
+                let o = ((row * w + col) * 4) as usize;
+                for c in 0..3 {
+                    let (got, want) = (i32::from(data[o + c]), i32::from(rgb[c]));
+                    assert!(
+                        (got - want).abs() <= 12,
+                        "{w}x{h} pixel ({col}, {row}) channel {c}: {got}, want {want}"
+                    );
+                }
+            }
+        }
+        video::pool::recycle(data);
+    }
+}
+
+/// A still screen makes no `encode` calls, so `drain` is how what a
+/// hardware encoder still holds gets out (review P1-13). Whatever this
+/// machine's encoder is, the frames it reports in flight are exactly
+/// those submitted and not yet handed out, and a drain hands out no
+/// more than those.
+#[test]
+fn frames_in_flight_and_drain_agree() {
+    let mut encoder = match FfmpegEncoder::new(Quality::HD30) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("SKIP: no usable H.264 encoder in this environment: {e}");
+            return;
+        }
+    };
+    let (mut sent, mut out) = (0usize, 0usize);
+    for i in 0..10u64 {
+        out += encoder
+            .encode(&synth_frame(640, 360, i, i * 33))
+            .expect("encode")
+            .len();
+        sent += 1;
+        assert_eq!(encoder.frames_in_flight(), sent - out);
+    }
+    let drained = encoder.drain().expect("drain").len();
+    assert!(drained <= sent - out);
+    out += drained;
+    assert_eq!(encoder.frames_in_flight(), sent - out);
+    assert!(
+        encoder.encoder_name() == "h264_amf" || !encoder.output_needs_input(),
+        "only AMF keeps its output until the next frame"
+    );
+}
+
+/// A still screen's refreshes stay out of the keyframe cadence (review
+/// P2-41): ten seconds of once-a-second repeats bring no keyframe, a
+/// forced one still comes at once, and the cadence carries on where it
+/// was when the picture moves again. The same ten seconds through
+/// `encode` are a keyframe every [`KEYFRAME_INTERVAL_MS`], as before.
+#[test]
+fn a_still_picture_gets_no_keyframes_until_someone_asks() {
+    let open = || match FfmpegEncoder::new(Quality::HD30) {
+        Ok(e) => Some(e),
+        Err(e) => {
+            eprintln!("SKIP: no usable H.264 encoder in this environment: {e}");
+            None
+        }
+    };
+    let Some(mut encoder) = open() else { return };
+    if !encoder.supports_forced_keyframes() || encoder.output_needs_input() {
+        eprintln!(
+            "SKIP: {} keeps its own keyframe period",
+            encoder.encoder_name()
+        );
+        return;
+    }
+    let keyframes = |aus: Vec<video::EncodedFrame>| aus.iter().filter(|f| f.is_keyframe).count();
+
+    // Half a second of motion, opening with the session's keyframe.
+    let mut seen = 0;
+    for i in 0..15u64 {
+        seen += keyframes(
+            encoder
+                .encode(&synth_frame(640, 360, i, i * 33))
+                .expect("encode"),
+        );
+    }
+    seen += keyframes(encoder.drain().expect("drain"));
+    assert_eq!(seen, 1, "the session's first frame");
+
+    // Ten seconds still.
+    let mut still = 0;
+    for second in 1..=10u64 {
+        let frame = synth_frame(640, 360, 14, 462 + second * 1000);
+        still += keyframes(encoder.encode_repeat(&frame).expect("encode"));
+    }
+    still += keyframes(encoder.drain().expect("drain"));
+    assert_eq!(still, 0, "an unchanged picture needs no keyframe");
+
+    // A viewer asks: the next refresh is one.
+    encoder.force_keyframe();
+    let frame = synth_frame(640, 360, 14, 11_462);
+    let mut forced = keyframes(encoder.encode_repeat(&frame).expect("encode"));
+    forced += keyframes(encoder.drain().expect("drain"));
+    assert_eq!(forced, 1, "a forced keyframe does not wait");
+
+    // Motion again: the next keyframe is one interval of motion later.
+    let mut first_keyframe_at = None;
+    for i in 0..90u64 {
+        let ts = 11_462 + (i + 1) * 33;
+        let mut n = keyframes(
+            encoder
+                .encode(&synth_frame(640, 360, 15 + i, ts))
+                .expect("encode"),
+        );
+        n += keyframes(encoder.drain().expect("drain"));
+        if n > 0 && first_keyframe_at.is_none() {
+            first_keyframe_at = Some(ts - 11_462);
+        }
+    }
+    let at = first_keyframe_at.expect("the cadence carries on");
+    assert!(
+        (KEYFRAME_INTERVAL_MS..KEYFRAME_INTERVAL_MS + 100).contains(&at),
+        "next keyframe {at} ms into the motion"
+    );
+
+    // The same still stretch through `encode`: the old cadence.
+    let Some(mut encoder) = open() else { return };
+    let mut plain = keyframes(
+        encoder
+            .encode(&synth_frame(640, 360, 0, 0))
+            .expect("encode"),
+    );
+    for second in 1..=10u64 {
+        let frame = synth_frame(640, 360, 0, second * 1000);
+        plain += keyframes(encoder.encode(&frame).expect("encode"));
+    }
+    plain += keyframes(encoder.drain().expect("drain"));
+    assert_eq!(plain, 6, "0, 2, 4, 6, 8 and 10 s");
 }
 
 /// What iOS's decoder receives (IOS-SPEC.md §14 D30): the real encoder's

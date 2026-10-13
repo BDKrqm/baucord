@@ -9,7 +9,7 @@
 //! control messages and cached only where the media path needs it
 //! (the relay's `muted` set).
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use log::info;
 use protocol::{
@@ -17,15 +17,15 @@ use protocol::{
         AdminCommand, AdminError, AdminOutcome, AdminTarget, InviteSummary, KeySummary,
         RestrictionSummary, UserSummary,
     },
-    features,
     permissions::{self, RoleId},
     ClientId, RemovedKind, RestrictionKind, RoleInfo, ServerMessage, UserId,
 };
 
 use super::{hex, ChatServer};
 use crate::{
+    clock::WallMs,
     persistence::Command,
-    policy::{KeyRecord, Restriction},
+    policy::{KeyRecord, Policy, Restriction},
 };
 
 /// What a restriction of each kind subtracts (spec §4.2).
@@ -41,20 +41,35 @@ fn permission_removed_by(kind: RestrictionKind) -> u64 {
     }
 }
 
+/// A user's roles unioned, minus what active restrictions take away
+/// (spec §4.2).
+fn effective_in(policy: &Policy, user: &UserId, now: WallMs) -> u64 {
+    let mut perms = policy.permissions_of(user);
+    for r in &policy.restrictions {
+        if r.active(now) && r.user_id.as_ref() == Some(user) {
+            perms &= !permission_removed_by(r.kind);
+        }
+    }
+    perms
+}
+
+/// The role ids a user's `UserDetails` carries; none and an empty set
+/// read the same.
+fn roles_in<'a>(policy: &'a Policy, user: &UserId) -> Option<&'a BTreeSet<RoleId>> {
+    policy
+        .users
+        .get(user)
+        .map(|u| &u.roles)
+        .filter(|roles| !roles.is_empty())
+}
+
 impl ChatServer {
     // ── Enforcement ─────────────────────────────────────────────────
 
     /// A user's roles unioned, minus what active restrictions take
     /// away (spec §4.2).
     pub(super) fn effective_permissions(&self, user: &UserId) -> u64 {
-        let now = self.wall_now();
-        let mut perms = self.policy.permissions_of(user);
-        for r in &self.policy.restrictions {
-            if r.active(now) && r.user_id.as_ref() == Some(user) {
-                perms &= !permission_removed_by(r.kind);
-            }
-        }
-        perms
+        effective_in(&self.policy, user, self.wall_now())
     }
 
     /// Whether the session holds `bit` right now.
@@ -89,7 +104,7 @@ impl ChatServer {
                 reason.as_str()
             }
         );
-        self.send_if_roles(
+        self.send_msg(
             client,
             &ServerMessage::Restricted {
                 kind,
@@ -138,17 +153,20 @@ impl ChatServer {
             {
                 let msg = ServerMessage::RestrictionLifted { kind: r.kind };
                 for client in self.sessions_of(&user) {
-                    self.send_if_roles(client, &msg);
+                    self.send_msg(client, &msg);
                 }
             }
         }
         self.refresh_enforcement();
     }
 
-    /// After the persistence thread handed over a policy another
-    /// process changed: bans land on live sessions, mutes take effect,
-    /// roles refresh in every roster.
-    pub(super) fn apply_reloaded_policy(&mut self) {
+    /// Swap in a policy the persistence thread reloaded after another
+    /// process changed the file: bans land on live sessions, mutes take
+    /// effect, and what changed reaches the clients. Only what changed:
+    /// every reload used to send each session's `UserDetails` to every
+    /// session, about 66,000 messages at 256 sessions (review P1-22).
+    pub(super) fn apply_reloaded_policy(&mut self, policy: Policy) {
+        let old = std::mem::replace(&mut self.policy, policy);
         let now = self.wall_now();
         let hit: Vec<(ClientId, Restriction)> = self
             .user_of
@@ -157,15 +175,7 @@ impl ChatServer {
                 let key = self.key_of.get(client)?;
                 let ip = self.driver.remote_address(*client).map(|a| a.ip());
                 self.policy
-                    .restrictions
-                    .iter()
-                    .find(|r| {
-                        r.kind == RestrictionKind::Server
-                            && r.active(now)
-                            && (r.user_id.as_ref() == Some(user)
-                                || r.key_hash.as_ref() == Some(key)
-                                || (ip.is_some() && r.ip == ip))
-                    })
+                    .server_ban(Some(user), key, ip, now)
                     .map(|r| (*client, r.clone()))
             })
             .collect();
@@ -178,14 +188,20 @@ impl ChatServer {
             );
         }
         // A kick from the CLI shows up as the session's key no longer
-        // belonging to its user.
+        // belonging to its user; `server key unlink` as the key being
+        // retired, which is as gone as removed: the session it logged
+        // in used to stay connected until it left on its own (review
+        // P3-11).
         let kicked: Vec<ClientId> = self
             .user_of
             .iter()
             .filter(|(client, user)| {
-                self.key_of
-                    .get(*client)
-                    .is_none_or(|key| self.policy.keys.get(key).map(|k| k.user_id) != Some(**user))
+                self.key_of.get(*client).is_none_or(|key| {
+                    self.policy
+                        .keys
+                        .get(key)
+                        .is_none_or(|k| k.user_id != **user || k.retired_at.is_some())
+                })
             })
             .map(|(client, _)| *client)
             .collect();
@@ -193,40 +209,67 @@ impl ChatServer {
             self.remove_session(client, RemovedKind::Kicked, "access removed", "server");
         }
         self.refresh_enforcement();
-        let details: Vec<ServerMessage> = self
-            .user_of
+        // An account the other process purged (`server user purge`):
+        // its messages are gone from the database, and must leave the
+        // replay ring and everyone's screen too, not wait for the 200
+        // messages after them (review P2-8).
+        let purged: Vec<u64> = self
+            .recent
             .iter()
-            .map(|(c, u)| self.user_details(*c, u))
+            .filter(|m| {
+                old.users.contains_key(&m.user_id) && !self.policy.users.contains_key(&m.user_id)
+            })
+            .map(|m| m.msg_id)
             .collect();
-        for msg in details {
-            for peer in self.clients() {
-                self.send_if_roles(peer, &msg);
+        if !purged.is_empty() {
+            self.recent.retain(|m| !purged.contains(&m.msg_id));
+            for msg_id in purged {
+                self.broadcast_msg(&ServerMessage::MessageDeleted { msg_id });
             }
         }
-        // Each session's own permission set, so its gates follow a
-        // `server user grant` without a reconnect.
+        // The roster lines whose roles or level moved, to everyone who
+        // knows the session.
+        let details: Vec<(ClientId, ServerMessage)> = self
+            .user_of
+            .iter()
+            .filter(|(_, u)| {
+                roles_in(&old, u) != roles_in(&self.policy, u)
+                    || old.level_of(u) != self.policy.level_of(u)
+            })
+            .map(|(c, u)| (*c, self.user_details(*c, u)))
+            .collect();
+        for (subject, msg) in details {
+            for peer in self.audience_about(subject) {
+                self.send_msg(peer, &msg);
+            }
+        }
+        // A session whose own permission set moved hears it, so its
+        // gates follow a `server user grant` without a reconnect.
         let persistent = self.persist.is_persistent();
         let sessions: Vec<(ClientId, ServerMessage)> = self
             .user_of
             .iter()
-            .map(|(c, u)| {
-                (
+            .filter_map(|(c, u)| {
+                let permissions = effective_in(&self.policy, u, now);
+                (permissions != effective_in(&old, u, now)).then_some((
                     *c,
                     ServerMessage::Session {
                         user_id: *u,
-                        permissions: self.effective_permissions(u),
+                        permissions,
                         persistent,
                     },
-                )
+                ))
             })
             .collect();
         for (client, session) in sessions {
-            self.send_if_roles(client, &session);
+            self.send_msg(client, &session);
         }
-        // The table itself may have changed (`server role`).
-        let roles = self.role_list();
-        for peer in self.clients() {
-            self.send_if(peer, features::ROLE_LIST, &roles);
+        // The table itself, when it changed (`server role`).
+        if old.roles != self.policy.roles {
+            let roles = self.role_list();
+            for peer in self.clients() {
+                self.send_msg(peer, &roles);
+            }
         }
     }
 
@@ -291,16 +334,6 @@ impl ChatServer {
             .iter()
             .find(|c| c.id == channel_id)
             .map_or_else(|| format!("channel {channel_id}"), |c| c.name.clone())
-    }
-
-    pub(super) fn send_if_roles(&mut self, client: ClientId, msg: &ServerMessage) {
-        if self
-            .features_of
-            .get(&client)
-            .is_some_and(|f| f & features::ROLES != 0)
-        {
-            self.send_msg(client, msg);
-        }
     }
 
     /// Live sessions of a user (normally one; a replacement in flight
@@ -393,11 +426,31 @@ impl ChatServer {
                 } else {
                     need(permissions::RESTRICT)?;
                 }
+                // A `server` restriction is a ban, whoever or whatever
+                // it names: a role that may restrict and not ban could
+                // ask for one on a person with a client of its own
+                // making (the rest of review P2-10).
+                if kind == RestrictionKind::Server {
+                    need(permissions::BAN)?;
+                }
                 let (user_id, key_hash, ip) = match target {
                     AdminTarget::User(_) | AdminTarget::Name(_) => {
                         let user = self.resolve_target(&target)?;
                         self.check_target(actor, &user)?;
                         (Some(user), None, None)
+                    }
+                    // A key or an address is not a person: it can only
+                    // be kept out of the server (with the ban permission,
+                    // above, like any other ban). A mute or a text
+                    // restriction on one would name nobody, skipped the
+                    // rank rule, and showed in no one's session (review
+                    // P2-10).
+                    AdminTarget::Key(_) | AdminTarget::Address(_)
+                        if kind != RestrictionKind::Server =>
+                    {
+                        return Err(AdminError::Invalid(
+                            "a key or an address can only be banned from the server".to_string(),
+                        ));
                     }
                     AdminTarget::Key(key) => {
                         if let Some(owner) = self.policy.keys.get(&key).map(|k| k.user_id) {
@@ -979,10 +1032,10 @@ impl ChatServer {
                 permissions: perms,
                 persistent,
             };
-            self.send_if_roles(*client, &session);
+            self.send_msg(*client, &session);
             let details = self.user_details(*client, user_id);
-            for peer in self.clients() {
-                self.send_if_roles(peer, &details);
+            for peer in self.audience_about(*client) {
+                self.send_msg(peer, &details);
             }
         }
     }

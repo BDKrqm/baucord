@@ -18,11 +18,10 @@ use protocol::{
     features, permissions, AuthorInfo, BlobId, ClientId, Profile, ProfileDenyReason,
     RenameDenyReason, RestrictionKind, ServerMessage, UploadRejectReason, UserId,
 };
-use sha2::{Digest, Sha256};
 
-use super::{fold_upload, ChatServer, Folded};
+use super::{fold_upload, ChatServer, Folded, Waiting};
 use crate::{
-    persistence::{Answer, AskId, BlobRecord, Command, Outcome, Query},
+    persistence::{Answer, BlobRecord, Command, Outcome, Query},
     policy::{BlobMeta, Restriction},
 };
 
@@ -31,6 +30,9 @@ pub(super) const PROFILE_RATE: Duration = Duration::from_secs(30);
 /// How long a blob read from disk may take before the fetcher is told
 /// the blob is missing.
 const BLOB_DEADLINE: Duration = Duration::from_secs(10);
+/// Bytes of disk-backed blobs kept in memory for fetches: avatars and
+/// small pictures, a few hundred at the default 256 KB cap each.
+const BLOB_CACHE_BYTES: usize = 32 * 1024 * 1024;
 /// The chat background every name color is checked against (spec
 /// §7.1): `#1a1d21`.
 const CHAT_BG: [u8; 3] = [0x1a, 0x1d, 0x21];
@@ -124,7 +126,7 @@ impl ChatServer {
         };
         for peer in targets {
             if *peer != sender {
-                self.send_if(*peer, features::SAFETY, &msg);
+                self.send_msg(*peer, &msg);
             }
         }
     }
@@ -148,25 +150,15 @@ impl ChatServer {
             .filter(|u| Some(*u) != me && seen.insert(*u))
             .filter_map(|u| self.author_info(&u, None))
             .collect();
-        if !authors.is_empty() {
+        // The client merges each batch into what it knows.
+        for authors in protocol::split_to_fit(authors, protocol::LIST_ITEMS_BUDGET) {
             self.send_msg(client, &ServerMessage::Authors { authors });
-        }
-    }
-
-    /// Send only to a session that negotiated `PROFILES`.
-    pub(super) fn send_if_profiles(&mut self, client: ClientId, msg: &ServerMessage) {
-        if self
-            .features_of
-            .get(&client)
-            .is_some_and(|f| f & features::PROFILES != 0)
-        {
-            self.send_msg(client, msg);
         }
     }
 
     fn broadcast_if_profiles(&mut self, msg: &ServerMessage) {
         for peer in self.clients() {
-            self.send_if_profiles(peer, msg);
+            self.send_msg(peer, msg);
         }
     }
 
@@ -365,7 +357,9 @@ impl ChatServer {
             client_id: client,
             name,
         };
-        self.broadcast_if_profiles(&msg);
+        for peer in self.audience_about(client) {
+            self.send_msg(peer, &msg);
+        }
     }
 
     // ── Blobs: upload ───────────────────────────────────────────────
@@ -382,7 +376,18 @@ impl ChatServer {
         size: u32,
         sha256: BlobId,
     ) {
-        if self.policy.blobs.contains_key(&sha256) {
+        // A known hash is acknowledged without transfer only to whoever
+        // may already post it: its uploader, or someone who sent the
+        // same bytes before. Anyone else sends them once — the proof
+        // that they hold the file — and may then post it too. Answering
+        // "already here" to everyone left a second poster refused by
+        // `SendFile` on every retry (review P0-4).
+        let user = self.user_of.get(&client).copied();
+        if let Some(known) = self.policy.blobs.get(&sha256)
+            && user.is_some_and(|u| {
+                known.created_by == Some(u) || self.proven_uploads.contains(&(u, sha256))
+            })
+        {
             self.send_msg(
                 client,
                 &ServerMessage::UploadAccept {
@@ -492,7 +497,7 @@ impl ChatServer {
         let Some(announced) = self.announced_uploads.remove(&client) else {
             return;
         };
-        let digest: BlobId = Sha256::digest(&bytes).into();
+        let digest: BlobId = transport::sha256::digest(&bytes);
         if digest != announced.sha256 || bytes.len() != announced.size as usize {
             self.reject_upload(client, upload_id, UploadRejectReason::HashMismatch);
             return;
@@ -508,31 +513,39 @@ impl ChatServer {
             }
         };
         let created_by = self.user_of.get(&client).copied();
-        info!(
-            "[{}] uploaded a {} blob ({} KB)",
-            self.get_username(client),
-            sniffed,
-            bytes.len() / 1024
-        );
         if announced.is_file
             && let Some(user) = created_by
         {
             self.note_upload(user, announced.size);
         }
-        self.store_blob(
-            digest,
-            BlobMeta {
-                mime: sniffed,
-                size: announced.size,
-                name: announced.name,
-                created_by,
-                created_at: self.wall_now(),
-                refs: 0,
-            },
-            Some(announced.mime),
-            bytes,
-            announced.is_file,
-        );
+        if self.policy.blobs.contains_key(&digest) {
+            // The bytes of a file someone else uploaded first: proof of
+            // possession. The record (and its first uploader) stays.
+            if let Some(user) = created_by {
+                self.proven_uploads.insert((user, digest));
+            }
+        } else {
+            info!(
+                "[{}] uploaded a {} blob ({} KB)",
+                self.get_username(client),
+                sniffed,
+                bytes.len() / 1024
+            );
+            self.store_blob(
+                digest,
+                BlobMeta {
+                    mime: sniffed,
+                    size: announced.size,
+                    name: announced.name,
+                    created_by,
+                    created_at: self.wall_now(),
+                    refs: 0,
+                },
+                Some(announced.mime),
+                bytes,
+                announced.is_file,
+            );
+        }
         self.send_msg(
             client,
             &ServerMessage::UploadDone {
@@ -581,8 +594,50 @@ impl ChatServer {
         self.persist.send(Command::StoreBlob(Box::new(record)));
         self.policy.blobs.insert(blob_id, meta);
         if let Some(bytes) = cached {
-            self.blob_bytes.insert(blob_id, bytes);
+            self.cache_blob(blob_id, bytes);
         }
+    }
+
+    /// Keep a blob's bytes in memory. Without persistence this is the
+    /// only copy and stays. With it this is a cache of the disk, held
+    /// to [`BLOB_CACHE_BYTES`]: the least recently served go first. It
+    /// used to keep every small file ever fetched (review P2-12).
+    pub(super) fn cache_blob(&mut self, blob_id: BlobId, bytes: Arc<Vec<u8>>) {
+        self.blob_bytes.insert(blob_id, bytes);
+        self.touch_blob(&blob_id);
+        if !self.persist.is_persistent() {
+            return;
+        }
+        let mut total: usize = self.blob_bytes.values().map(|b| b.len()).sum();
+        while total > BLOB_CACHE_BYTES {
+            let Some(coldest) = self
+                .blob_bytes
+                .keys()
+                .filter(|id| **id != blob_id)
+                .min_by_key(|id| self.blob_used.get(*id).copied().unwrap_or(0))
+                .copied()
+            else {
+                break;
+            };
+            if let Some(gone) = self.blob_bytes.remove(&coldest) {
+                total -= gone.len();
+            }
+            self.blob_used.remove(&coldest);
+        }
+    }
+
+    fn touch_blob(&mut self, blob_id: &BlobId) {
+        self.blob_clock += 1;
+        self.blob_used.insert(*blob_id, self.blob_clock);
+    }
+
+    /// Drop everything held about a blob: its metadata, its cached
+    /// bytes, and who proved they hold it. Returns the metadata.
+    pub(super) fn forget_blob(&mut self, blob_id: &BlobId) -> Option<crate::policy::BlobMeta> {
+        self.blob_bytes.remove(blob_id);
+        self.blob_used.remove(blob_id);
+        self.proven_uploads.retain(|(_, blob)| blob != blob_id);
+        self.policy.blobs.remove(blob_id)
     }
 
     /// A declared MIME type worth keeping: `type/subtype` in printable
@@ -623,9 +678,11 @@ impl ChatServer {
             refs,
         });
         if refs == 0 {
-            self.blob_bytes.remove(blob_id);
-            if !self.persist.is_persistent() {
-                self.policy.blobs.remove(blob_id);
+            if self.persist.is_persistent() {
+                self.blob_bytes.remove(blob_id);
+                self.blob_used.remove(blob_id);
+            } else {
+                self.forget_blob(blob_id);
             }
         }
     }
@@ -651,6 +708,7 @@ impl ChatServer {
     /// through the persistence thread; `BlobMissing` otherwise.
     pub(super) fn handle_fetch_blob(&mut self, client: ClientId, blob_id: BlobId) {
         if let Some(bytes) = self.blob_bytes.get(&blob_id).cloned() {
+            self.touch_blob(&blob_id);
             self.send_blob(client, blob_id, &bytes);
             return;
         }
@@ -658,34 +716,22 @@ impl ChatServer {
             self.send_msg(client, &ServerMessage::BlobMissing { blob_id });
             return;
         }
-        if let Some((_, waiting)) = self.pending_blobs.get_mut(&blob_id) {
-            waiting.push(client);
+        // One read however many sessions want the file.
+        if let Some(fetchers) = self.pending_blobs.get_mut(&blob_id) {
+            fetchers.push(client);
             return;
         }
         let ask = self
             .persist
             .ask(Query::Blob { blob_id }, self.now + BLOB_DEADLINE);
-        self.pending_blobs.insert(blob_id, (ask, vec![client]));
-    }
-
-    /// Whether an answered ask belongs to a blob fetch (the
-    /// persistence poll routes by this).
-    pub(super) fn is_blob_ask(&self, ask: AskId) -> bool {
-        self.pending_blobs.values().any(|(a, _)| *a == ask)
+        self.waiting.insert(ask, Waiting::Blob(blob_id));
+        self.pending_blobs.insert(blob_id, vec![client]);
     }
 
     /// The persistence thread answered a blob read (or did not, in
     /// time): every waiting fetcher gets the bytes or `BlobMissing`.
-    pub(super) fn resolve_blob_answer(&mut self, ask: AskId, outcome: Outcome) {
-        let Some(blob_id) = self
-            .pending_blobs
-            .iter()
-            .find(|(_, (a, _))| *a == ask)
-            .map(|(id, _)| *id)
-        else {
-            return;
-        };
-        let Some((_, waiting)) = self.pending_blobs.remove(&blob_id) else {
+    pub(super) fn resolve_blob_answer(&mut self, blob_id: BlobId, outcome: Outcome) {
+        let Some(waiting) = self.pending_blobs.remove(&blob_id) else {
             return;
         };
         let bytes = match outcome {
@@ -694,7 +740,7 @@ impl ChatServer {
                 // Avatars are fetched by everyone and stay cached; a
                 // file is read for one download and not kept.
                 if bytes.len() <= self.avatar_cap() {
-                    self.blob_bytes.insert(blob_id, bytes.clone());
+                    self.cache_blob(blob_id, bytes.clone());
                 }
                 Some(bytes)
             }

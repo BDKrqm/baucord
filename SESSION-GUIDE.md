@@ -44,7 +44,7 @@ Check with `which cargo` and `df -h /` first.
   `https://static.crates.io/crates/<name>/<name>-<version>.crate`
   (`crates.io/api/v1/crates/<name>` lists versions; send a
   `User-Agent`). Read the source before writing against it — done for
-  `interprocess`, `device_query`, `quinn-proto`, `jni`, the `objc2`
+  `interprocess`, `quinn-proto`, `quinn-udp`, `jni`, the `objc2`
   framework crates.
 
 ### What can be checked here, per platform
@@ -89,16 +89,69 @@ Check with `which cargo` and `df -h /` first.
   github.com/apple-oss-distributions/bash (`bash-3.2/`, with a
   `xlocale.h` shim, `-DEBADEXEC=ENOEXEC -DEBADARCH=ENOEXEC` and a
   pass-through `fmtcheck`).
-- **Windows-only code** (`wasapi.rs`, DXGI) cannot be compiled here
-  (§4): check it against the crate sources by reading, and say so in the
-  hand-over.
+- **Windows-only code** (`wasapi.rs`, DXGI, the socket waits, qWAVE) is
+  type-checked against the real target since 2026-10-12, where the
+  sandbox can install packages: `rustup target add
+  x86_64-pc-windows-gnu`, `apt-get install gcc-mingw-w64-x86-64-posix
+  g++-mingw-w64-x86-64-posix`, then `cargo check --target
+  x86_64-pc-windows-gnu -p transport -p audio -p video -p client -p
+  server` (`transport` alone needs `--features server`). `video` needs
+  two variables for `ffmpeg-sys-next`'s bindgen: `FFMPEG_DIR=<dir>`
+  whose `include/` holds links to only the FFmpeg header folders
+  (`/usr/include/<arch>-linux-gnu/libav*`, `libsw*`, `libpostproc`;
+  the folder itself drags glibc's headers in) and an empty `lib/`, and
+  `BINDGEN_EXTRA_CLANG_ARGS="--sysroot=/usr/x86_64-w64-mingw32
+  -I/usr/x86_64-w64-mingw32/include"`. It is the GNU target, not MSVC:
+  the Rust is checked, nothing is linked or run. The frontend's
+  Windows code is not covered (Skia has no prebuilt for that target).
+- **Android without an NDK**, the same way: `rustup target add
+  aarch64-linux-android`, and let the C dependencies build with the
+  host compiler, which is enough because `cargo check` links nothing —
+  `CC_aarch64_linux_android=gcc CXX_aarch64_linux_android=g++
+  AR_aarch64_linux_android=ar` and `CMAKE_TOOLCHAIN_FILE` pointing at
+  a file that says `set(CMAKE_SYSTEM_NAME Linux)`,
+  `set(CMAKE_C_COMPILER gcc)`, `set(CMAKE_CXX_COMPILER g++)`,
+  `set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)`. Then `cargo
+  check --target aarch64-linux-android -p audio -p video -p client`
+  (AAudio, MediaCodec and the phone paths of the client). The
+  `android` crate still needs the scratch crate above.
 - **Dependency graphs** without a target installed: `cargo tree -p
   android --target aarch64-linux-android -e normal,build`, the same for
   `-p ios --target aarch64-apple-ios`.
+- **Crates with no C in them, for any target** (2026-10-12): `rustup
+  target add aarch64-apple-darwin aarch64-apple-ios`, then `cargo
+  clippy --target <t> -p keywatch -p app-core` (macOS, iOS, Windows,
+  Android) and `cargo check --target aarch64-apple-ios -p video` — on
+  iOS `video` is `objc2` crates only, so `videotoolbox.rs` type-checks
+  with no SDK. `audio` does not (cpal's Core Audio bindings want the
+  SDK's headers). A call declared by hand (`keywatch/src/macos.rs`)
+  is only as right as its signature: the check proves the Rust, not
+  the declaration.
+- **X11 keys for real:** `apt-get install xvfb xdotool`, start `Xvfb
+  :97`, run `target/debug/examples/watch` (`-p keywatch`) with
+  `DISPLAY=:97` and press keys at it with `xdotool key F7`, `keydown
+  v` / `keyup v`. XTEST keys do raise XInput2 raw events. Wake-ups are
+  the sum of `voluntary_ctxt_switches` over `/proc/<pid>/task/*/status`.
+- **The Android host's Rust, with the `app` feature:** the scratch
+  crate above now `#[path]`-includes `java.rs`, `host.rs` and
+  `logging.rs` (and iOS's `logging.rs`), with `jni`, `android_logger`,
+  `chrono`, the real `app-core`, and a stub `frontend` whose `host`
+  module holds the `Hooks` trait and its types cut out of the real
+  file by a few lines of Python. Java: API 34's jar is at the same
+  address as 33's (`android-34/android.jar`) and has the constants
+  `VoiceService` names.
+- **Workflows:** `actionlint` (a static binary from
+  github.com/rhysd/actionlint's releases) reads all of
+  `.github/workflows/`. An old one does not know the newest runner
+  labels; anything else it says is worth reading.
 
 ### The loop
 
-Slint's viewer and the icon library, matching the app's Slint 1.18.1:
+Slint's viewer and the icon library, matching the app's Slint 1.18.1.
+On an ARM Linux machine take
+`slint-viewer-aarch64-unknown-linux-gnu.tar.gz` from the same release
+(it wants `libinput10`), and the icon library is already in
+`~/.cargo/registry/src/*/lucide-slint-1.35.0/` after any build:
 
 ```sh
 mkdir -p /tmp/sv && cd /tmp/sv && curl -sSL -o sv.tar.gz \
@@ -127,7 +180,15 @@ SLINT_SCALE_FACTOR=2 $V --screenshot out.png ...          # 2× for site screens
 
 `--load-data` takes JSON: top-level keys are the window's own
 properties (`tab`, `phase` lives in `State`) and globals by name
-(`State`, `SettingsState`, `AdminState`, `Tr`). Rows of a model must
+(`State`, `SettingsState`, `AdminState`, `Tr`). The globals are only
+visible through `main.slint`, which exports them: render the other
+windows as `--component SettingsWindow ... main.slint` too, or `Tr` is
+"unknown" and every string comes out empty. A `PopupWindow` never
+shows in a still frame; to look at one (the emoji palette), render a
+scratch copy of the tree with it turned into a `Rectangle`. Two
+renders of the same fixture, before and after a change, diffed pixel
+by pixel (`PIL.ImageChops.difference(...).getbbox()`), say exactly
+what a refactor moved. Rows of a model must
 carry **every** field of their struct — a missing `color`/`image`
 field is filled with unit and panics at render (`binding was of the
 wrong type: ()`); a missing string field just warns and the model is
@@ -202,7 +263,8 @@ otherwise).
 - `transport` — the quinn-proto driver (sans-IO), lanes, media pacing,
   identity and pinning, the simulator.
 - `server` — the tick in `server.rs`; child modules `moderation`,
-  `history`, `channels`, `profiles`, `dms`, `files`, `admin`; the
+  `history`, `channels`, `profiles`, `dms`, `files`, `admin`, `safety`
+  (block, report, erase); `relay.rs` (voice and video fan-out); the
   persistence thread in `persistence/` (`store.rs` is SQLite, the CLI
   helpers `cli_*` live there too); `main.rs` is the CLI; migrations
   in `persistence/migrations/`. The CLI is `server rotate-key`,
@@ -210,31 +272,44 @@ otherwise).
   `server db check|db prune`, `server user purge` (`server role --help`
   etc.); the config keys are PERSISTENCE-SPEC §1.
 - `client` — the network thread (`network.rs`), the voice and screen
-  threads, `config.rs` (settings, identity key), `inbound_wake.rs`.
+  threads, `config.rs` (settings, identity key), `inbound_wake.rs`,
+  `viewlog.rs` (the viewer's 5 s summary lines).
 - `audio`, `video` — devices, codecs, the jitter buffers, echo
   cancellation (`aec.rs`), the platform backends (`audio/src/native/`:
   AAudio, VPIO, WASAPI; cpal elsewhere; `video`: FFmpeg on the desktop,
   `mediacodec.rs` on Android, `videotoolbox.rs` on iOS).
 - `app-core` — pure view models with unit tests: `chat.rs`
   (`ChatHistory`, `ChatItem`, `FileMeta`), `roster.rs`, `menu.rs`,
-  `markdown.rs`, `images.rs`, `emoji.rs`, `logfile.rs`.
+  `markdown.rs`, `images.rs`, `gif.rs` (the streaming player),
+  `emoji.rs`, `composer.rs`, `devices.rs`, `update.rs`, `stats.rs`,
+  `fps.rs`, `logfile.rs` (also the hosts' log writer and panic hook),
+  `files.rs` (safe names, the pick slot), `usage.rs` (the phones' own
+  CPU and memory), `meter.rs` (how a level bar moves). What two hosts
+  need and no UI does goes here: it is the one crate that type-checks
+  for every target from the sandbox.
+- `keywatch` — the keybind watcher: key state and key events per
+  desktop OS behind one `Watcher`, no dependency on the rest. Pure
+  Rust, so `cargo check --target` covers its Windows and macOS halves.
 - `ui` — the `.slint` files and `convert` glue (`lib.rs`):
   `main.slint` (window, overlays, card, dialogs, the phone pages),
-  `sidebar.slint`, `chat.slint`, `settings.slint`, `admin.slint`,
-  `viewer.slint`, `widgets.slint`, `theme.slint`, `tr.slint`,
+  `connect.slint`, `startup.slint`, `sidebar.slint`, `chat.slint`,
+  `settings.slint`, `admin.slint`, `viewer.slint`, `tray.slint`,
+  `widgets.slint`, `theme.slint`, `tr.slint`,
   `globals.slint` (`State`/`Logic` and every struct the host fills).
 - `i18n` — Fluent bundles (`locales/*.ftl`).
 - `frontend` — the client's UI logic for every host: `app.rs`
   (`AppState`, `run`, the event pump, the timers, `fill_tr`) with its
   methods filed by concern under `src/app/` (`events`, `commands`,
   `presence`, `session`, `menus`, `devices`, `conversations`, `chat`,
-  `profiles`, `stats`, `alerts`), `settingsui`, `adminui`, `media`,
+  `profiles`, `stats`, `alerts`, `activity`, `safety`), `settingsui`,
+  `adminui`, `media`,
   `viewers`, `present`, `resources`, `notice` (what a phone's
-  notification is), and the host seams `host`, `clipboard`, `hotkeys`
-  and `updater` behind the `desktop` feature, with same-API twins under
-  `src/stubs/` for the phones (`instance` is desktop-only, with no
-  twin) — the phones' `host` takes a `Hooks` object their crate
-  installs (files, links, the keep-alive, notifications).
+  notification is), `host` (one module: a `Hooks` object answers —
+  the desktop's own `DesktopHooks`, or what a phone's crate installs:
+  files, links, the keep-alive, notifications), and the host seams
+  `clipboard`, `hotkeys` and `updater` behind the `desktop` feature,
+  with same-API twins under `src/stubs/` for the phones (`instance`
+  is desktop-only, with no twin).
 - `desktop` — `main.rs` alone: logging, the config directory, the
   single instance, the panic hook, `frontend::app::run()`.
 - `android` — the cdylib host: `lib.rs` (`android_main`), `java.rs`
@@ -272,6 +347,66 @@ Memory-mode servers (persistence off) still use the legacy
 
 - `wait_for` closures must not borrow the client being pumped: copy
   `x.id` first. And `wait_for` does not consume the message it found.
+- **A control message is at most 17 KiB, both ways**
+  (`protocol::MAX_CONTROL_MESSAGE_BYTES`): every shipped peer drops a
+  larger one unread, and until 1.2.1 nothing said so — history pages
+  and admin lists vanished (review P0-1). A message carrying a list is
+  fitted with `keep_prefix_that_fits` / `keep_suffix_that_fits` (one
+  message the client replaces or prepends) or `split_to_fit` (only
+  where the client merges batches: `Authors`, `HistoryAttachments`).
+  An oversized send now logs a warning on the server.
+- **The updater's relaunch waits for its parent** (1.2.1): a process
+  started with `BAUCORD_RELAUNCH_AFTER_UPDATE` waits for the exiting
+  instance to stop answering the instance socket before claiming it;
+  without that it was told "already running" and quit.
+- **Whatever the transport does on a clock needs a deadline in
+  `Driver::next_deadline()`** (review P1-2): both loops sleep until a
+  datagram or that deadline, so work without one waits for the next
+  datagram. Poll transmits until `None` before asking. The simulator's
+  `step_to_next_event` tests catch a missing deadline.
+- **Voice packets never pass through the voice thread** (review P1-5):
+  it hands each engine's `VoiceLink` (the `IncomingSender` and the
+  encoder's receiver) to the network thread at start, and wakes on
+  commands, speaking edges (`VoiceChat::speaking_edges`) and once a
+  second for `service()`. The UI reads meters through
+  `SharedAudioState::levels`. A new per-packet duty belongs in the
+  network thread or the engine, not in that loop.
+- **Audio workers wait on their device latch** (review P1-4), with
+  `LATCH_SAFETY_WAIT`; they leave when `wait_for_wake` returns false,
+  and their owner rings the latch on drop (`stop_ring`) so a stop is
+  immediate. A stream's own output has no worker: the decoder writes
+  the ring and the callback reads it through `stream::pace`
+  (`Pacing::own_output`: 60 ms cushion on the desktop).
+- **`sync_voice_room` runs on every platform** (review P1-6): the lobby
+  and the AFK room are out of a room; the desktop drops what the
+  microphone hears there (`InputConfig::in_room`), so its Settings
+  meter is flat unless the microphone test runs.
+- **Windows "Default" is one answer** (`communications_default`, review
+  P1-18): the Communications device unless echo cancellation is Off,
+  for the decision, both streams and the watcher. Never resolve it per
+  call site.
+- **swscale never writes into a tight buffer unless the width is a
+  multiple of 16** (review P1-11): FFmpeg 7.1's SIMD writes whole
+  blocks (8 pixels on x86, 16 on aarch64), past the row's end or short
+  of it. Other widths decode through the padded frame.
+- **FFmpeg 7.1's AMF wrapper returns nothing from a receive without a
+  new frame**, so `drain()` cannot release its last frame; the first
+  still tick re-encodes it once (review P1-13).
+- **The roster is rebuilt once per pass, and only on screen** (review
+  P1-9): `update_user_list` queues `flush_roster`. A new path that
+  brings the main screen back must call `flush_roster`; speaking and
+  audio-state edges use `refresh_voice_row`.
+- **Bytes from the wire decode with `images::decode_received`** (PNG,
+  JPEG, GIF; review P1-20); `decode_bounded` is only for pictures the
+  user picks, pastes or drops.
+- **Keybinds are armed only while connected** (review P1-3):
+  `HotkeyManager::set_connected` at `Connected` and in teardown;
+  keybind and push-to-talk changes go through `refresh_hotkeys`.
+- **Parallel worktrees sharing one `CARGO_TARGET_DIR` reuse each
+  other's workspace-crate artifacts** (same fingerprint, decided by
+  file times): a test can run another tree's code. Give each its own
+  target directory, or `cargo clean -p` the workspace crates before
+  trusting a merged build.
 - **A new wire variant needs a new feature bit** (spec §12): the
   first cut gated `UserProgress` on `PROGRESS`, which a 1.1.0 client
   negotiates too — it would have choked on the variant. Now
@@ -281,17 +416,22 @@ Memory-mode servers (persistence off) still use the legacy
   `cargo test` (debug assertions). `saturating_mul` now.
 - Tests about media connect people with `connect_member`; `connect`
   makes guests, who cannot share, upload, or DM.
-- A CLI change reaches a running server within 2 s (`data_version`
-  poll) and is applied to live sessions (bans close, kicks close,
-  roles refresh).
+- A CLI change reaches a running server within about 3 s
+  (`data_version` poll every 2 s, the tick's socket wait up to 1 s) and
+  is applied to live sessions (bans close, kicks close, roles refresh);
+  only what changed is sent. **Nothing on a CLI read path may commit or
+  restart the WAL** (a TRUNCATE checkpoint, an UPSERT of an unchanged
+  row): the running server's poll counts either as a change and
+  reloads (review P1-22). Listings open the database read-only.
 - `/kick` forgets keys and roles (needs a new invite); `/ban` is the
   restriction; a ban never catches the actor or an equal rank, and
   skips an address someone else is on.
-- `VoiceChat::start()` fails if *either* stream fails; the caller
-  must check `output_running()` before dropping the engine, or a
-  missing microphone silences playback too (the Android phone test,
-  2026-10-05 — and a PC with no capture device, the field incident
-  the audio crate's comment describes). A side that is not open —
+- `VoiceChat::start()` says what opened (`StartOutcome`; an `Err`
+  for either stream until 2026-10-12, review P3-24): keep the engine
+  on `NoMicrophone`, or a missing microphone silences playback too
+  (the Android phone test, 2026-10-05 — and a PC with no capture
+  device, the field incident the audio crate's comment describes). A
+  side that is not open —
   never opened, or its reopen failed — is retried by `service()`
   (`input_pending`, `output_pending`; until 2026-10-08 a failed
   reopen was never retried, CLI-9); a failed stream by the
@@ -367,8 +507,9 @@ Memory-mode servers (persistence off) still use the legacy
   virtualization refinement is a round, and the `if`-gated delegates
   add a nested one per row). The owed follow is now a bounded 16 ms
   `Timer` (at most 90 ticks; it stops after 8 frames at the end,
-  ANDROID-SPEC D66) instead. Rule: no `changed` handler
-  on a property the ListView rewrites while scrolling.
+  ANDROID-SPEC D66) instead. Rule: never scroll from a `changed`
+  handler (D66's own `changed content-y` only records where the reader
+  is; it does not move the list).
 - **The horizontal scroll, found by bisecting renders:** a
   `ListView` sets its `viewport-width` to the max of its rows'
   *minimum* widths (`listview_layout` returns
@@ -434,8 +575,8 @@ Memory-mode servers (persistence off) still use the legacy
   emulator's `Underruns 162` in 6 s was 27/s — one per callback — and
   was first written off as the emulator's audio clock. Divide by the
   time and compare with the callback period first.
-- **Android-only code can be type-checked here; Windows-only code
-  cannot.** `ndk` has a `test` feature that compiles its bindings off
+- **Android-only code can be type-checked here** (and, since
+  2026-10-12, Windows-only code too — §1). `ndk` has a `test` feature that compiles its bindings off
   Android: a scratch crate depending on `ndk` (`audio`, `api-level-28`,
   `test`), `jni` 0.22, `ndk-context` and the real `audio` crate, with
   `#[path]` modules pulling in `native/aaudio.rs` + `native/android.rs`
@@ -480,7 +621,9 @@ Memory-mode servers (persistence off) still use the legacy
   against the fastest delivery seen (the playout delay and network
   wobble are part of it: tens of ms); a value that keeps growing is the
   A/V drift, and *audio queued* is the audio's side of it (stream
-  audio has no timestamps yet). `sharing 1080p 60fps: … encoded
+  audio has no timestamps yet). `N not decoded (off screen)` is normal
+  while the app or the viewer is hidden (review P1-7): those frames
+  were dropped before the jitter buffer. `sharing 1080p 60fps: … encoded
   58.4/s … | offered 6.8 Mbit/s, sent 6.5 Mbit/s, abandoned 0/3
   groups, path loss up to 0%, rtt 45 ms | bitrate 100%, fps 100%, 1
   viewer`: offered far above sent with groups abandoned = the uplink;
@@ -502,11 +645,82 @@ Memory-mode servers (persistence off) still use the legacy
   a legal double quote to the PowerShell lexer — the string closed
   early and the rest of the message ran as a command (`run.ps1`,
   2026-10-05: "The term 'drop' is not recognized").
-- A menu action lives in **three** places: `app-core::menu::Action`,
-  the Slint `MenuAction` enum in `globals.slint` (append only — its
-  ordinal crosses the bridge), and both conversions in
-  `ui/src/lib.rs` (`menu_action`, `menu_action_back`). Miss one and
-  only the compile says so, one round later.
+- A menu action lives in **one** place since 2026-10-12 (review
+  P2-57): `app-core::menu::Action`. `ui::convert::menu_entries` hands
+  the overlay rows carrying an `id` and keeps the actions by that id;
+  the pick comes back as the id (`AppState::menu_actions`). The Slint
+  `MenuAction` enum and the two conversions in `ui/src/lib.rs` are
+  gone: a new action is a variant and its arm in `menu_activated`.
+- **A text input drops its selection when it loses the focus** (Slint's
+  `FocusOut`, any reason but a window or popup activation). Anything
+  that opens over one and then acts on its selection — the composer's
+  menu was the case, review P2-16 — has to read
+  `cursor-position-byte-offset` / `anchor-position-byte-offset` before
+  it opens and do the edit host-side (`app_core::composer`).
+- **A new dialog is a `Modal`** (`widgets.slint`): `card-width`,
+  `dismissed` (Escape, Back, a click outside), `key` for Return, the
+  content as children. A field that should have the keyboard is
+  focused in the dialog's `opened`, never in the field's own `init`:
+  that one runs *before* the component's, whose scope then takes the
+  keyboard back (found the hard way — no render shows it).
+- **A person's chat row inherits `RowFrame`** (`chat.slint`): it sets
+  `top` and where the name line goes and puts its body inside. In a
+  component that inherits another, the base's properties are not in
+  scope unqualified: `root.data`, not `data`.
+- **Which audio streams are open is decided in one function**,
+  `VoiceChat::decide` (`audio/src/lib.rs`), and done in four
+  (`plan_and_open`, `apply_sides`, `open_output`, `open_input`). A new
+  rule — "on Windows open the call streams only in a room" — is a
+  branch there and a scenario in `audio/src/supervision_tests.rs`,
+  run under that platform's `Traits` on the stand-in machine
+  (`fake.rs`): the test reads the log of plans, opens and closes.
+  Platform differences in *decisions* are `Traits` fields, never
+  `cfg` — a `cfg` branch cannot be tested on another host. The fake
+  has to behave like the streams where the engine depends on it (a
+  stream that starts clears its "failed" flag; the first version did
+  not, and every tick reopened everything).
+- **Sending the server a message that needs nothing else is
+  `NetworkControl::Send(ClientMessage::…)`** — no new variant of
+  `NetworkControl`, no arm in `handle_control`. A variant of its own
+  is for a message the network thread has to do something about (an
+  upload to chunk, a state to remember).
+- **A hash is `transport::sha256`** (`digest`, or `Hasher` for bytes
+  that arrive in pieces). A dependency several crates share is
+  declared once, under `[workspace.dependencies]`.
+- **A list for an admin goes out through `send_admin_result`**, never
+  as an `AdminResult` built by hand: it pages what does not fit one
+  17 KiB message (`AdminRows`, then the result that closes them) and
+  cuts to the first page for a session without `ADMIN_PAGES`. A new
+  listing gets its arm in `AdminOutcome::into_pages`, `rows` and
+  `prepend` — the compiler asks for all three.
+- **A test of the process's own CPU or memory asserts nothing about
+  "idle" or "before and after"**: the figures are the whole test
+  binary's, and the other tests run beside it (`usage.rs`'s first
+  version failed in the full run and passed alone).
+- **Code two hosts need goes in `app-core`, not copied into both**:
+  the log writer, the panic hook, the pick slot and safe file names
+  were three copies each. Code for one OS that needs no UI goes in a
+  crate without C dependencies (`keywatch`), where the sandbox can
+  type-check it for that OS.
+- **A blind platform change gets a way back that needs no release**:
+  the key watcher falls back to its old clock when its events prove
+  unreliable, the Mac's hardware encoder to libx264 when it will not
+  open. Where there is no such way back (the pointer in a share), it
+  is not written blind.
+- **An e2e test that waits for the database waits in real time**: the
+  world's `settle` runs simulated time, which a busy machine gets
+  through before the persistence thread has done its write. Poll for
+  the thing itself (`rows_become`, or ask again in a loop).
+- **What belongs to one connection goes in `Session`** (`app.rs`; or
+  its `Safety`, `Transfers`, `ChatFlow`), not in `AppState`: the
+  teardown replaces it whole, so nothing has to be remembered there.
+  A session thing that also shows on screen is cleared where it is
+  shown, beside the reset.
+- **A wrapped `Text` inside a `HorizontalLayout` inside a
+  `VerticalLayout` reports one line's height**, and the next element
+  is drawn over the rest. Give the box an explicit `height:
+  <text>.preferred-height + padding`, as the chat's standing notice and
+  the settings' Windows notice do.
 - **The narrow (phone) layout renders only at a phone width:**
   `MainWindow` has `preferred-width`/`min-width`, so a fixture alone
   draws the wide layout. Copy the `.slint` tree, swap
@@ -552,13 +766,14 @@ Memory-mode servers (persistence off) still use the legacy
   be fetched from the PowerShell GitHub releases to test `run.ps1`.
 - **The public crates move together.** `protocol`, `transport`,
   `client`, `server`, `frontend`, `desktop`, `android` and `ios` carry
-  one version — the release's — and every platform reads it from its
-  crate (the updater and About from `frontend`, the wire from
-  `protocol`, Android's `versionName` and iOS's `MARKETING_VERSION`
-  from their crates; IOS-SPEC.md D25). Bump all eight at once;
-  `cargo test -p protocol --test versions` fails otherwise. 1.1.6
-  bumped only the apps, and clients told the server they were 1.1.5.
-  The internal libraries keep their own numbers.
+  one version — the release's — and it is written once: `version`
+  under `[workspace.package]` in the root `Cargo.toml`, which the
+  eight inherit (`version.workspace = true`) and which the release
+  workflows, Android's Gradle script and the iOS scripts read
+  (IOS-SPEC.md D25). Bump that line; `cargo test -p protocol --test
+  versions` fails if a public crate sets its own. 1.1.6 bumped only
+  the apps, and clients told the server they were 1.1.5. The internal
+  libraries keep their own numbers.
 - **No early-leaving readers under `pipefail`.** `cmd | head -n 1` or
   `cmd | grep -q x` in a `set -euo pipefail` script ends it silently
   when `cmd` writes after the reader has left (SIGPIPE, 141) — a race
@@ -615,8 +830,9 @@ Memory-mode servers (persistence off) still use the legacy
   the audio callback's latch, the socket through `ReadWaiter` — with
   a timeout only for timers it really has. The network loop's 1 ms
   poll was a thousand wakes a second for a whole session on a phone.
-  `client/tests/network_idle.rs` counts a quiet connection's wakes
-  (`network::loop_passes`): keep it under 100. And what only feeds
+  `client/tests/network_idle.rs` counts a quiet connection's loop and
+  watcher wakes (`network::loop_passes`, `watcher_wakes`) on every
+  platform: keep the two under 25 (0 + 2 at 1.2.1). And what only feeds
   the screen checks `main_on_screen()` / `host_visible()`: a phone in
   the background shows nothing (D42).
 - **In `build.gradle.kts`, never write `java.awt.…` / `java.io.…`
@@ -658,7 +874,10 @@ Memory-mode servers (persistence off) still use the legacy
   point at a real file — `""` makes the whole model fail to load
   ("Failed to load image from path") — a 1×1 PNG written by the
   fixture script does; `/tmp/fx/main.json` is a full-field roster
-  fixture (admin, sharer, guest, custom badge) worth regenerating.
+  fixture (admin, sharer, guest, custom badge) worth regenerating —
+  without `outranked`, `role-editable`, `channel-kickable`, `owned`
+  and `from-config`, which left `UserRow` in 1.2.1 (the menu works
+  them out when it opens, review P1-9).
 - External drag-and-drop reaches the app only through
   `on_winit_window_event` (`WindowEvent::DroppedFile` and friends);
   Slint's `DropArea` is for in-app drags on this backend. The hook
@@ -701,9 +920,13 @@ Memory-mode servers (persistence off) still use the legacy
   not touch the stream; its own volume and mute are applied before the
   mix.
 - **A Windows Communications stream ducks every other app** (by 80 %
-  by default). Any stream opened on the voice-call path asks Windows
-  not to (`ask_not_to_duck` in `native/wasapi.rs`, AEC-SPEC.md E11)
-  and logs `do-not-duck=` on its open line; a new one must too.
+  by default), and so does *any* stream opened on the device
+  `GetDefaultAudioEndpoint(eCommunications)` returns. Every stream
+  asks Windows not to (`ask_not_to_duck` in `native/wasapi.rs`,
+  AEC-SPEC.md E11) and logs `do-not-duck=` on its open line; a plain
+  stream opens the Communications default by its id instead
+  (`stream_device`, E14). Never hand a role-fetched device to a
+  stream that is not on the call path. Windows 10 has no opt-out.
 - **`third_party/wasapi` is crates.io's `wasapi` 0.24.0 plus one
   accessor** (`AudioClient::as_iaudioclient`), wired in by the root
   `[patch.crates-io]` and kept out of the workspace (`exclude`): never
@@ -837,9 +1060,9 @@ own buckets vs the process figure); on Linux `smaps_rollup`
 `MALLOC_MMAP_THRESHOLD_=131072 ./baucord`; on macOS
 `vmmap --summary`. Expected fix: mimalloc as the global allocator in
 the hosts (one line, returns large blocks eagerly, builds for
-Android). Also check that every stop-watching path *removes* the
-`Viewer` (`close` only hides the window; the last frame lives until
-the struct is dropped).
+Android). Every stop-watching path does remove the `Viewer` (checked
+in the 2026-10-10 review), and a disconnect now sends `StopWatching`
+for each one it drains, so the decoder goes with it (review P0-6).
 
 ## 5. What is left
 

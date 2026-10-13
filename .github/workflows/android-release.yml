@@ -48,9 +48,9 @@ jobs:
         if: startsWith(env.TAG, 'v')
         run: |
           set -eu
-          CRATE="$(awk -F'"' '/^version = "/ { print $2; exit }' crates/android/Cargo.toml)"
+          CRATE="$(awk -F'"' '/^version = "/ { print $2; exit }' Cargo.toml)"
           if [ "${TAG#v}" != "$CRATE" ]; then
-            echo "::error::release tag $TAG, but crates/android/Cargo.toml says $CRATE — bump the public crates together, then tag v$CRATE"
+            echo "::error::release tag $TAG, but Cargo.toml says $CRATE — bump `[workspace.package]`, then tag v$CRATE"
             exit 1
           fi
           echo "version $CRATE"
@@ -93,8 +93,13 @@ jobs:
         with:
           key: android-release-arm64
 
+      # A pinned, prebuilt cargo-ndk (its own release binaries, through
+      # cargo-binstall). `cargo install` compiled whatever was newest
+      # from source on every run (review P3-48).
       - name: Install cargo-ndk
-        run: cargo install cargo-ndk --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk@4.1.2
 
       - name: Build release APK and bundle (arm64-v8a)
         working-directory: android

@@ -35,15 +35,27 @@ pub type UserId = [u8; 32];
 /// server's logs (the ALPN already gates compatibility).
 pub const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Upper bound for a serialized control message. Anything larger is
-/// dropped before deserialization — a cheap guard against hostile length
-/// games, independent of any transport-level buffer bound.
+/// Upper bound for a serialized control message, both ways. Anything
+/// larger is dropped before deserialization — a cheap guard against
+/// hostile length games, independent of any transport-level buffer
+/// bound — and refused at encode, so an oversized message fails where
+/// it was built instead of vanishing at the peer.
 ///
-/// Chat images are the one deliberate exception: their wire size is
-/// governed by [`MAX_IMAGE_MESSAGE_BYTES`] instead, and the codec
-/// enforces per-variant that *only* image messages may exceed this
-/// bound (see [`decode_client_message`] / [`decode_server_message`]).
-pub const MAX_CONTROL_MESSAGE_BYTES: usize = 64 * 1024;
+/// 17 KiB, the size of one chunk of an upload plus its envelope. Until
+/// 1.2.1 this constant said 64 KiB while both decoders checked the
+/// image bound first, so 17 KiB was the real limit every shipped peer
+/// enforces: a larger message (a history page, an admin list) was
+/// dropped without a trace (review P0-1). Lists are fitted to
+/// [`LIST_ITEMS_BUDGET`] by their senders ([`keep_prefix_that_fits`],
+/// [`keep_suffix_that_fits`], [`split_to_fit`]).
+pub const MAX_CONTROL_MESSAGE_BYTES: usize = MAX_IMAGE_MESSAGE_BYTES;
+
+/// Room a list message keeps for everything but its items: the variant
+/// tag, ids, flags and the length varints.
+pub const LIST_ENVELOPE_BYTES: usize = 1024;
+
+/// How many bytes the items of one list message may take.
+pub const LIST_ITEMS_BUDGET: usize = MAX_CONTROL_MESSAGE_BYTES - LIST_ENVELOPE_BYTES;
 
 /// Maximum payload of a chat image (PNG, JPEG, or animated GIF),
 /// enforced on both ends: the sending client downscales/rejects until
@@ -58,11 +70,10 @@ pub const MAX_CONTROL_MESSAGE_BYTES: usize = 64 * 1024;
 /// is what breaks calls during uploads.
 pub const MAX_CHAT_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 
-/// Upper bound for a serialized chat-image message: the payload cap
-/// plus generous headroom for the envelope (postcard varints + ids are
-/// a handful of bytes). This is the pre-deserialization length guard
-/// for the image path, and the worst transient allocation `decode_*`
-/// can be tricked into.
+/// Upper bound for a serialized upload chunk (a chat image, a log, a
+/// blob): one [`IMAGE_CHUNK_BYTES`] chunk plus headroom for the envelope
+/// (postcard varints and ids are a handful of bytes). The same bound as
+/// [`MAX_CONTROL_MESSAGE_BYTES`]: no message is larger.
 pub const MAX_IMAGE_MESSAGE_BYTES: usize = IMAGE_CHUNK_BYTES + 1024;
 
 /// Payload of one image chunk. Small on purpose: a voice packet that
@@ -797,20 +808,43 @@ impl ClientMessage {
             ClientMessage::ChatImageChunk { .. }
             | ClientMessage::LogUploadChunk { .. }
             | ClientMessage::UploadChunk { .. } => Lane::Media,
-            _ => Lane::Control,
+            // Everything else, named: a new variant does not compile
+            // until its lane is chosen here.
+            ClientMessage::Hello { .. }
+            | ClientMessage::Chat(..)
+            | ClientMessage::Speaking(..)
+            | ClientMessage::AudioState { .. }
+            | ClientMessage::ScreenShareStart { .. }
+            | ClientMessage::ScreenShareStop
+            | ClientMessage::Telemetry(..)
+            | ClientMessage::TelemetryEvent(..)
+            | ClientMessage::CreateInvite { .. }
+            | ClientMessage::Admin { .. }
+            | ClientMessage::FetchHistory { .. }
+            | ClientMessage::EditMessage { .. }
+            | ClientMessage::DeleteMessage { .. }
+            | ClientMessage::CreateChannel(..)
+            | ClientMessage::EditChannel { .. }
+            | ClientMessage::DeleteChannel { .. }
+            | ClientMessage::ChannelKick { .. }
+            | ClientMessage::SetProfile(..)
+            | ClientMessage::SetNickname { .. }
+            | ClientMessage::DirectMessage { .. }
+            | ClientMessage::MarkRead { .. }
+            | ClientMessage::SendFile { .. }
+            | ClientMessage::Block { .. }
+            | ClientMessage::Unblock { .. }
+            | ClientMessage::Report { .. }
+            | ClientMessage::DeleteAccount => Lane::Control,
         }
     }
 
     /// Whether this message is a media-upload chunk (rides a Media
-    /// stream that the upload opens and finishes).
+    /// stream that the upload opens and finishes): what [`Self::lane`]
+    /// puts on the Media lane.
     #[must_use]
     pub fn is_upload_chunk(&self) -> bool {
-        matches!(
-            self,
-            ClientMessage::ChatImageChunk { .. }
-                | ClientMessage::LogUploadChunk { .. }
-                | ClientMessage::UploadChunk { .. }
-        )
+        self.lane() == Lane::Media
     }
 }
 
@@ -1052,7 +1086,9 @@ pub enum ServerMessage {
     /// A page of messages, oldest first. Right after `Init` the last
     /// `history.replay` of the general chat arrive this way; `more`
     /// says an older page exists (`FetchHistory` with `before` = the
-    /// first id here). Pages are at most 64 KiB.
+    /// first id here). A page is one message of at most
+    /// [`MAX_CONTROL_MESSAGE_BYTES`]: the server keeps the newest rows
+    /// that fit and says `more`.
     History {
         conv: ConvRef,
         messages: Vec<HistoryMessage>,
@@ -1260,6 +1296,15 @@ pub enum ServerMessage {
     /// `SAFETY` sessions (1.2).
     Authors {
         authors: Vec<AuthorInfo>,
+    },
+    /// Rows of an admin listing that did not fit its `AdminResult`
+    /// (1.2.1, feature bit `ADMIN_PAGES`). Sent *before* the result,
+    /// in order, under the same request id: the result carries the
+    /// last rows and closes the answer, so a client joins what it
+    /// holds when the result lands and never shows half a list.
+    AdminRows {
+        request_id: u32,
+        rows: crate::admin::AdminOutcome,
     },
 }
 
@@ -1502,92 +1547,307 @@ impl ServerMessage {
             | ServerMessage::UploadDone { .. }
             | ServerMessage::UploadRejected { .. }
             | ServerMessage::BlobMissing { .. } => Lane::Signal,
-            _ => Lane::Control,
+            // Everything else, named: a new variant does not compile
+            // until its lane is chosen here.
+            ServerMessage::Welcome { .. }
+            | ServerMessage::Refused { .. }
+            | ServerMessage::Init { .. }
+            | ServerMessage::UserJoined { .. }
+            | ServerMessage::UserLeft { .. }
+            | ServerMessage::Chat(..)
+            | ServerMessage::Speaking { .. }
+            | ServerMessage::AudioState { .. }
+            | ServerMessage::ScreenShareStarted { .. }
+            | ServerMessage::ScreenShareStopped { .. }
+            | ServerMessage::ShareDenied { .. }
+            | ServerMessage::SubscribeDenied { .. }
+            | ServerMessage::UserMovedChannel { .. }
+            | ServerMessage::JoinChannelDenied { .. }
+            | ServerMessage::ChannelListUpdated { .. }
+            | ServerMessage::VoiceReceiverReport { .. }
+            | ServerMessage::Session { .. }
+            | ServerMessage::Removed { .. }
+            | ServerMessage::InviteCreated { .. }
+            | ServerMessage::InviteDenied { .. }
+            | ServerMessage::UserDetails { .. }
+            | ServerMessage::Restricted { .. }
+            | ServerMessage::RestrictionLifted { .. }
+            | ServerMessage::AdminResult { .. }
+            | ServerMessage::AdminRows { .. }
+            | ServerMessage::History { .. }
+            | ServerMessage::HistoryUnavailable { .. }
+            | ServerMessage::MessageEdited { .. }
+            | ServerMessage::MessageDeleted { .. }
+            | ServerMessage::ChatRateLimited { .. }
+            | ServerMessage::ProgressUpdate { .. }
+            | ServerMessage::ChannelDetails { .. }
+            | ServerMessage::ChannelDenied { .. }
+            | ServerMessage::MovedIdle { .. }
+            | ServerMessage::UserProfile { .. }
+            | ServerMessage::ProfileUpdated { .. }
+            | ServerMessage::ProfileDenied { .. }
+            | ServerMessage::UserRenamed { .. }
+            | ServerMessage::RenameDenied { .. }
+            | ServerMessage::Direct { .. }
+            | ServerMessage::MessageAck { .. }
+            | ServerMessage::MessageFailed { .. }
+            | ServerMessage::Conversations { .. }
+            | ServerMessage::UserProgress { .. }
+            | ServerMessage::FileMessage { .. }
+            | ServerMessage::HistoryAttachments { .. }
+            | ServerMessage::AuditLine { .. }
+            | ServerMessage::RoleList { .. }
+            | ServerMessage::Blocks { .. }
+            | ServerMessage::ReportAck { .. }
+            | ServerMessage::AccountDeleted
+            | ServerMessage::AccountDeleteRefused { .. }
+            | ServerMessage::ChatFrom { .. }
+            | ServerMessage::Authors { .. } => Lane::Control,
         }
     }
 
     /// Whether this message is a media-upload chunk (rides a Media
-    /// stream that the relay opens and finishes per image).
+    /// stream that the relay opens and finishes per image): what
+    /// [`Self::lane`] puts on the Media lane.
     #[must_use]
     pub fn is_upload_chunk(&self) -> bool {
-        matches!(
-            self,
-            ServerMessage::ChatImageChunk { .. } | ServerMessage::BlobChunk { .. }
-        )
+        self.lane() == Lane::Media
+    }
+
+    /// The capability bit ([`crate::features`]) a session must have
+    /// negotiated to be sent this message; 0 for what every admitted
+    /// client decodes. A peer that never announced the bit cannot
+    /// decode the variant — it was added with the bit — so the server
+    /// checks this once, where it sends, instead of at each caller:
+    /// the callers disagreed (`Session` went out on `INVITES` at
+    /// `Hello` and on `ROLES` after a reload — review P3-6). Named
+    /// variant by variant: a new one does not compile until its bit is
+    /// chosen.
+    #[must_use]
+    pub const fn required_feature(&self) -> u64 {
+        use crate::features;
+        match self {
+            ServerMessage::Welcome { .. }
+            | ServerMessage::Refused { .. }
+            | ServerMessage::Init { .. }
+            | ServerMessage::UserJoined { .. }
+            | ServerMessage::UserLeft { .. }
+            | ServerMessage::Chat(..)
+            | ServerMessage::Speaking { .. }
+            | ServerMessage::AudioState { .. }
+            | ServerMessage::ScreenShareStarted { .. }
+            | ServerMessage::ScreenShareStopped { .. }
+            | ServerMessage::ShareDenied { .. }
+            | ServerMessage::SubscribeDenied { .. }
+            | ServerMessage::KeyframeRequested { .. }
+            | ServerMessage::StreamHealth { .. }
+            | ServerMessage::ChatImageChunk { .. }
+            | ServerMessage::UserMovedChannel { .. }
+            | ServerMessage::JoinChannelDenied { .. }
+            | ServerMessage::ChannelListUpdated { .. }
+            | ServerMessage::VoiceReceiverReport { .. } => 0,
+            ServerMessage::Session { .. }
+            | ServerMessage::Removed { .. }
+            | ServerMessage::InviteCreated { .. }
+            | ServerMessage::InviteDenied { .. } => features::INVITES,
+            ServerMessage::UserDetails { .. }
+            | ServerMessage::Restricted { .. }
+            | ServerMessage::RestrictionLifted { .. }
+            | ServerMessage::AdminResult { .. } => features::ROLES,
+            ServerMessage::History { .. }
+            | ServerMessage::HistoryUnavailable { .. }
+            | ServerMessage::MessageEdited { .. }
+            | ServerMessage::MessageDeleted { .. }
+            | ServerMessage::ChatRateLimited { .. } => features::HISTORY,
+            ServerMessage::ProgressUpdate { .. } => features::PROGRESS,
+            ServerMessage::ChannelDetails { .. }
+            | ServerMessage::ChannelDenied { .. }
+            | ServerMessage::MovedIdle { .. } => features::CHANNELS_UI,
+            ServerMessage::UserProfile { .. }
+            | ServerMessage::ProfileUpdated { .. }
+            | ServerMessage::ProfileDenied { .. }
+            | ServerMessage::UserRenamed { .. }
+            | ServerMessage::RenameDenied { .. } => features::PROFILES,
+            ServerMessage::UploadAccept { .. }
+            | ServerMessage::UploadDone { .. }
+            | ServerMessage::UploadRejected { .. }
+            | ServerMessage::BlobChunk { .. }
+            | ServerMessage::BlobMissing { .. } => features::BLOBS,
+            ServerMessage::Direct { .. }
+            | ServerMessage::MessageAck { .. }
+            | ServerMessage::MessageFailed { .. }
+            | ServerMessage::Conversations { .. } => features::DM,
+            ServerMessage::UserProgress { .. } => features::PROGRESS_ALL,
+            ServerMessage::FileMessage { .. } | ServerMessage::HistoryAttachments { .. } => {
+                features::FILES
+            }
+            ServerMessage::AuditLine { .. } => features::ADMIN_FEED,
+            ServerMessage::RoleList { .. } => features::ROLE_LIST,
+            ServerMessage::Blocks { .. }
+            | ServerMessage::ReportAck { .. }
+            | ServerMessage::AccountDeleted
+            | ServerMessage::AccountDeleteRefused { .. }
+            | ServerMessage::ChatFrom { .. }
+            | ServerMessage::Authors { .. } => features::SAFETY,
+            ServerMessage::AdminRows { .. } => features::ADMIN_PAGES,
+        }
     }
 }
 
 // ── Codec ───────────────────────────────────────────────────────────────
 //
-// One encode/decode pair per direction, used by both binaries. Errors
+// One codec, used for both directions and by both binaries. Errors
 // are logged via the caller (these return Option so hot loops can just
 // skip malformed input).
 //
 // Length discipline lives here so client and server can't drift:
-// pre-decode, anything over MAX_IMAGE_MESSAGE_BYTES is dropped unread
-// (bounding the worst transient allocation); post-decode, only image
-// variants may exceed MAX_CONTROL_MESSAGE_BYTES, and their payload must
-// fit MAX_CHAT_IMAGE_BYTES. Encode applies the same caps so a buggy
-// caller fails locally instead of poisoning the wire.
+// pre-decode, anything over MAX_CONTROL_MESSAGE_BYTES is dropped unread
+// (bounding the worst transient allocation); post-decode, upload chunks
+// must also carry at most one IMAGE_CHUNK_BYTES chunk. Encode applies
+// the same caps so a buggy caller fails locally instead of poisoning
+// the wire.
 
-/// Does this client message respect the length budget for its variant?
-fn client_message_len_ok(msg: &ClientMessage, wire_len: usize) -> bool {
-    match msg {
-        ClientMessage::ChatImageChunk { data, count, .. } => {
-            data.len() <= IMAGE_CHUNK_BYTES && *count <= MAX_IMAGE_CHUNKS
+/// A message enum on the wire: what the one codec below needs to know
+/// about a direction.
+trait Wire: Serialize + serde::de::DeserializeOwned {
+    /// Does this message respect the length budget for its variant?
+    fn len_ok(&self, wire_len: usize) -> bool;
+}
+
+impl Wire for ClientMessage {
+    fn len_ok(&self, wire_len: usize) -> bool {
+        match self {
+            ClientMessage::ChatImageChunk { data, count, .. } => {
+                data.len() <= IMAGE_CHUNK_BYTES && *count <= MAX_IMAGE_CHUNKS
+            }
+            ClientMessage::LogUploadChunk { data, count, .. } => {
+                data.len() <= IMAGE_CHUNK_BYTES && *count <= MAX_LOG_UPLOAD_CHUNKS
+            }
+            _ => wire_len <= MAX_CONTROL_MESSAGE_BYTES,
         }
-        ClientMessage::LogUploadChunk { data, count, .. } => {
-            data.len() <= IMAGE_CHUNK_BYTES && *count <= MAX_LOG_UPLOAD_CHUNKS
-        }
-        _ => wire_len <= MAX_CONTROL_MESSAGE_BYTES,
     }
 }
 
-/// Does this server message respect the length budget for its variant?
-fn server_message_len_ok(msg: &ServerMessage, wire_len: usize) -> bool {
-    match msg {
-        ServerMessage::ChatImageChunk { data, count, .. } => {
-            data.len() <= IMAGE_CHUNK_BYTES && *count <= MAX_IMAGE_CHUNKS
+impl Wire for ServerMessage {
+    fn len_ok(&self, wire_len: usize) -> bool {
+        match self {
+            ServerMessage::ChatImageChunk { data, count, .. } => {
+                data.len() <= IMAGE_CHUNK_BYTES && *count <= MAX_IMAGE_CHUNKS
+            }
+            _ => wire_len <= MAX_CONTROL_MESSAGE_BYTES,
         }
-        _ => wire_len <= MAX_CONTROL_MESSAGE_BYTES,
     }
 }
 
-/// Serialize a [`ClientMessage`]. `None` on serializer failure (should
-/// never happen for these types; treated as a droppable event) or if the
+/// Serialize a message. `None` on serializer failure (should never
+/// happen for these types; treated as a droppable event) or if the
 /// message exceeds its variant's length budget.
+fn encode<M: Wire>(msg: &M) -> Option<Vec<u8>> {
+    let bytes = postcard::to_allocvec(msg).ok()?;
+    msg.len_ok(bytes.len()).then_some(bytes)
+}
+
+/// Deserialize a message from untrusted bytes.
+fn decode<M: Wire>(bytes: &[u8]) -> Option<M> {
+    if bytes.is_empty() || bytes.len() > MAX_CONTROL_MESSAGE_BYTES {
+        return None;
+    }
+    let msg: M = postcard::from_bytes(bytes).ok()?;
+    msg.len_ok(bytes.len()).then_some(msg)
+}
+
+/// Serialize a [`ClientMessage`]. `None` on serializer failure or if
+/// the message exceeds its variant's length budget.
 #[must_use]
 pub fn encode_client_message(msg: &ClientMessage) -> Option<Vec<u8>> {
-    let bytes = postcard::to_allocvec(msg).ok()?;
-    client_message_len_ok(msg, bytes.len()).then_some(bytes)
+    encode(msg)
 }
 
 /// Deserialize a [`ClientMessage`] from untrusted bytes.
 #[must_use]
 pub fn decode_client_message(bytes: &[u8]) -> Option<ClientMessage> {
-    if bytes.is_empty() || bytes.len() > MAX_IMAGE_MESSAGE_BYTES {
-        return None;
-    }
-    let msg: ClientMessage = postcard::from_bytes(bytes).ok()?;
-    client_message_len_ok(&msg, bytes.len()).then_some(msg)
+    decode(bytes)
 }
 
-/// Serialize a [`ServerMessage`]. `None` on serializer failure or if the
-/// message exceeds its variant's length budget.
+/// Serialize a [`ServerMessage`]. `None` on serializer failure or if
+/// the message exceeds its variant's length budget.
 #[must_use]
 pub fn encode_server_message(msg: &ServerMessage) -> Option<Vec<u8>> {
-    let bytes = postcard::to_allocvec(msg).ok()?;
-    server_message_len_ok(msg, bytes.len()).then_some(bytes)
+    encode(msg)
 }
 
 /// Deserialize a [`ServerMessage`] from untrusted bytes.
 #[must_use]
 pub fn decode_server_message(bytes: &[u8]) -> Option<ServerMessage> {
-    if bytes.is_empty() || bytes.len() > MAX_IMAGE_MESSAGE_BYTES {
-        return None;
+    decode(bytes)
+}
+
+// ── Fitting lists into one message ──────────────────────────────────
+//
+// A list (a history page, an admin listing, the DM list) is sized item
+// by item: postcard writes a `Vec` as a length varint followed by its
+// items, so the items' own encodings add up to the message's body.
+
+/// The encoded size of one list item; `usize::MAX` if it cannot encode.
+fn item_len<T: Serialize>(item: &T) -> usize {
+    postcard::to_allocvec(item).map_or(usize::MAX, |bytes| bytes.len())
+}
+
+/// Keep the longest prefix of `items` whose encoding fits `budget`
+/// bytes; returns how many were dropped from the end.
+pub fn keep_prefix_that_fits<T: Serialize>(items: &mut Vec<T>, budget: usize) -> usize {
+    let mut used = 0usize;
+    let keep = items
+        .iter()
+        .take_while(|item| {
+            used = used.saturating_add(item_len(*item));
+            used <= budget
+        })
+        .count();
+    let dropped = items.len() - keep;
+    items.truncate(keep);
+    dropped
+}
+
+/// Keep the longest suffix of `items` (the newest end of a page in
+/// time order) whose encoding fits `budget` bytes; returns how many
+/// were dropped from the front.
+pub fn keep_suffix_that_fits<T: Serialize>(items: &mut Vec<T>, budget: usize) -> usize {
+    let mut used = 0usize;
+    let keep = items
+        .iter()
+        .rev()
+        .take_while(|item| {
+            used = used.saturating_add(item_len(*item));
+            used <= budget
+        })
+        .count();
+    let dropped = items.len() - keep;
+    items.drain(..dropped);
+    dropped
+}
+
+/// Split `items` into runs whose encodings each fit `budget` bytes, in
+/// order. An item larger than the budget on its own gets a run of its
+/// own (its message then fails at encode, and says so).
+#[must_use]
+pub fn split_to_fit<T: Serialize>(items: Vec<T>, budget: usize) -> Vec<Vec<T>> {
+    let mut runs: Vec<Vec<T>> = Vec::new();
+    let mut used = 0usize;
+    for item in items {
+        let len = item_len(&item);
+        match runs.last_mut() {
+            Some(run) if !run.is_empty() && used.saturating_add(len) <= budget => {
+                used += len;
+                run.push(item);
+            }
+            _ => {
+                used = len;
+                runs.push(vec![item]);
+            }
+        }
     }
-    let msg: ServerMessage = postcard::from_bytes(bytes).ok()?;
-    server_message_len_ok(&msg, bytes.len()).then_some(msg)
+    runs
 }
 
 // ── Telemetry at rest ───────────────────────────────────────────────
@@ -1624,6 +1884,68 @@ pub fn decode_telemetry_event(bytes: &[u8]) -> Option<TelemetryEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn history_row(id: u64, text_len: usize) -> HistoryMessage {
+        HistoryMessage {
+            id,
+            ts: 1_700_000_000_000 + id,
+            user_id: [7; 32],
+            name: "someone".into(),
+            text: "x".repeat(text_len),
+            edited: false,
+        }
+    }
+
+    #[test]
+    fn a_fitted_history_page_survives_the_wire() {
+        // 50 rows of 400 bytes is ~22 KiB: over what every peer decodes.
+        let mut page: Vec<HistoryMessage> = (1..=50).map(|id| history_row(id, 400)).collect();
+        let whole = ServerMessage::History {
+            conv: ConvRef::General,
+            messages: page.clone(),
+            more: false,
+        };
+        assert!(
+            encode_server_message(&whole).is_none(),
+            "oversized pages fail at encode"
+        );
+        let dropped = keep_suffix_that_fits(&mut page, LIST_ITEMS_BUDGET);
+        assert!(dropped > 0);
+        assert_eq!(page.last().map(|m| m.id), Some(50), "the newest rows stay");
+        let fitted = ServerMessage::History {
+            conv: ConvRef::General,
+            messages: page,
+            more: true,
+        };
+        let bytes = encode_server_message(&fitted).expect("fits");
+        assert!(bytes.len() <= MAX_CONTROL_MESSAGE_BYTES);
+        assert!(decode_server_message(&bytes).is_some());
+    }
+
+    #[test]
+    fn split_runs_each_fit_and_keep_order() {
+        let rows: Vec<HistoryMessage> = (1..=100).map(|id| history_row(id, 300)).collect();
+        let runs = split_to_fit(rows, LIST_ITEMS_BUDGET);
+        assert!(runs.len() > 1);
+        let ids: Vec<u64> = runs.iter().flatten().map(|m| m.id).collect();
+        assert_eq!(ids, (1..=100).collect::<Vec<_>>());
+        for run in runs {
+            let msg = ServerMessage::History {
+                conv: ConvRef::General,
+                messages: run,
+                more: false,
+            };
+            assert!(encode_server_message(&msg).is_some());
+        }
+    }
+
+    #[test]
+    fn keep_prefix_keeps_the_first_rows() {
+        let mut rows: Vec<HistoryMessage> = (1..=100).map(|id| history_row(id, 300)).collect();
+        let dropped = keep_prefix_that_fits(&mut rows, LIST_ITEMS_BUDGET);
+        assert_eq!(rows.first().map(|m| m.id), Some(1));
+        assert_eq!(rows.len() + dropped, 100);
+    }
 
     #[test]
     fn client_message_roundtrips() {
@@ -1924,7 +2246,7 @@ mod tests {
         let welcome = ServerMessage::Welcome {
             client_id: 42,
             user_id: None,
-            features: crate::features::SERVER_1_0,
+            features: crate::features::TELEMETRY,
         };
         let bytes = encode_server_message(&welcome).unwrap();
         assert!(matches!(

@@ -55,7 +55,13 @@ What stands between this and "production for strangers":
 ### Server, protocol, transport
 
 - [ ] **SEC-2 [P0][M] Connection slots can be exhausted from one
-  address.** `peer_count() >= max_peers` refuses new connections and
+  address.** *In part, 2026-10-12 (review P3-5):* unadmitted
+  connections have a budget of their own (a quarter of `max_clients`,
+  16–64 seats), capped at eight per address (an IPv6 /64 counts as
+  one), with a QUIC `Retry` once half the seats are taken;
+  `one_address_cannot_fill_the_waiting_room` is the test asked for
+  below. *Left:* a rate per address, and the Hello deadline (still
+  10 s, for lossy links). The original finding: `peer_count() >= max_peers` refuses new connections and
   counts handshaking, Hello-pending and closing peers alike
   (`transport/src/driver.rs` ~687, ~817); a connection that never says
   Hello lives 10 s (`server.rs` ~90, ~913); the per-IP limit only
@@ -124,15 +130,14 @@ What stands between this and "production for strangers":
 - [ ] **SEC-11 [P2] Smaller server items** *(review)*: channel passwords
   plain, compared in variable time, no attempt limit (`server.rs`
   ~2661); a moderator can lift their own mute/restriction
-  (`moderation.rs` ~432); admin replies over 64 KiB fail silently
-  (ListUsers/Blobs/Invites/audit break at a few hundred rows,
-  `messages.rs` ~1440, `server.rs` ~1310); pruning messages never
+  (`moderation.rs` ~432); admin replies are cut to one 17 KiB message
+  since 1.2.1, so ListUsers, Blobs and Invites show only their first
+  rows past about 140 entries (paging them needs a feature bit;
+  review P0-1); pruning messages never
   decrements blob refs, the telemetry prune scans without an index,
-  audit rows and invites are never pruned; a CLI write reloads the
-  policy and can drop a ban still queued (`persistence/mod.rs` ~1007,
-  `server.rs` ~1363); wall time is anchored once at start
-  (`clock.rs`); shutdown can outlast Docker's 10 s stop timeout;
-  `server restore` joins archive paths without `unpack_in`;
+  audit rows and invites are never pruned; wall time is anchored once
+  at start (`clock.rs`); `server restore` joins archive paths without
+  `unpack_in`;
   `SSLKEYLOGFILE` is honoured (`identity.rs` ~449); look-alike and
   zero-width names pass; creating a channel past the cap stores it
   before failing.
@@ -157,19 +162,13 @@ What stands between this and "production for strangers":
   time cap trusts sender timestamps (`audio/src/transport/
   packet_buffer.rs` ~192–262), on the real-time output worker. Cap ~64
   slots per peer and refuse sequence numbers far ahead of the playhead.
-- [ ] **CLI-4 [P1][S] A message can carry a link of any scheme.** The
-  linkifier puts the raw token into `](<…>)` unescaped
-  (`app-core/src/markdown.rs` ~116–134, ~242), so `>` ends the
-  destination early and a second `[text](file://…)` follows; the click
-  handler opens anything (`frontend/src/app.rs` ~1178 → `host.rs` ~95;
-  `open::that_detached`). Allow only http/https at the click, stop the
-  URL at `<>[]()`, add adversarial tests. (Phones already check the
-  scheme in their hosts.)
 - [ ] **CLI-5 [P1][S] Reconnect unmutes.** `teardown_connection` clears
   mute and deafen (`frontend/src/app/session.rs` ~196) and the
   automatic reconnect puts the user back in the room live. Keep both
   across reconnects and re-apply after `VoiceControl::Start`.
-- [ ] **CLI-6 [P1][S] `settings.json` is written in place**
+- [ ] **CLI-6 [P1][S] `settings.json` is written in place** *(done
+  2026-10-12 but for showing the parse error in the UI: it is logged,
+  the file is kept as `settings.json.corrupt`, and the `.bak` loads.)*
   (`client/src/config.rs` `Settings::save`) and a parse failure falls
   back to defaults silently, so a crash mid-write loses every server,
   password and pin (the next connect trusts on first use again). Write
@@ -200,24 +199,27 @@ What stands between this and "production for strangers":
   `do-not-duck=requested`. Windows 10 cannot be helped this way. If 11
   still ducks: the software canceller (AEC-SPEC §8) or Auto keeping
   speakers off the call path — decide then. Meanwhile users:
-  `control mmsys.cpl,,3` → "Do nothing".
-- [ ] **CLI-14 [P2][S] A stream's own audio output never sheds
-  latency when it resamples.** Found reading `audio/src/stream/output.rs`
-  for MOB-18: on a device that is not at 48 kHz, decoded audio waits in
-  the worker's accumulator while the ring is full and is never
-  trimmed, so a network burst or clock drift adds delay for good (the
-  48 kHz path drops the excess instead). Rare — the output asks for
-  48 kHz first — but it is an A/V drift. The `viewing` line's `audio
-  … ms queued` shows it if it happens; drain to a target like the
-  phones' mix does (`stream::mix`, by playing slightly faster).
+  `control mmsys.cpl,,3` → "Do nothing", or on headphones Echo
+  cancellation → Off. 2026-10-12 (AEC-SPEC E14, §4.6 table): plain
+  streams no longer open through the Communications role (1.2.1 would
+  have ducked headphone users on "Default"), baucord's own sessions
+  opt out of being lowered, and the render line logs the user's
+  Windows setting — ask a reporter for their two `Native WASAPI`
+  lines. Windows 10 on speakers, decided 2026-10-12: keep the
+  platform canceller and say so (AEC-SPEC E15) — Settings → Audio
+  shows a notice with a button to Windows' Sound dialog whenever the
+  opt-out was not granted and Windows is set to lower, and a toast
+  points there once per install. Not ducking at all on Windows 10
+  takes our own canceller on plain streams (AEC-SPEC §8); not now.
 - [ ] **CLI-16 [P2][M] Desktop voice latency: what is left.** The
   2026-10-08 review: native WASAPI cost nothing (event-driven, MMCSS,
   20 ms render buffer). Our code adds ~74 ms one way; the estimate
-  mouth to ear is 135–175 ms. Nine candidates, ranked, in
-  `LATENCY-SPEC.md`. First: measure (a clap test, and buffer depths
-  in the voice summary). Then LAT-1 (late packets push playback 20 ms
-  later), LAT-2 (share audio waits for the video tick) and LAT-3 (the
-  32 KiB datagram send buffer holds seconds, not ~200 ms). Also seen:
+  mouth to ear is 135–175 ms. First: measure (a clap test, and
+  buffer depths in the voice summary). Then LAT-1 (late packets push
+  playback 20 ms
+  later) and LAT-3 (the 32 KiB datagram send buffer holds seconds, not
+  ~200 ms). LAT-2 (share audio waited for the video tick) is done
+  (§7, 1.2.1). Also seen:
   a sharer's own voice lost 45 % beside a collapsed video uplink
   (CLI-13's session, §7) — voice and video share the congested
   window, and LAT-3 is part of the answer. Parked until the Play
@@ -253,6 +255,16 @@ What stands between this and "production for strangers":
   fires on `release: published`, which includes pre-releases, and the
   R2 `version` file moves too (the Docker image no longer moves
   `latest` for one, §7). Guard on `github.event.release.prerelease`.
+
+## 2a. The 2026-10-10 review
+
+A staff-engineer review of the whole repository at `0516add`
+([baucord — staff engineering review](https://claude.ai/code/artifact/8a013ff5-90c8-4a37-8e1f-fe9055a2aa2e)):
+7 P0, 22 P1, 62 P2 and 52 P3 items, a wakeup audit and a dead-code list,
+each with file:line evidence and a fix. Its ids (`P0-1` … `P3-52`, no
+clash with this file's) are the work list for 1.2.1; a finished one gets
+a line in §7 naming its id, an open one stays in the review. Where a
+review item finished an item of this file, that item left its list.
 
 ## 3. Milestone B — release integrity, licensing, operations
 
@@ -291,14 +303,18 @@ What stands between this and "production for strangers":
   - The deployed server writes its log to stderr; compose keeps
     5 × 10 MB of it, so its age depends on traffic. Keep it for a
     fixed time instead.
-- [ ] **REL-1 [P0][S–M] A CI gate.** `ci.yaml` and `pr-check.yaml` are
-  `.disabled`; `release.yml` runs `cargo build` only, without
-  `--locked`; the versions test (`protocol/tests/versions.rs`) never
-  runs in CI, and the release guard checks only `crates/desktop`
-  against the tag while the updater compares `frontend`'s version.
-  Re-enable a PR job (`cargo test --locked --workspace`, clippy
-  `-D warnings` on the host crates, nightly `fmt --check`, the versions
-  test) and make the release jobs `needs:` it.
+- [ ] **REL-1 [P0][S–M] A CI gate.** *In part, 2026-10-12:*
+  `pr-check.yaml` is enabled again and rewritten — nightly
+  `fmt --check`, `cargo check --locked` of the desktop build and the
+  phones' shared code, clippy, and the tests of the eight crates that
+  need no display (the versions test among them), in a Debian 13
+  container, on pull requests and on pushes to `main`. **Never run on
+  GitHub**: its first run is its test — the six socket-wait tests (§8)
+  have only ever failed in the sandbox it was written in. Left:
+  `release.yml` still runs `cargo build` without `--locked`; the release
+  guard checks only `crates/desktop` against the tag; clippy does not
+  yet deny warnings (the crates carry pedantic ones); the release jobs
+  do not `needs:` the check.
 - [ ] **REL-2 [P1][M] Code signing**: Windows (Azure Trusted Signing or an
   OV certificate) and macOS (Developer ID, a real `.app` with an
   `Info.plist` — which is also how macOS attributes the microphone and
@@ -461,8 +477,7 @@ Store is not decided yet.
   goes through xcap's deprecated `CGWindowList` API (ScreenCaptureKit is
   the replacement); system audio in a share is
   a stub on macOS/Linux; no AEC on macOS (the VPIO backend is the
-  answer, AEC-SPEC §9) or Linux; macOS encodes with x264 on the CPU;
-  decode and encode share the screen thread.
+  answer, AEC-SPEC §9) or Linux; macOS encodes with x264 on the CPU.
 - [ ] **PRD-6 Carried over from the old lists**: identity-changed
   accept/reject dialog; connection-quality indicator; per-channel
   speaking indicators (today global); paste an invite string on the
@@ -502,9 +517,11 @@ Store is not decided yet.
   (3.2k lines, one idle test) — loss classification, reassembly
   limits, session phases; `frontend` has no tests — reconnect and
   backoff, mute across reconnect, updater extraction, settings
-  corruption; `audio` device supervision (`service()`) against a mock
-  backend. (The chat pane's scrolling has its harness,
-  `tools/chat-scroll-sim`.)
+  corruption. (The chat pane's scrolling has its harness,
+  `tools/chat-scroll-sim`.) **Done of it, 2026-10-12:** `audio`
+  device supervision against a stand-in machine — `audio/src/fake.rs`
+  and the 51 scenarios of `supervision_tests.rs`, each run under the
+  rules of the desktop, Windows, Android or iOS (review P2-55).
 - [ ] **TST-3 [P2][M] A load scenario in the simulator**: 200 clients,
   5 sharers, mixed links; assert voice loss and RTT spread.
 - [ ] **TST-4 [P1] Device passes the sandbox cannot do**, before each
@@ -513,6 +530,9 @@ Store is not decided yet.
   cellular; screen off for 10 minutes; the notifications. On
   the desktop: watched keybinds per OS, the single-instance guard, the
   tray, `server restore` on a real backup, an image over 10 MiB.
+  **For 1.2.1 the list is `DEVICE-CHECKLIST.md`** (2026-10-12): every
+  change of the review work that was not run on its platform, per
+  platform.
 
 ## 6. Decisions only you can take
 
@@ -520,16 +540,37 @@ Store is not decided yet.
    Apache-2.0; a desktop build as a whole is GPL-3.0 (FFmpeg and x264);
    Slint under its royalty-free licence.
 2. **Stores** — *Google Play decided 2026-10-07*: yes, PLAY-STORE.md
-   (its §2 holds the decisions it needs). The App Store: still open.
+   (its §2 holds the decisions it needs). The App Store: still open,
+   and it comes with two questions of its own. Push (4, below). And
+   the lobby's keep-alive: iOS keeps a connected app alive in the
+   background with a silent audio output (`audio/src/lib.rs`, the
+   `audio` background mode in `ios/project.yml`; IOS-SPEC D47), which
+   App Review knows and rejects under guideline 2.5.4 when no audio
+   the user can hear is playing (review P2-29). In a room that mode is
+   honest; in the lobby it is not. For the App Store the lobby either
+   drops the connection in the background (and PRD-1's push brings the
+   user back), or the app is offered outside the store only.
 3. **Privacy** (LEG-5): what the official server keeps and for how
    long, telemetry consent, who answers for self-hosted servers.
 4. **Push** (PRD-1): run an official push relay, or live with
    "notifications only while connected".
 5. **The lobby** (MOB-1) — *decided 2026-10-07*: no microphone in the
    lobby or while muted, on the phones only; the desktop keeps its
-   streams.
+   streams, and since 1.2.1 drops what the microphone hears there
+   (review P1-6). The AFK room counts as out of a room.
 6. **Mute across reconnects and restarts** (CLI-5): assumed yes.
-7. **The default branch**: `chunk` or `main` — the workflows disagree.
+7. **The default branch**: `main` — *taken as decided 2026-10-12*:
+   it is what the repository's remote names (`origin/HEAD`), and
+   `chunk` no longer exists there. `release.yml` warms its caches from
+   it now. Say so if it should be another.
+8. **A kick or a ban with the window in the tray** — *decided
+   2026-10-12*: the window stays where it is (what review P2-17 left
+   it doing).
+9. **The sharer's mouse pointer** (review P2-25) — *decided
+   2026-10-12*: built, on, and to be looked at on Windows before the
+   release (§7; `DEVICE-CHECKLIST.md` §1.3). `"pointer": false` under
+   `share` in `settings.json` is the way back for a machine where it
+   draws wrong; there is no switch in the app.
 
 ## 7. Done
 
@@ -599,15 +640,688 @@ One line each; the spec decision named holds the detail.
   "N new messages" pill (ANDROID-SPEC D66), General's Activity view
   (D65).
 
+- **2026-10-10 — 1.2.1, the review's P0s** (§2a): control messages are
+  17 KiB both ways, as every shipped peer already enforced — history
+  pages, the DM list and admin answers are cut to fit one message
+  (`protocol::keep_prefix_that_fits` and friends) instead of vanishing
+  unread at the client (P0-1); refusing an upload names the upload
+  restriction, not General's text (P0-2); deleting a role revokes its
+  invites and opens its channels in one transaction (P0-3); the prune
+  tells the tick which files it deleted, and someone else's file is
+  sent once in full before it can be posted again (P0-4); the release
+  builds only the desktop and the server (`default-members`, P0-5);
+  teardown stops watching every stream (P0-6); links open only when
+  they are `http`/`https`, on every host, and the linkifier stops a URL
+  at `<`, `>` and `\` — CLI-4 (P0-7).
+- **2026-10-10 — "Install and restart" relaunches.** The new process
+  knocked on the single-instance socket of the one still exiting,
+  heard "already running" and quit, so the app closed and never came
+  back. The updater now passes `BAUCORD_RELAUNCH_AFTER_UPDATE` (and the
+  same arguments, so a `--profile` comes back on its profile) and the
+  child waits for the old instance to leave (`instance::wait_for_previous`).
+  The socket name is now an FNV hash of the config path instead of
+  std's `DefaultHasher`.
+- **2026-10-10 — 1.2.1, the review's P1s** (§2a), mostly wakes nobody
+  needed:
+  - *Loops sleep until there is work.* Both network loops wait on the
+    socket until `Driver::next_deadline()`; the server's idle main
+    thread went from 50–1,000 wakes a second to a few (P1-2), and
+    Windows has the socket wake too (`WSAPoll`, P1-1). Voice packets
+    skip the voice thread, which wakes once a second (P1-5). The audio
+    workers wait on their device latch; a stream's sound is read in its
+    device callback (P1-4, which also closes CLI-14). The screen thread
+    sleeps until a playout slot and no longer wakes the UI; a stream
+    nobody can see is not decoded (P1-7, P1-8). Keybinds are watched
+    only while connected, and only the bound keys — `device_query` is
+    gone (P1-3). The roster is rebuilt once per pass and only on screen
+    (P1-9); the phones' main screen is hidden under their pages (P1-10).
+  - *Work nobody hears.* The desktop drops the microphone outside a
+    voice room (lobby, AFK) instead of encoding what the relay throws
+    away (P1-6).
+  - *Latency.* A gap in a stream's frames is acted on at once (P1-12);
+    NVENC and QSV open without a frame queue and a still screen's last
+    change leaves at once (P1-13); capture and decode reuse pooled
+    buffers (P1-11); share audio leaves as each packet is encoded
+    (LAT-2) and the desktop holds a 60 ms cushion for it.
+  - *Bugs.* GSO turning off no longer loses every batch (P1-14); the
+    UI and the network thread can no longer deadlock (P1-16); two
+    uploads at once keep separate state (P1-17); Windows reopens both
+    sides when the output changes, and "Default" means one device
+    (P1-18, AEC-SPEC E13); stream sound plays on the voice output
+    picked in Settings (P1-19); pictures from the wire decode only as
+    PNG, JPEG or GIF (P1-20).
+  - *Server and scripts.* A retired key vouches for two years from its
+    retirement, by the date in its name (P1-15); `monitor-net.sh`
+    writes its rows again (P1-21); CLI listings change nothing, and a
+    reload sends only what changed (P1-22).
+- **2026-10-11 — 1.2.1, the review continued** (§2a). What the P1s
+  had left open, and the first P2s and P3s:
+  - *P1s finished.* Commands and state travel on unbounded channels
+    both ways; our share's frames and sound go out on their own bounded
+    `MediaOut` channel, so video can no longer queue in front of a
+    command (P1-16). `UploadProgress` names its upload and each card
+    moves its own ring (P1-17). A policy snapshot read before a write
+    the tick queued afterwards is set aside and asked for again, so a
+    ban is never dropped from memory by a reload (P1-22).
+  - *Server.* Lobby sessions keep their speaking, audio state, renames
+    and role changes to themselves (`audience_about`, P2-1). Voice the
+    relay drops on purpose is still counted, so leaving a mute or the
+    lobby no longer reads as loss (P2-2). A reload the next start would
+    refuse is not applied (P2-4). Close frames leave before the
+    database drain, which has one 6 s deadline (P2-5). Compose mounts
+    the `config/` folder and names the file with `BAUCORD_CONFIG`
+    (P2-6). Failed admissions are pruned and counted per IPv6 /64
+    (P2-7). A CLI purge takes the messages off the live server (P2-8).
+    A read that timed out in the queue is not run later (P2-9). A key
+    or an address can only be banned, with `BAN`, and the fallout
+    spares administrators and equal ranks at admission too (P2-10).
+    The blob cache is bounded and proofs go with their blob (P2-12).
+    The persistence thread sleeps until its next job and is not
+    started without a database (P2-47).
+  - *Server polish.* `link:` lines cover their whole interval (P3-7);
+    a failed reopen after log rotation keeps writing to `.1` (P3-8);
+    audit targets are compared as bytes (P3-10); `server key unlink`
+    drops the live session (P3-11); message ids come from a counter
+    that survives a prune, with indexes on `messages(user_id)` and
+    `conversations(user_b)` — migration 5 (P3-12, part of P3-9).
+  - *Client.* Slash commands split on any whitespace and one
+    `protocol::parse_hex_id` serves client and server (P2-15). Transfer
+    state ends with the session (P2-13). A failed retry keeps the room
+    to rejoin, and a refused one releases the host's keep-alive
+    (P2-14). The voice telemetry's "exercised" is measured on the
+    right clock (P2-19); a failed microphone reopen clears the speaking
+    flag (P2-20); a page loaded with "Load earlier" is kept while it is
+    read, and paging continues from the oldest row shown (P2-23).
+  - *Weight.* `zip` and `nnnoiseless` without their default features
+    (P2-46); dependencies carry line tables only in dev, and the unused
+    `debug-opt` profile is gone (P3-51).
+  - *Still open of P0 and P1* (at the time; both done in the seventh
+    batch, below): paging for the admin lists (P0-1, needs a feature
+    bit) and the keybind watcher's event sources (P1-3 step 2, one
+    test pass per OS).
+- **2026-10-12 — 1.2.1, the review's second batch** (§2a).
+  - *Protocol.* `lane()` names every variant, and so does the new
+    `ServerMessage::required_feature()`; one codec serves both
+    directions (P3-1). `protocol/tests/wire_golden.rs` pins every wire
+    enum's variant order and every message's and struct's layout
+    (P2-62). The video reassembler holds one in-order frame per sender
+    (P2-56).
+  - *Transport.* Sends queue and each peer is drained once per pass;
+    `handle_timeouts` touches only peers that are due; `readable()`
+    names the peers with something to read (P2-31). `Shared` payloads
+    are put on the wire once and handed to quinn by reference (P2-32).
+    The receive path sizes its buffers by the platform's batch, builds
+    its slices on the stack and splits one buffer per GRO batch (P3-2).
+    `ServerIdentity` and `rcgen` are behind a `server` feature (P3-3).
+    The client keep-alive is 5 s (10 s at first; 5 s since
+    2026-10-12), held through 40 % loss in the simulator, and a new
+    bit, `QUIET_REPORTS`, stops the two-second `VoiceReceiverReport`
+    to sessions that send no voice (P2-49); an idle client on a dead
+    link now notices after up to 35 s, not 32.
+  - *Server.* Stream health is per sharer and spans five reports
+    (P2-3). File references: recounted from the rows at startup,
+    released with the messages a retention pass removes (which also
+    leave the replay ring), not released twice for a deleted post at a
+    purge, given back when a file DM is not stored — migration 6 adds
+    the index (P2-11). The transport keeps a waiting room for
+    connections that have not said Hello — its own seats, eight per
+    address, a QUIC Retry once half are taken — so `ServerFull` reaches
+    the client and a returning user replaces their own session on a
+    full server (P3-5; SEC-2 in part, below). Feature gates are one
+    table checked in `send_msg` (P3-6). A first visit and every admin
+    command are one transaction, and the hot statements are cached
+    (P3-9). A purged account's uploaded logs are deleted off the tick
+    (P3-13). Reads in flight are one `Waiting` table and their answers
+    one channel (P2-52).
+  - *Client.* Image and file reassembly is one type that hashes as it
+    goes, and stalled transfers are dropped on the two-second tick
+    (P3-14). Keyframe requests, decode errors and frames dropped before
+    the screen thread are counts on the 5 s summary lines (P3-15); the
+    share loop no longer allocates a preset name per tick or logs a
+    line per frame (P3-16). `settings.json` is saved through a rename
+    with a `.bak`, a corrupt file is set aside and never replaced by an
+    older install's, and the pre-0.3 shadow struct and the unused room
+    password are gone (P3-17, P3-18; CLI-6 but for showing the error
+    in the UI). Volume and mute per person are filed under the user id
+    (P2-24). The UI thread is woken once for however many messages are
+    queued, and not at all for link stats while the app is off screen
+    (P2-48). Two conditions that were always true are gone from
+    `on_disconnected` (P3-20). Comfort noise is not decoded for a peer
+    whose last frame was silence (P2-34). A heading with spaces around
+    its text renders bold (P3-39).
+  - *Build.* The product version, the edition and the licence live
+    under `[workspace.package]`; the release workflows, Gradle and the
+    iOS scripts read the version there (P2-61).
+  - *Dead code and dead files* (the review's list, 2026-10-12). Files:
+    `skills/` (69 files), `scripts/baucord_thread_audit.ps1`, six of
+    the seven example programs (the audio `latency` one stays).
+    Protocol, transport, server: `Carrier` and `Lane::carrier`,
+    `Driver::is_server` / `is_connecting` / `has_transmits`,
+    `frame::Decoder::buffered`, the reassembler's statistics, the
+    relay's `group_open`, the on-connect stream announcement that could
+    never fire, two one-line wrappers in `policy.rs`, `SERVER_1_0`.
+    Client: the seven media-only messages are an internal enum, so the
+    app's `NetworkMessage` has no arm that never runs (the first half
+    of P2-53); four fields of `SharedScreenState`, two re-exports, two
+    test-only `ServerEntry` helpers. Audio: the endpoint-loopback
+    fallback and the macOS and Linux stand-ins of system-audio capture
+    (Windows process loopback is the one backend; an older Windows 10
+    shares without sound), its unused mute and volume, the microphone
+    level meter nothing read (computed per sample in every capture
+    callback), six setters and five getters of `VoiceChat`, three
+    stats; late packets and device restarts are now on the stats line.
+    Video: the `return_buffer` and `quality` trait methods, three size
+    helpers, the stub decoder and the stub capturer. App: unreachable
+    admin-result arms, a duplicated set of sharer ids, `ureq` out of
+    the phone builds. UI: 33 messages in each of the three catalogs, 12
+    `Tr` properties, 11 `State` properties, two callbacks, three struct
+    fields, five functions — and `i18n/tests/catalog.rs` now fails on a
+    message nothing shows or a language missing one. Android: the
+    `ndk-context` and `requestPermissions` fallbacks,
+    `ACCESS_NETWORK_STATE`, two Gradle flags. *Left on purpose:* the
+    stored telemetry blob with its two decoders and the six unused
+    database columns (dropping them deletes stored data: a migration to
+    decide on), `Config.authentication` (until OPS-1),
+    `DecodedFrame.timestamp_ms` (its writers include the iOS decoder,
+    which cannot be compiled here), and the two `.disabled` workflows
+    (to fix and enable, not to delete).
+- **2026-10-12 — 1.2.1, the review's third batch** (§2a): what costs
+  while nothing happens, and the audio leftovers.
+  - *Timers.* The share's stats timer, the update's progress poll, the
+    device poll and the resource sampler are fields that stop with what
+    they serve; the list nobody could stop is gone (P2-38). The GIF
+    ticker stops while the window is in the tray, minimized or a phone
+    app in the background, and restarts when it is back; only the two
+    newest GIFs of a page autoplay (P2-39). The Settings timer runs at
+    8 Hz on the Audio tab only (2 s elsewhere and out of sight), and
+    the meters no longer animate their width (P2-40).
+  - *Sharing.* A still picture's once-a-second refresh stays out of
+    the encoder's keyframe cadence (`encode_repeat`: a still share sent
+    an IDR every 2 s, and on AMF reopened its session every 4); a
+    screenshot identical to the last is not encoded (macOS, Linux, the
+    GDI fallback); the GDI liveness probe runs every 30 s on a still
+    screen, every 2 s only while it is the picture (P2-41). Our own
+    share and the streams we watch run on a thread each behind one
+    routed sender, `ScreenTx` (P2-44, out of PRD-5). `video::pool`
+    takes the best fit and is freed when nothing is shared or watched
+    (P2-43; VideoToolbox's per-frame zero-fill is left, iOS).
+  - *Audio.* The callbacks wake their workers through `audio::latch`
+    (an atomic and an unpark) and no longer through a channel that
+    locks while the worker sleeps (P2-33). RED sends and receives
+    without a list per packet and does not copy a redundant block it
+    already holds; `adapt()` reuses its list; the peer-settings lock is
+    not held across the decodes (P3-21). The stats line counts
+    clock-drift windows and how many switched the correction on, to
+    decide after a release whether it stays (P3-22). Out of the voice
+    rooms the encoder thread looks every 5 s, not every 250 ms (P3-23).
+    `VoiceChat::new` cannot fail and `start` returns a `StartOutcome`
+    (P3-24). A plan check lists Android's call devices once and asks
+    nothing out of a room (P3-25). The stream output's callback thread
+    is promoted (P3-26). WASAPI device loss is matched on the error
+    code (P3-27; the loops still do not share `pump.rs` — real-time
+    Windows code, not changed unrun).
+  - *Icons.* The window and the tray load a 256 px icon (6 MiB decoded
+    twice before); the `.ico` and the website's favicon are 106 KB, were
+    727 (`scripts/desktop-icons.py`, P2-45).
+  - *Windows ducking* (CLI-11, AEC-SPEC E14): see there.
+  - *Windows.* A stream whose device stopped signalling (a headset
+    unplugged) asks the engine on the next event timeout and reopens
+    (P2-21). A share's system-audio capture that gave up is started
+    again, and a capture that restarted is no longer four billion
+    skipped frames in the viewer's summary (P2-22). DXGI capture opens
+    on the adapter that drives the monitor, not always the default one
+    (P2-26), and with two frames queued hands out the newer when the
+    screen is faster than the share (P3-28). The 1 ms system timer is
+    held in a voice room and while a stream is shared or watched, not
+    for the whole connection (P2-35). The capture pump no longer writes
+    a log line per discontinuity, and the `wasapi` crate is capped at
+    info (P2-37). **All of it type-checked for Windows, none of it
+    run.** Left: the mouse pointer in a share (P2-25) — it has to be
+    looked at on a Windows screen.
+  - *CI.* The release build warms its caches from `main` (it named a
+    branch that is gone, so no release ever restored one), installs
+    the toolchain `rust-toolchain.toml` pins and no other, and no
+    longer wraps rustc in sccache and its Windows shim (P2-50, part of
+    P3-48); `pr-check.yaml` is back (REL-1) and **ran green on GitHub
+    on `0b8c374`** (the user, 2026-10-12) — with the six socket-wait
+    tests the sandbox cannot pass, so those are the sandbox's. The
+    release workflow's changes have not run yet. Left: one release
+    workflow instead of four (P2-60), the package lists and `cargo-ndk`
+    (P3-48) — each needs a release run to prove.
+- **2026-10-12 — 1.2.1, the review's fourth batch** (§2a): what the
+  user sees. From here on Slint changes are *looked at* in the sandbox
+  (guide §1, "The loop": the aarch64 viewer), not only compiled.
+  - *Windows 10 ducking, decided* (CLI-11, AEC-SPEC E15): keep the
+    canceller, say what Windows is doing, and put the way out one
+    click away.
+  - *Bugs.* A connect, a reconnect or a lost connection no longer
+    brings the window forward or takes the focus; it is shown at
+    launch (unless that starts in the tray) and when the user asks
+    (P2-17). The composer menu's Cut and Copy work: the selection
+    travels with the right-click and the edit is done host-side, and
+    they are greyed without one (P2-16); a callback that re-enters the
+    app state is dropped with a log line in a release build instead of
+    aborting it. Pasting a picture works on Linux and from
+    bitmap-only sources (PrintScreen, a paint program) elsewhere:
+    with no text on the clipboard, its pixels are taken through
+    arboard (P2-18). A saved picture is named for what its bytes are,
+    not always `.png`; a phone's menu has no "Copy image" (P3-31).
+    A device plugged in with Settings open no longer shifts what a
+    pick means, and the pickers refresh as devices come and go
+    (P3-35's second half). The profile card waits its dwell again on
+    the same row and stays away under a menu (P3-37). The connect and
+    startup cards fit a 360–375 pt phone, the terms line wrapping onto
+    a second line there (P3-40). Share denied, can't watch, upload
+    refused, channel join refused and the time units ("3 d", "5 min
+    ago") are in the three catalogs (P3-30; an admin's command output
+    — flags of `/channel list`, the restriction list — is still
+    English).
+  - *A GIF's loop length was misread* — the delay one byte early, so
+    a 40 ms frame counted as ten seconds and nearly every GIF got the
+    30 s autoplay cap instead of "about three loops". Found by a test
+    written for P2-59. **GIFs now freeze after ~3 loops**, as
+    `gif.rs` always said they did; hovering replays them as before.
+  - *Simpler.* One GIF player: the gallery and the send preview loop
+    the streaming player; the up-front decoder (240 frames, 48 MB) is
+    gone (P2-59). A menu action is described once (P2-57). The emoji
+    palette builds only the rows in view (P3-38). One bounded-encode
+    loop, no copy of the picture before it, no second full decode of a
+    pass-through picture to read its size (P3-41, P3-42). The phones'
+    hooks lose `notifies` (both said yes) and a repeated
+    `target_exists`; the chime's WAV is borrowed, not cloned (P3-47 —
+    **the two-line deletions in `crates/android` and `crates/ios` are
+    not compiled here**).
+  - Left of the UI list then: see the fifth batch.
+- **2026-10-12 — 1.2.1, the review's fifth batch** (§2a): the UI
+  list's simplifications. Checked with a scratch harness that drives
+  the real `MainWindow` headless (Slint's software renderer, real key
+  and pointer events) against the tree before and after: 131 observed
+  facts and 51 screenshots, identical.
+  - *One dialog, one row frame, one ring* (P2-58). `Modal` in
+    `widgets.slint` is the scrim, the centred card, the click outside,
+    Escape and Android's Back; eight dialogs in `main.slint` are its
+    content (`Theme.scrim`). `RowFrame` in `chat.slint` is a person's
+    row: hover tint, right-click and long-press menu, gutter picture,
+    name line; the text, code, picture and file rows inherit it.
+    `ProgressRing` is the two copies of the transfer ring.
+    `main.slint` 1345 → 1210 lines, `chat.slint` 1801 → 1661. The
+    harness caught the one thing a render cannot: a field that
+    focused itself in its own `init` lost the keyboard to the shared
+    dialog, so typing and Enter went nowhere in three dialogs — they
+    now take it in `Modal`'s `opened`.
+  - *One host module* (P3-33): `frontend/src/host.rs` for every host;
+    the desktop's answers are its `DesktopHooks`, a phone installs its
+    own. `stubs/host.rs` is gone. The `Hooks` trait asks nothing new
+    of the phones (three defaulted methods were added).
+  - *The session is one value* (P2-51, the frontend half). The 53
+    fields that belong to a connection moved from `AppState` into
+    `Session` (with `Safety`, `Transfers`, `ChatFlow` inside it);
+    `teardown_connection` replaces it whole, where three hand-kept
+    lists reset it a line per field. **Not done: the server's half.**
+    Its teardown is already one function, and the relays read several
+    of its per-session maps on every packet; folding them into one
+    struct changes hot-path signatures for little gain — to decide.
+  - *Smaller.* A decoded frame's figures travel as one `FrameMeta`
+    (P3-36). The admin panel keeps the `AdminCommand` it will send,
+    not a second enum describing it (P3-34). Settings' thirteen plain
+    switches are one table that `populate` and `wire` both expand
+    (P3-35).
+  - Left of the list then: one audio `reconcile()` (P2-55); see the
+    next entry.
+- **2026-10-12 — 1.2.1, the audio engine's device handling in one
+  place** (review P2-55, and TST-2's audio part), in two steps so the
+  second could be held to the first.
+  - *A machine that is not there.* The rules that differ by platform
+    (`PLATFORM_VOICE_PATH`, `RELEASES_MIC`, `SHARED_VOICE_UNIT`, and
+    what were `cfg` branches for Android's routes and Windows'
+    reference and two defaults) are a `Traits` value the engine
+    carries — the build's, or in a test any platform's. The platform
+    is asked through four small functions (`survey`,
+    `engage_call_path`, `open_playback`, `open_capture`) which
+    `audio/src/fake.rs` answers in tests, with sides that hold no
+    stream and a log of every plan, open and close. 43 scenarios were
+    written against the engine *as it was* (42 as predicted from
+    reading it; the one surprise was the reading), then eight more.
+  - *One `reconcile`.* `start`, the presence, the two device picks,
+    the setting and `service` each decided what to close and open,
+    with their own copies of doing it. Now each records what it was
+    told and calls `VoiceChat::reconcile(cause)`: `decide` holds every
+    rule side by side and returns keep / re-plan both / these sides;
+    `plan_and_open`, `apply_sides`, `open_output` and `open_input`
+    are the only places a stream is opened or closed. All 43 traces
+    came out identical on the first run, and the old engine still
+    passes 50 of the final 51.
+  - *The one difference, on purpose:* a microphone pick that fails to
+    open now clears the echo-cancellation report (Settings showed "the
+    canceller is running" for a microphone that was closed); every
+    other failed reopen already did.
+  - **Not run on any real device.** The Windows- and Android-only
+    lines type-check; the eight iOS-only blocks were compared with
+    the old ones text for text (identical) but are not compiled. What
+    the tests hold is the *decisions*; the streams themselves
+    (`input.rs`, `output.rs`, `native/`) were not touched.
+
+- **2026-10-12 — 1.2.1, the review's sixth batch** (§2a): what could
+  still be done in the sandbox, and `DEVICE-CHECKLIST.md` for what
+  could not.
+  - *Smaller.* `NetworkControl::Send(ClientMessage)` replaces the 17
+    variants that restated a wire message field for field, and their
+    17 arms (`network.rs` −201 lines; the rest of P2-53). The
+    encoder's twelve methods live in its `VideoEncoder`
+    implementation, without an inherent copy each and a forwarder
+    (P3-29). The microphone's chain is a struct with nine fields, not
+    a `Vec<Box<dyn AudioProcessor>>` built by `add` calls, and the
+    stages' unused names are gone (P2-54).
+  - *One of each.* SHA-256 is `transport::sha256` on `ring`; `sha2`
+    and what it brought are out of the tree (standard vectors tested;
+    stored hashes and pinned fingerprints are the same bytes). One
+    `pollster`. winit through `slint/unstable-winit-030`, not Slint's
+    internal backend crate (P3-50). `chrono`, `serde_json`,
+    `env_logger` and the `windows` version are
+    `[workspace.dependencies]`; Slint is `~1.18.1` (P3-49). *Left:*
+    `sysinfo` on the phones (the resource line and `/mem` use it
+    there), and `audio`/`video` on edition 2021 — the migration has to
+    be compiled for iOS and macOS, which the sandbox cannot.
+  - *Words.* The send preview is decoded at the size it is drawn
+    (P3-41). `/channel list`'s flags, the admin lists' "no roles",
+    "key …", "uses …", "(revoked)", and the nine fixed reasons an
+    admin command is refused are in the three catalogs (P3-30). Left
+    in English on purpose: the restriction kinds (`voice`, `text`, …),
+    which are what an admin types, and a reason the server wrote
+    itself.
+  - *Tests.* `tools/chat-scroll-sim` covers the row cap: appends at
+    500 rows at the bottom, the one trim above a reader who has just
+    scrolled up, the held list to 2,000 rows and past it, and 1,502
+    rows leaving at once after the jump back — the view never moves
+    (P3-43; no bug found). The transport simulator runs the four
+    things it never had: a session the server forgot is reset at the
+    client's next packet, a refused stream (STOP_SENDING) costs one
+    group, voice into a stalled link is dropped, counted and reported
+    once, two tracks over a reordering link each arrive whole and in
+    order (P3-4). `a_report_reaches_the_moderators…` no longer waits
+    500 ms of *simulated* time for a write the database thread does in
+    real time (it failed about one run in five on a busy disk).
+  - *The host script.* `setup.sh` no longer sets `net.core.*_default`
+    (every socket on the box; the server sizes its own) or mentions
+    0.5's `netcode.key`. The operator's guide is `web/deploy.html`
+    alone — the readme's copy is a pointer, and the two details it
+    had over the page moved there (P3-52). *Left:* the cloud-init
+    hotplug switch, which is a decision about the host, not a trim.
+- **2026-10-12 — 1.2.1, the review's seventh batch** (§2a): what was
+  left, as far as it can go without the machines. `DEVICE-CHECKLIST.md`
+  marks its lines **[7]** and has a macOS section now.
+  - *Admin lists of any length* (P0-1, the rest). Feature bit
+    `ADMIN_PAGES` (19) and one new message, `AdminRows`: a listing
+    longer than one 17 KiB message goes out as pages — the rows ahead
+    as `AdminRows`, then the `AdminResult` that closes the answer —
+    and the client joins them before the app sees one list
+    (`network::AdminPages`). A session without the bit gets the first
+    page, as before. At most 64 messages an answer. Reports go through
+    the same path (200 of them at their longest are 34 messages; they
+    were cut to six). A typed `/users`, `/bans`, `/invites` or
+    `/reports` prints 150 rows and says how many more the panel has.
+  - *Keybinds without a clock* (P1-3 step 2, P2-30). The watcher is a
+    crate of its own, `keywatch`: it sleeps until a key a binding
+    names changes — Windows Raw Input, a listen-only event tap on
+    macOS, XInput2 raw events on X11 — and reads the key state then,
+    a few times more, and every 12 ms only while a binding is held.
+    Measured on X11 (a virtual display, keys from `xdotool`): 0 wakes
+    with the keyboard at rest, where it was about 166 a second; one
+    per event for keys nobody bound. The events are trusted only once
+    three presses have arrived with one; until then a 250 ms heartbeat
+    also reads, and a press it finds that no event announced sends the
+    watcher back to the 12 ms clock for good, with a log line.
+    **The Windows and macOS halves were type-checked and linted for
+    their targets and never run.** On macOS the Accessibility prompt
+    comes only from a button in Settings → Keyboard, which shows only
+    while the permission is missing.
+  - *The phones' shared parts* (P3-44, P3-45, P3-50). One log writer
+    for both (`app_core::logfile::FileSink`), which rolls the log over
+    at 5 MB as it is written — it was at launch only; one panic hook
+    for the desktop and both phones; one safe-file-name and
+    never-overwrite pair (the desktop's Downloads uses it too) and one
+    pick slot (`app_core::files`). A phone build no longer carries
+    `sysinfo`: its CPU and memory figures are `getrusage` and
+    `/proc/self/statm` or `task_info` (`app_core::usage`, tested on
+    Linux and type-checked for both phones). iOS's memory figure is
+    the footprint now.
+  - *Android, unbuilt* (P2-27, P2-28, P3-46). A saved file is written
+    by Rust to a descriptor `MediaStore` hands over, on a thread of
+    its own (every platform's save left the UI thread) — it crossed
+    into the Java heap whole. The room's wake lock lasts 10 minutes a
+    time and is taken again when a reconnect starts. A release build
+    is arm64-v8a unless told otherwise (`gradle.properties` said both
+    ABIs for every build). The host's Rust was type-checked in a
+    scratch crate and the Java compiles against API 34's
+    `android.jar`; **Gradle has not built it and no phone has run it —
+    the wake lock is the line to check first.**
+  - *Video on Apple hardware* (P2-42, P2-43). `h264_videotoolbox` is
+    tried before libx264 (hardware only, `realtime`); a Mac that
+    cannot open it gets libx264 as before. iOS's decoder hands its
+    picture on as BGRA (`PictureFormat::Bgra`) and the display swaps
+    two bytes a pixel as it writes its own buffer: one pass and no
+    cleared buffer per frame, where there were two and one. The iOS
+    half is type-checked for iOS; neither was run.
+  - *Edition 2024 for `audio` and `video`* (P3-49, the rest).
+    Type-checked on Linux, for Windows and Android, and `video` for
+    iOS; `audio`'s iOS code was read for what the edition rejects.
+    Sixteen nested `if`s became let-chains (clippy denies them there).
+  - *The workflows* (P2-60 and P3-48, in part). The release checks its
+    tag against the workspace version in a first job, not the last;
+    the `version` file goes to R2 in a step of its own after the zips.
+    The Linux package lists lost what no crate links (`libopus`,
+    `libdbus`, and for the release Xinerama, Xft, Xrender, pango,
+    cairo); `cargo-ndk` is a pinned prebuilt. All four workflows pass
+    `actionlint`; none has run.
+  - *The host script* (P3-52, the rest). The cloud-init hotplug switch
+    is written only where there is a cloud-init, said in the script's
+    output, and left alone (or taken back) with
+    `KEEP_CLOUD_INIT_HOTPLUG=1`.
+  - *Not done, and why.* The pointer in a share (P2-25; §6, 9). The
+    WASAPI loops still do not share `pump.rs` (P3-27): a refactor of
+    real-time Windows code with nothing to gain but lines, not done
+    unrun. One release workflow in place of four (P2-60): merging
+    them makes one platform's failure everyone's — the website's
+    deploy waits for the release workflow to succeed — so it wants a
+    decision on that and a dry run, not a guess. The server half of
+    P2-51 (decided against: its teardown is one function already).
+    The migration that drops unused telemetry columns (it deletes
+    data). App Store questions (§6, 2).
+- **2026-10-12 — 1.2.1, after the first iPhone look.** Two things
+  the phone showed, both the same on every platform.
+  - *Settings → Audio opens the microphone.* The capture bar was dead
+    unless in a room (and on the desktop unless connected), so there
+    was no setting a microphone up before a call. While the tab is on
+    screen the microphone is open: not connected, on an engine with
+    no session, whose packets are never sent and which mute and
+    push-to-talk do not close (`VoiceControl::Start` without a client
+    id, `VoiceLink::local_only`); in the lobby or the AFK room, on the
+    session's engine with the packets and the speaking light kept
+    here. It ends with the tab, with Settings, and with a phone app
+    leaving the screen. A microphone test not connected with
+    push-to-talk chosen was silent for the same reason, and is not
+    now. On Windows 10 the tab's streams are a room's, so other apps
+    may get quieter while it shows.
+  - *The meters are eased.* 20 readings a second while the Audio tab
+    shows, a rise taken at once and a fall over 300 ms
+    (`app_core::meter`, 6 tests), a bar set only when it moved, and
+    the bar gliding to each value over 80 ms (`animate width` is back,
+    now that it only draws while a bar moves on that one tab); 8
+    readings a second drawn as read stepped. The first cut of this
+    (30 readings, 150 ms, no glide) was reported from the phone as
+    jumping, and a bar seen to step. The echo-cancellation line beside
+    them is looked at 4 times a second.
+  - *A phone's microphone test plays back a second late*
+    (`audio::LOOPBACK_DELAY`, 4 tests on the delay line). Live through
+    the loudspeaker it sounded about to feed back: the canceller was
+    taking the user's voice out of the microphone while they were
+    still saying it. The desktop's is live as it was.
+  - *Open from the phone*: the report was also that the Test button,
+    not the tab, opened the microphone. Both reach the engine through
+    the same function with the same commands. A second look with this
+    build gave one log line — the tab and a test both on, not
+    connected, an engine already running — which rules out an old
+    build and a tab that is never noticed, and does not say whether
+    the bar moved before the test. Read again from the tab to the
+    bar (the page's `changed` handlers, the timer's pace, the engine's
+    start, the voice unit, the capture pump, the level, the network
+    thread's unbounded queue): no fault found. What is left is the
+    voice unit's start-up, a second or so in which the bar is dead
+    and a test gets pressed — a guess until measured. The line logged
+    when the tab leaves now measures it (`app_core::meter::Run`, 2
+    tests): when an engine stood behind the meters, when the
+    microphone was first heard with no test running, and the peaks
+    with and without one. The `microphone:` lines name which engine
+    they are about; the one sent back said "the session's engine" of
+    an engine with no session. An engine is counted as the session's
+    from `Init`, not `Connected`, so a tab opened between the two is
+    not left without one.
+  - *Checked*: Linux type-check and lint of all of it; the ease and
+    the engine's mute rule by unit test; the client and `app-core`
+    type-checked for Windows and Android. **Not run**: there is no
+    audio device in the sandbox and the app's own tests do not fit on
+    its disk. `DEVICE-CHECKLIST.md` marks the lines **[8]**.
+- **2026-10-12 — 1.2.1, the check before a release.** Every id of the
+  review (§2a) read against the code again, by four separate readers
+  told to judge the code and not this file; the documents against the
+  review's list of 24; and the whole tree built, linted and tested.
+  - *The numbers.* After what was fixed here, 127 of the 143 ids are
+    fixed as the review asked; 14 are fixed in part (below); P2-25 is
+    open; P2-29 is a decision (§6, 2). 802 tests pass in the sandbox
+    and the same six that need a real UDP socket do not; lint is where
+    it was; Windows, Android, macOS (`keywatch`) and iOS (`video`)
+    type-check.
+  - *Found, and fixed here.*
+    - **Two files dropped together lost the first** (P1-17, which
+      this file called done). The server holds one announced upload a
+      session; the client announced both at once, and the first was
+      refused. The client now takes turns (`client/src/upload_turns.rs`,
+      3 tests): one blob with the server, the rest waiting unannounced
+      — against every server shipped. The integration test's stand-in
+      server accepted every announcement, which is why it passed; it
+      keeps the real rule now, and fails without the queue (run here
+      with the loop forced onto its polling fallback).
+    - **A ban of an equal left them in the room** (as old as 1.1). The
+      ban command may name anyone short of an administrator; the rank
+      rule that spares whoever else shares the key or address spared
+      the person named too. They leave at once now (e2e test).
+    - **A `server` restriction takes the ban permission by any
+      command** (the rest of P2-10): `Restrict` asked for it only when
+      the target was a key or an address (e2e test).
+    - **The lobby's progress stays in the lobby** (the rest of P2-1):
+      the once-a-minute `UserProgress` and a level-up's `UserDetails`
+      go through `audience_about` like the rest.
+    - **No Copy in the image viewer on a phone** (the rest of P3-31).
+    - **The site is deployed after a release's build only**
+      (`web.yaml`): since P2-50 "Build and Release" also runs on every
+      push to `main`, and each of those runs deployed the site again.
+    - *Documents*: the readme's edition line, START-HERE's decision
+      ranges, IOS-SPEC's D57–D60 in order, three comments naming
+      toolkits long gone. P2-36, P3-19 and P3-32 were done in earlier
+      batches and had no line here; they are named now.
+  - *In part, and left so.* By decision: P2-40 (the glide is back, the
+    timer idles at 2 s off the Audio tab), P2-49 (5 s), P2-51 (the
+    server half), P2-60, P3-27, P3-52 (the hotplug switch is said and
+    can be kept). Not finished, and no user would see it: P2-11 (file
+    references are recounted at startup, not after a prune), P2-27
+    (a saved picture and an exported key are still written from the UI
+    thread on Android), P2-32 (about twenty broadcasts still encode per
+    recipient), P2-54 (three switches nothing turns are still read
+    every frame), P2-58 (the admin confirmation is its own dialog, and
+    does not hear Android's Back), P3-23 (the lobby's two threads tick
+    slowly where the review asked them to block), P3-48 (macOS still
+    installs opus; two `rustup` calls without `--profile minimal`),
+    P3-49 (the `objc2` family is declared per crate).
+  - *Seen, and not touched.* A DM store already running when its 2 s
+    deadline passes is stored after the sender was told it failed (a
+    second copy if they try again; it takes something holding the
+    database for 2 s). A share's sound that fails to restart once
+    stays off until the device changes or the share is restarted.
+    `limits.max_chat_bytes` above about 16 KiB makes "Load earlier"
+    ask for the same page for ever (the default is 2000). The release
+    builds `-p desktop -p server` together, so the server's
+    certificate code is compiled into the desktop (P3-3's saving is
+    the phones'). `LATENCY-SPEC.md` was named by START-HERE and CLI-16
+    and was not in the repository: old, and dropped the same day; what
+    CLI-16 still means to do is in its own lines.
+  - *What a release still needs — none of it is code.* (1) `pr-check`
+    green on the branch: it runs the app's own tests and the six this
+    sandbox cannot. (2) A build on Windows and on a Mac: no workflow
+    compiles either before the release does, and the Windows and macOS
+    halves of the app itself were never type-checked here. (3)
+    `DEVICE-CHECKLIST.md`: 133 lines, none ticked — the voice,
+    ducking and keybind sections on Windows first. (4) The dry runs
+    the phone and Docker workflows have (`workflow_dispatch`). (5)
+    Merge and publish in one sitting: a push to `main` that changes
+    `Cargo.lock` or `web/` deploys the site with the new version's
+    download links at once, and they lead nowhere until the release's
+    builds have uploaded; the APK's a little longer, its workflow
+    being its own (P2-60).
+- **2026-10-12 — 1.2.1, the last asks before the release.** The user
+  has built and run the branch on Windows, macOS, Linux and an iPhone
+  ("works well"; Android and the server still to try), which is what
+  the entry above said a release was waiting for.
+  - *The mouse pointer in a Windows share* (P2-25, the last open id).
+    Desktop Duplication gives the desktop without it and describes it
+    beside each frame; `dxgi.rs` keeps the description and draws the
+    pointer into the copy (`video/src/pointer.rs`: the three kinds
+    Windows has — colour with alpha, masked colour, the two-mask
+    monochrome one of the text caret — clipped at the edges; 6 tests,
+    which run on Linux). A move with nothing else changing is a frame
+    of its own, read again from the staging texture, and one that
+    found the queue full is retried every 8 ms, so the pointer does
+    not stop a frame behind where it stopped. The silence probe
+    compares everything but the pointer's rectangle: a screenshot has
+    no pointer, and compared whole it would have replaced the picture
+    with one two seconds after every stop. Known edges: a share of a
+    screen where nothing at all changes shows the pointer from the
+    first change (the first picture is a screenshot); the screenshot
+    fallback (an HDR desktop) still has none. Type-checked and linted
+    for Windows; **never run**.
+  - *A phone's microphone test plays back half a second late* (it was
+    a second; `audio::LOOPBACK_DELAY`). The hint says so in the three
+    languages.
+  - *No "Done." in the chat.* A kick, a mute or a move from a menu
+    printed it into whatever conversation was open. A menu pick now
+    says nothing when it works (what it did shows where it was
+    picked); a typed command, which has no other answer, gets a line
+    in the activity log — `/unban bob: done`. Lists and refusals land
+    in the chat as before.
+  - *The image viewer is full screen on a phone* (and in any window
+    under 600 px): no margins, the picture edge to edge under the
+    title row, the two arrows on the picture's own edges and only
+    where there is a step to take, clear of the notch. It was under
+    two thirds of the width: 16 px each side and a 40 px arrow column
+    each side. Rendered at 375 × 812 and 1100 × 700; the wide layout
+    is as it was.
+  - *`LATENCY-SPEC.md`* is no longer named anywhere (old, the user).
+  - *Checked*: the tree builds, lints where it was and passes its
+    tests on Linux; `video` and `client` type-check for Windows and
+    Android. The pointer, the viewer on a real phone and the delay by
+    ear are the user's to look at; `DEVICE-CHECKLIST.md` has the
+    lines.
+
 ## 8. Facts this plan rests on
 
-- **Tests, 2026-10-09, Linux sandbox**: protocol 86 + the versions
-  test, transport 45, server 51 unit + 88 e2e — all green; the chat
-  pane's 48 scrolling checks (`tools/chat-scroll-sim`) pass.
-  Windows-only code (`wasapi.rs`, DXGI) is not compiler-checked here.
-  Android: the Java compiles against API 33's real `android.jar`, the
-  Rust JNI code type-checks in a scratch crate; iOS: the app
-  type-checks with `-Zbuild-std` clippy. Nothing was run on a device.
+- **Tests, 2026-10-12, Linux sandbox**: protocol 91 + the versions
+  test + 3 wire-pinning tests, transport 61, server 70 unit + 99 e2e,
+  client 57, app-core 120, audio 164, video 77 + 6, i18n 2 — all
+  green. Six more need a real machine:
+  that sandbox does not signal UDP readiness, so the socket-wait tests
+  (`transport` `udp::read_waiter_tests`, 3; `client` `inbound_wake`,
+  `network_idle.rs`, `network_uploads.rs`) cannot pass there. The
+  frontend type-checks for the phones and the desktop. The chat
+  pane's scrolling checks (`tools/chat-scroll-sim`) passed again on
+  2026-10-12, after the unread UI properties were removed, and once
+  more the same day after the fourth batch's `chat.slint` changes.
+  Windows-only code in `transport`, `audio`, `video`, `client` and
+  `server` type-checks for `x86_64-pc-windows-gnu`, and Android-only
+  code in `audio`, `video` and `client` for `aarch64-linux-android`
+  (SESSION-GUIDE §1; first done 2026-10-12 — the WASAPI and socket-wait
+  changes of the P1s had never been compiled before). Not covered: the
+  frontend's Windows and macOS code, anything iOS, the `android` crate
+  beyond its JNI module, Gradle and the Java. Nothing was run on a
+  device.
 - **The release pipeline** (every build first refreshes the
   third-party notices, `licenses.yml`):
 

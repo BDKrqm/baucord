@@ -40,9 +40,18 @@ impl AppState {
     }
 
     #[allow(clippy::cast_precision_loss)]
+    /// The share is over: stop its timer and clear the stats line (it
+    /// kept showing the last sample).
+    pub(super) fn stop_stream_stats(&mut self) {
+        self.stream_stats_timer.stop();
+        self.stream_viewers_seen = 0;
+        self.main.global::<State>().set_stream_stats("".into());
+    }
+
     pub(super) fn update_stream_stats(&mut self) {
         if !self.screen.shared.is_sharing.load(Ordering::Relaxed) {
-            self.stream_viewers_seen = 0;
+            // The share ended without its event reaching us.
+            self.stop_stream_stats();
             return;
         }
         let sh = &self.screen.shared;
@@ -109,17 +118,34 @@ impl AppState {
     /// 2-second sample by themselves.
     pub(super) fn host_shown(&mut self) {
         self.clear_seen_notices();
+        // The roster changes the background held back (review P1-9).
+        self.flush_roster();
         // Android: a room entered while off screen could not have its
         // microphone type (a background start); on screen it can.
         if cfg!(target_os = "android") {
             self.sync_keep_alive(true);
         }
-        let animating = self.gallery_gif.is_some()
-            || self.preview_gif.is_some()
-            || self.gifs.values().any(GifPlayer::playing);
-        if animating {
-            self.ensure_gif_ticker();
-        }
+        self.resume_gifs();
+        // Settings' Audio tab, if that is what comes back: its meter
+        // and the microphone behind it, without waiting for the
+        // settings timer's slow tick.
+        crate::settingsui::sync_audio_tab(self);
+    }
+
+    /// A phone app left the screen (`set_host_visible`). The Audio
+    /// tab's microphone goes with it, at once: out of a room nothing
+    /// may record behind the user's back, and an open microphone would
+    /// keep iOS from suspending an app that is not even connected.
+    pub(super) fn host_hidden(&mut self) {
+        self.set_audio_tab_open(false);
+    }
+
+    /// The desktop's main window is back in view (out of the tray,
+    /// restored, uncovered): what waited for that happens now.
+    pub(crate) fn main_revealed(&mut self) {
+        // A roster held back while out of sight (review P1-9).
+        self.flush_roster();
+        self.resume_gifs();
     }
 
     /// `/mem`: where the client's memory goes, from what it holds. The
@@ -131,22 +157,13 @@ impl AppState {
     /// allocator's slack are the remainder.
     #[allow(clippy::cast_precision_loss)]
     pub(super) fn memory_report(&mut self) -> String {
-        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
         let mb = |bytes: usize| bytes as f64 / (1024.0 * 1024.0);
         let texture = |img: &slint::Image| {
             let size = img.size();
             size.width as usize * size.height as usize * 4
         };
-        let rss = self.pid.and_then(|pid| {
-            self.sys.refresh_processes_specifics(
-                ProcessesToUpdate::Some(&[pid]),
-                false,
-                ProcessRefreshKind::nothing().with_memory(),
-            );
-            self.sys.process(pid).map(sysinfo::Process::memory)
-        });
         let rss = crate::resources::native_monitor_memory()
-            .or(rss)
+            .or_else(|| self.usage.resident())
             .map_or_else(|| "?".to_string(), |b| format!("{:.0} MB", mb(b as usize)));
 
         // Chat rows and their pictures, over every conversation.
@@ -162,7 +179,7 @@ impl AppState {
             }
         }
         let mut parked_rows = 0usize;
-        for conv in self.parked.values() {
+        for conv in self.session.chat.parked.values() {
             parked_rows += conv.model.row_count();
             for i in 0..conv.model.row_count() {
                 if let Some(row) = conv.model.row_data(i)
@@ -187,44 +204,36 @@ impl AppState {
              {} GIF players ({gifs_playing} playing)\n\
              avatars: {} decoded, {:.1} MB (+{:.1} MB ours)\n\
              roster: {} users, {} profiles; {viewers} stream viewers open",
-            self.parked.len(),
+            self.session.chat.parked.len(),
             mb(preview_bytes),
             mb(compressed),
             self.gifs.len(),
             self.avatar_images.len(),
             mb(avatars),
             mb(own_avatar),
-            self.users.len(),
-            self.profiles.len(),
+            self.session.users.len(),
+            self.session.profiles.len(),
         )
     }
 
     #[allow(clippy::cast_precision_loss)]
     pub(super) fn sample_resources(&mut self) {
-        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
-
         // Sample only when someone can actually see the result. The
         // check comes first so a hidden/minimized app pays nothing —
-        // not even the process-table refresh.
-        let Some(pid) = self.pid else { return };
+        // not even the look at the process.
         if !self.main_on_screen() {
             return;
         }
-        self.sys.refresh_processes_specifics(
-            ProcessesToUpdate::Some(&[pid]),
-            false,
-            ProcessRefreshKind::nothing().with_memory().with_cpu(),
-        );
-        if let Some(proc) = self.sys.process(pid) {
-            // cpu_usage() is % of one core; normalize to % of the whole
-            // machine (task-manager style).
+        if let Some((cpu_one_core, resident)) = self.usage.sample() {
+            // % of one core; normalize to % of the whole machine
+            // (task-manager style).
             let cores =
                 std::thread::available_parallelism().map_or(1, std::num::NonZero::get) as f32;
-            let cpu_pct = proc.cpu_usage() / cores;
+            let cpu_pct = cpu_one_core / cores;
             // Memory: the platform-native figure (what the user's own
-            // task monitor shows), with sysinfo's RSS as the fallback.
-            let mem_bytes =
-                crate::resources::native_monitor_memory().unwrap_or_else(|| proc.memory());
+            // task monitor shows), with the resident size as the
+            // fallback.
+            let mem_bytes = crate::resources::native_monitor_memory().unwrap_or(resident);
             let mem_mb = mem_bytes as f64 / (1024.0 * 1024.0);
             self.main.global::<State>().set_resource_line(
                 t!("resource-line",
@@ -245,11 +254,6 @@ impl AppState {
     pub fn save_settings_now(&mut self) {
         self.save_window_geometry();
         self.settings.save();
-    }
-
-    /// Keep a timer alive for the app's lifetime.
-    pub fn hold_timer(&mut self, timer: slint::Timer) {
-        self.timers.push(timer);
     }
 
     pub fn show_error(&mut self, error: &str) {
