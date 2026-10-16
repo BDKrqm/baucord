@@ -19,6 +19,22 @@
 > type-checked on Linux only (it is the same on every platform), the
 > engine's rule for it is unit-tested.
 
+> **The client asks of 2026-10-14:** pictures decoded only while on
+> screen, tooltips drawn above everything, long press on the phones,
+> the tray's icon and menu, a sound for mute. Lines marked
+> **[10-14c]**; the `.slint` behaviour was driven headless on Linux,
+> the Rust type-checked there (desktop with the tray, and the phones'
+> `frontend`), nothing run on a device.
+
+> **2026-10-15:** Settings and the admin panel are pages over the
+> main window on every host (no more windows of their own), and the
+> admin panel works on the phones. Lines marked **[10-15]**; the real
+> main window was driven headless on Linux (Escape, Back, recording a
+> key, the confirmation, taps) at desktop, small-window and phone
+> sizes in the three languages; the Rust type-checked (desktop with
+> the tray, the phones' `frontend`); nothing run on a device or a
+> desktop OS.
+
 Each line is *do this → expect that*. `log:` is a line to find in
 `baucord.log` (desktop: Settings → Debug shows it and copies it;
 phones: `adb logcat -s baucord`, `ios/run.sh`'s stream). The tag in
@@ -256,6 +272,84 @@ Play music in another app first, at a steady volume.
   card: the window keeps responding while it is written, then the
   toast says where it went and the card offers Open [P2-27].
 
+- [ ] **new [10-14c]** — post or receive ten pictures, then "Load
+  earlier" a few times in a busy General: Task Manager's memory rises
+  by a few MB a screen of pictures, not ~2 MB a picture, and settles;
+  `/mem` says "N pictures: K decoded" with K a dozen or so at most.
+  Scroll back up over them: each picture fades in within a moment at
+  its own size, and nothing jumps.
+- [ ] **new [10-14c]** — a GIF still plays on arrival and on hover,
+  and goes back to its first frame after.
+- [ ] **new [10-14c]** — hover the emoji and attach buttons beside the
+  composer, the sidebar's bottom bar, the Invite / New channel chips
+  and the chat header's buttons: each tooltip is drawn over the
+  sidebar and the channel list, never under them, and stays inside
+  the window at its edges. Moving along the bottom bar, the next one
+  comes at once.
+- [ ] **new [10-14c]** — the tray icon is the flat dog's head, legible
+  at 100 % and 150 % scaling; mute (button, keybind or tray) turns it
+  red, unmute back. Deafened, red too.
+- [ ] **new [10-14c]** — right-click the tray icon while in a voice
+  room: Mute / Deafen (they read Unmute / Undeafen when on, and act),
+  then, after a separator and in the menu itself (no submenu), one
+  item per other person in our room, "Mute Ana" / "Unmute Ana" —
+  nobody from another room; picking one mutes them for us only (the
+  roster shows the local-mute tint) and the item turns to "Unmute
+  Ana". Someone joining or leaving our room appears or goes from the
+  menu. In the lobby or the AFK room, no people; disconnected, only
+  Show and Quit. **[10-15]**: the people were in a submenu named
+  after the room.
+- [ ] **new [10-14c]** — mute and unmute: one soft low note, then a
+  slightly higher one; deafen the same. Settings → Sounds → "Mute and
+  deafen" off silences only those.
+- [ ] **new [10-15]** — open Settings (the gear, or the connect
+  page's pencil): it covers the window, its sections where the
+  sidebar was; no second window opens. Escape, or Save and close,
+  brings the chat back as it was (its scroll, a half-typed message).
+  Change the language or the text size there: the page follows at
+  once.
+- [ ] **new [10-15]** — Settings → Keyboard: Record, press a combo:
+  it is taken; Record again and press Escape: only the recording is
+  cancelled; Escape again closes Settings. The new bind works.
+- [ ] **new [10-15]** — Settings on Audio, then close the window to
+  the tray: the microphone closes (Windows' microphone icon goes);
+  Show from the tray: Settings is still open and the meter moves.
+- [ ] **new [10-15]** — the Admin chip: the panel covers the window,
+  its tabs on the left; every tab fills. Users: each person has
+  "Actions ▾" beside the role picker; it opens a menu under it
+  (Disconnect…, greyed while they are offline; Kick…, Ban…; Reset
+  profile…, Purge…). Ban someone from it: the confirmation asks;
+  Escape closes only it, a second Escape the panel. Escape with the
+  menu open closes only the menu. Invites → Create invite: the invite dialog shows over the
+  panel; close it and press Escape: the panel closes (the keyboard
+  came back to it).
+- [ ] **new [10-15]** — Settings: change the language, the text size,
+  the microphone and a keybind, then press Close (not Save and
+  close): each goes back to what it was, at once, and after a restart
+  too. Change one again and press Save and close: it stays. Escape
+  saves, as before. Pick a new picture, then Close: the old one is
+  back, and nobody else saw the new one.
+- [ ] **new [10-15]** — maximize the window with Settings, then the
+  panel open: the content keeps to a column beside the tabs, its
+  buttons right under it (Save and close under the form, a person's
+  Actions and role beside their name, the panel's Close under the
+  list).
+- [ ] **new [10-15]** — every dropdown (Settings → General's Language,
+  the admin panel's role picker and Actions) shows a chevron at its
+  right, not a square; the sidebar's status reads "● Connected" with a
+  round dot, and the line under it "… | ↑0.1 ↓0.3 Mb" with arrows. On
+  the phone too (§2.3).
+- [ ] **new [10-15]** — make the window narrower with the panel open:
+  under about 830 px the rows stack (a person's actions on two lines,
+  the audit as two-line entries); under 600 px Settings and the panel
+  become a list and a page with an arrow back, as on the phone.
+- [ ] **new [10-15]** — the main window's title bar and a stream
+  viewer's (which had none) show the tray's flat dog, as do their
+  taskbar buttons and Alt-Tab while the app runs; the exe in Explorer,
+  the Start menu and a pinned shortcut keep the painted icon. At 100 %
+  and 150 % scaling. (Linux on X11: the same glyph in the title bar
+  and the task list.)
+
 ### 1.6 Keybinds without polling [P1-3 step 2] **[7]**
 
 The watcher sleeps until Windows reports a key (Raw Input) and reads
@@ -415,6 +509,37 @@ agrees with it.
 - [ ] **same** — watch a stream: picture and sound, rotate, leave the
   app and come back (the picture returns at once) [P1-7, P2-44].
 
+- [ ] **new [10-14c]** — hold a finger on a person in the roster:
+  their card shows; lift it: the card goes and no menu opens. A quick
+  tap still opens their menu.
+- [ ] **new [10-14c]** — hold a finger on a voice channel: its menu
+  opens and lifting does not join it. A tap joins.
+- [ ] **new [10-14c]** — tap a picture: the gallery. Hold: its menu,
+  and lifting does not open the gallery. Hold an avatar in chat: the
+  author's card, no menu.
+- [ ] **new [10-14c]** — no tooltip ever shows on the phone.
+- [ ] **new [10-15]** — as an admin, tap the Admin chip: a list of
+  the panel's nine tabs. Tap one: its page, filled; Back: the list;
+  Back: the chat. Every tab reads at 360 dp without anything cut
+  that matters (a long name, a ban's reason, a reported message in
+  full), and the row buttons are easy to hit.
+- [ ] **new [10-15]** — Users: each person's name across the width,
+  "Actions ▾" and the role picker under it. Tap Actions: the menu
+  opens under it; Ban…: the confirmation's reason field stays above
+  the keyboard; Back closes only the confirmation, the next Back the
+  tab. Change someone's role with the picker.
+- [ ] **new [10-15]** — Settings: the footer is Close and Save and
+  close; Reset to defaults is the list's last row, in red, and turns
+  the footer into the question. Change something, then Close: it goes
+  back.
+- [ ] **new [10-15]** — no squares where a symbol should be: the
+  dropdowns' chevrons, the dot before "Connected", the arrows by the
+  transfer rates; `/users` says "now" for whoever is online and
+  `/reports` "handled" after a dealt-with report.
+- [ ] **new [10-15]** — Roles → New role: the badge's glyphs and
+  colours wrap into rows; pick one of each, Save; the role shows with
+  its badge.
+
 ### 2.4 The seventh batch, written without a phone **[7]**
 
 - [ ] **new** — **the one to do first.** In a room, screen off, phone
@@ -561,6 +686,8 @@ after it is the seventh batch's.
 - [ ] Everything under §2.3 but Back: dialogs close on Cancel and on a
   tap outside.
 - [ ] **same** — watch a stream: picture, sound, pinch, rotate.
+- [ ] **new [10-15]** — the admin panel as in §2.3, the top bar's
+  arrow standing in for Back.
 
 ### 3.4 The seventh batch **[7]**
 
@@ -639,6 +766,19 @@ silicon, and an Intel one if there is one.
   (a VM): log `Encoder h264_videotoolbox failed to open, trying next`,
   then `libx264`, and the share works.
 
+- [ ] **new [10-14c]** — the menu-bar icon reads at its size in light
+  and dark menu bars, and turns red while muted or deafened; its menu
+  as on Windows (§1.5).
+- [ ] **new [10-14c]** — start, send ten pictures, scroll up and down
+  over them, "Load earlier" twice: Activity Monitor's memory stays
+  within ~20–30 MB of where it started instead of doubling; `/mem`
+  says how many pictures are decoded.
+
+### 4.3 Settings and the admin panel as pages **[10-15]**
+
+- [ ] **new [10-15]** — the five §1.5 lines marked **[10-15]** on the
+  Mac; recording a keybind there with Accessibility granted (§4.1).
+
 ---
 
 ## 5. A server host
@@ -662,6 +802,25 @@ Not a client platform, but changed blind all the same.
   to stay in the room until they next reconnected.
 - [ ] **new** — a role with "restrict" and without "ban" can still
   mute and text-restrict from the menu, as before.
+
+**[10-14]** — the second review's server and transport fixes, run in
+the simulator only:
+
+- [ ] a file between 5 and 50 MB posts in General on the official
+  server (it was refused as "today's upload allowance"); a second big
+  one within the same minute says "the server refused the upload"
+  [SRV-1].
+- [ ] a picture posted while 10+ people are online reaches all of
+  them, and the server's memory (`docker stats`) rises by about one
+  copy of it, not one per person [PT-2].
+- [ ] voice in two rooms at once on a busy evening: nothing changes to
+  the ear; `Voice — RX/FWD` stats lines as before [SRV-7].
+- [ ] `docker pause baucord` for a minute, then `unpause`: the log
+  says `wall clock moved forward … ms` within a second, and a message
+  sent right after carries the right time [SRV-13].
+- [ ] `server user mute <name>` from the host's shell: the person's
+  app shows them muted within ~3 s; `server restriction lift <id>`
+  unmutes it [SRV-12].
 
 ### 5.1 The workflows **[7]**
 

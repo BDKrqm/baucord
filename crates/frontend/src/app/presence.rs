@@ -24,7 +24,7 @@ impl AppState {
         // rebuild-the-main-view path.
         self.history.clear();
         self.chat_model.set_vec(Vec::new());
-        self.images.clear();
+        crate::pictures::clear();
         self.gifs.clear();
         self.reset_chat_flow();
 
@@ -102,7 +102,7 @@ impl AppState {
         }
 
         let s = self.main.global::<State>();
-        s.set_status_text(format!("●  {}", t!("status-connected")).into());
+        s.set_status_text(t!("status-connected").into());
         s.set_status_color(slint::Color::from_rgb_u8(0x2B, 0xAC, 0x76));
         // The name is the sidebar's title and the greeting the General
         // header's second line: neither repeats in chat on every login.
@@ -261,6 +261,13 @@ impl AppState {
     /// In a voice room: a session, and a room in it that carries voice.
     pub(super) fn in_voice_room(&self) -> bool {
         self.session.our_client_id.is_some() && !self.out_of_voice()
+    }
+
+    /// The tray's icon and menu, after anything they show may have
+    /// moved (the desktop with the `tray` feature; nothing elsewhere).
+    pub(super) fn sync_tray(&self) {
+        #[cfg(feature = "tray")]
+        super::tray::sync(self);
     }
 
     /// The channel we are currently in, per server echo.
@@ -634,16 +641,11 @@ impl AppState {
     }
 
     /// Push the "Text size" setting to every window's Theme (globals
-    /// are per window instance).
+    /// are per window instance): the main window's, which Settings and
+    /// the admin panel share, and each stream viewer's.
     pub fn apply_text_scale(&self) {
         let scale = self.settings.ui.text_scale;
         self.main.global::<ui::Theme>().set_scale(scale);
-        if let Some(win) = &self.settings_win {
-            win.global::<ui::Theme>().set_scale(scale);
-        }
-        if let Some(win) = &self.admin_win {
-            win.global::<ui::Theme>().set_scale(scale);
-        }
         for viewer in self.viewers.values() {
             viewer.apply_text_scale(scale);
         }

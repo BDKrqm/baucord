@@ -9,7 +9,7 @@ error-nickname-empty = Nickname cannot be empty
 # ── Missing-device warning ──────────────────────────────────────────────
 device-missing-mic = mic "{ $name }"
 device-missing-output = output "{ $name }"
-device-warning = ⚠ Saved { $devices } not connected
+device-warning = Saved { $devices } not connected
 device-warning-hint = Open Settings to pick another device
 list-and = and
 
@@ -21,6 +21,8 @@ tab-keyboard = Keyboard
 tab-credits = Credits
 tab-about = About
 save-and-close = Save and close
+# Settings' footer: leave without keeping what was changed since it opened.
+settings-close = Close
 reset-defaults = Reset to defaults
 reset-confirm-body = Every setting goes back to its default, including your saved servers, nickname and picture.
 reset-confirm = Reset everything
@@ -92,7 +94,7 @@ chat-server-muted-locked = You are muted by the server; you can unmute once it l
 chat-your-roles-changed = Your roles are now: { $roles }
 roles-none = none
 reason-none = (no reason given)
-chat-admin-users-header = { $count } user(s) of record (● online):
+chat-admin-users-header = { $count } user(s) of record:
 chat-admin-list-more = … and { $count } more. The admin panel lists them all.
 chat-admin-restrictions-header = { $count } restriction(s):
 chat-admin-invites-header = { $count } invite(s):
@@ -140,7 +142,9 @@ live = Live
 stream-stats-quality = { $quality } · { $viewers } watching
 stream-stats-frame = { $kb }KB · { $ms }ms enc
 stream-stats-degraded = { $fps }% fps · loss { $loss }%
-latency-line = Audio: { $audio } | Net: { $network } | ↑{ $up } ↓{ $down } Mb
+latency-line = Audio: { $audio } | Net: { $network }
+# The transfer rates' unit, after the download rate (the arrows are drawn).
+latency-unit = Mb
 
 # ── Chat ────────────────────────────────────────────────────────────────
 send = Send
@@ -170,6 +174,11 @@ unknown-device = unknown device
 # ── Tray & viewer ───────────────────────────────────────────────────────
 tray-show = Show
 tray-quit = Quit
+tray-tip-muted = baucord — muted
+tray-tip-deafened = baucord — deafened
+# In the tray's menu, one item per person in our voice room: muting is for you alone.
+tray-mute-person = Mute { $name }
+tray-unmute-person = Unmute { $name }
 viewer-title = { $name }'s screen ({ $width }x{ $height })
 stop-watching = Stop Watching
 viewer-stats = { $res } { $fps }fps { $kbps }KB/s { $mb }MB | buf { $depth }/{ $target }ms jit { $jitter }ms
@@ -355,6 +364,9 @@ menu-unmute-chat = Unmute chat
 menu-disconnect = Disconnect…
 menu-kick = Kick…
 menu-ban = Ban…
+# The admin panel's Actions menu (Users tab): each asks first.
+menu-reset-profile = Reset profile…
+menu-purge = Purge…
 role-guest = Guest
 role-member = Member
 role-organizer = Organizer
@@ -503,6 +515,8 @@ sounds-lead = Which events play a sound.
 sounds-share-started = Someone in your channel starts sharing
 sounds-viewer-joined = Someone starts watching your stream
 sounds-viewer-joined-hint = Softer, and only you hear it.
+sounds-mute-toggle = You mute or deafen yourself
+sounds-mute-toggle-hint = A soft note: lower going quiet, higher coming back.
 sounds-enabled = Enable sounds
 sounds-enabled-hint = Off silences all sounds.
 sounds-join-leave = Someone joins or leaves your channel
@@ -691,6 +705,8 @@ admin-ban = Ban
 admin-reset-profile = Reset profile
 admin-purge = Purge
 admin-set-role = Set role…
+# A person's row in the admin panel: the button that opens their actions.
+admin-actions = Actions
 admin-roles = Roles
 admin-roles-lead = Permission sets. A role's standing follows what it can do.
 admin-holders = holder(s)
@@ -801,7 +817,6 @@ admin-channel-lead = The audit, as it happens. Slash commands work here: /kick, 
 admin-channel-commands-only = This channel takes commands only — start with /
 
 # ── Phone hosts (ANDROID-SPEC.md, IOS-SPEC.md; one window per process) ──
-host-single-window = Not available on phones yet — this opens in its own window on desktop.
 # iOS has no Quit (apps never close themselves there): what /quit says.
 quit-ios = On iPhone, apps close from the app switcher: swipe up from the bottom edge and pause, then swipe baucord away.
 # The attach sheet on iOS: where to pick from.
@@ -869,6 +884,8 @@ admin-act-report-user = reported
 admin-act-report-resolve = handled report
 admin-act-user-delete = deleted, at its owner's request, the account
 chat-admin-reports-header = { $count } reports, newest first
+# After a report /reports lists that was already dealt with.
+chat-admin-report-handled = handled
 chat-command-usage-resolve = Usage: /resolve <report number> (see /reports)
 # ── The connect card's terms line (1.2): the lead-in, then the link ──
 terms-notice = By connecting you agree to the

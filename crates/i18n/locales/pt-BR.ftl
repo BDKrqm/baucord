@@ -9,7 +9,7 @@ error-nickname-empty = O apelido não pode ficar vazio
 # ── Missing-device warning ──────────────────────────────────────────────
 device-missing-mic = microfone "{ $name }"
 device-missing-output = saída "{ $name }"
-device-warning = ⚠ { $devices } salvo(s) não conectado(s)
+device-warning = { $devices } salvo(s) não conectado(s)
 device-warning-hint = Abra as Configurações para escolher outro dispositivo
 list-and = e
 
@@ -21,6 +21,8 @@ tab-keyboard = Teclado
 tab-credits = Créditos
 tab-about = Sobre
 save-and-close = Salvar e fechar
+# Settings' footer: leave without keeping what was changed since it opened.
+settings-close = Fechar
 reset-defaults = Restaurar padrões
 reset-confirm-body = Todas as configurações voltam ao padrão, inclusive seus servidores salvos, apelido e foto.
 reset-confirm = Restaurar tudo
@@ -92,7 +94,7 @@ chat-server-muted-locked = O servidor silenciou você; poderá reativar o microf
 chat-your-roles-changed = Seus cargos agora são: { $roles }
 roles-none = nenhum
 reason-none = (sem motivo)
-chat-admin-users-header = { $count } usuário(s) registrados (● online):
+chat-admin-users-header = { $count } usuário(s) registrados:
 chat-admin-list-more = … e mais { $count }. O painel de administração mostra todos.
 chat-admin-restrictions-header = { $count } restrição(ões):
 chat-admin-invites-header = { $count } convite(s):
@@ -140,7 +142,9 @@ live = Ao vivo
 stream-stats-quality = { $quality } · { $viewers } assistindo
 stream-stats-frame = { $kb }KB · { $ms }ms cod
 stream-stats-degraded = { $fps }% fps · perda { $loss }%
-latency-line = Áudio: { $audio } | Rede: { $network } | ↑{ $up } ↓{ $down } Mb
+latency-line = Áudio: { $audio } | Rede: { $network }
+# The transfer rates' unit, after the download rate (the arrows are drawn).
+latency-unit = Mb
 
 # ── Chat ────────────────────────────────────────────────────────────────
 send = Enviar
@@ -170,6 +174,11 @@ unknown-device = dispositivo desconhecido
 # ── Tray & viewer ───────────────────────────────────────────────────────
 tray-show = Mostrar
 tray-quit = Sair
+tray-tip-muted = baucord — silenciado
+tray-tip-deafened = baucord — ensurdecido
+# In the tray's menu, one item per person in our voice room: muting is for you alone.
+tray-mute-person = Silenciar { $name }
+tray-unmute-person = Reativar som de { $name }
 viewer-title = Tela de { $name } ({ $width }x{ $height })
 stop-watching = Parar de assistir
 viewer-stats = { $res } { $fps }fps { $kbps }KB/s { $mb }MB | buf { $depth }/{ $target }ms jit { $jitter }ms
@@ -355,6 +364,9 @@ menu-unmute-chat = Reativar o chat
 menu-disconnect = Desconectar…
 menu-kick = Expulsar…
 menu-ban = Banir…
+# The admin panel's Actions menu (Users tab): each asks first.
+menu-reset-profile = Redefinir perfil…
+menu-purge = Purgar…
 role-guest = Convidado
 role-member = Membro
 role-organizer = Organizador
@@ -503,6 +515,8 @@ sounds-lead = Quais eventos tocam um som.
 sounds-share-started = Alguém no seu canal começa a compartilhar
 sounds-viewer-joined = Alguém começa a assistir sua transmissão
 sounds-viewer-joined-hint = Mais suave, e só você ouve.
+sounds-mute-toggle = Você se silencia ou ensurdece
+sounds-mute-toggle-hint = Uma nota suave: mais grave ao silenciar, mais aguda ao voltar.
 sounds-enabled = Ativar sons
 sounds-enabled-hint = Desligado, silencia todos os sons.
 sounds-join-leave = Alguém entra ou sai do seu canal
@@ -691,6 +705,8 @@ admin-ban = Banir
 admin-reset-profile = Redefinir perfil
 admin-purge = Purgar
 admin-set-role = Definir papel…
+# A person's row in the admin panel: the button that opens their actions.
+admin-actions = Ações
 admin-roles = Papéis
 admin-roles-lead = Conjuntos de permissões. A posição de um papel segue o que ele pode fazer.
 admin-holders = titular(es)
@@ -801,7 +817,6 @@ admin-channel-lead = A auditoria, ao vivo. Os comandos funcionam aqui: /kick, /b
 admin-channel-commands-only = Este canal só aceita comandos — comece com /
 
 # ── Hosts de celular (ANDROID-SPEC.md, IOS-SPEC.md; uma janela por processo) ──
-host-single-window = Ainda não disponível no celular — no desktop isto abre na sua própria janela.
 quit-ios = No iPhone, os apps são fechados pelo seletor de apps: deslize para cima a partir da borda inferior, pare um instante e deslize o baucord para cima.
 pick-from-photos = Fotos
 pick-from-files = Arquivos
@@ -867,6 +882,8 @@ admin-act-report-user = denunciou
 admin-act-report-resolve = tratou a denúncia
 admin-act-user-delete = excluiu, a pedido do dono, a conta
 chat-admin-reports-header = { $count } denúncias, mais recentes primeiro
+# After a report /reports lists that was already dealt with.
+chat-admin-report-handled = tratada
 chat-command-usage-resolve = Uso: /resolve <número da denúncia> (veja /reports)
 # ── A linha de termos do cartão de conexão (1.2) ─────────────────────
 terms-notice = Ao conectar, você concorda com os

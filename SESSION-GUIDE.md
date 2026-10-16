@@ -173,17 +173,17 @@ V=/tmp/sv/slint-viewer/slint-viewer; L="-L lucide=/tmp/lucide/lucide-slint-1.35.
 
 $V --check $L main.slint                                   # every .slint change
 $V --screenshot out.png --load-data props.json $L main.slint          # render the main window
-$V --screenshot out.png --component SettingsWindow --load-data p.json $L settings.slint
-$V --screenshot out.png --component AdminWindow --load-data p.json $L admin.slint
+# Settings and the admin panel are pages of the main window: render
+# main.slint with State.settings-open / State.admin-open (and -tab).
 SLINT_SCALE_FACTOR=2 $V --screenshot out.png ...          # 2× for site screenshots
 ```
 
 `--load-data` takes JSON: top-level keys are the window's own
 properties (`tab`, `phase` lives in `State`) and globals by name
 (`State`, `SettingsState`, `AdminState`, `Tr`). The globals are only
-visible through `main.slint`, which exports them: render the other
-windows as `--component SettingsWindow ... main.slint` too, or `Tr` is
-"unknown" and every string comes out empty. A `PopupWindow` never
+visible through `main.slint`, which exports them: render the stream
+viewer's window as `--component StreamViewerWindow ... main.slint` too,
+or `Tr` is "unknown" and every string comes out empty. A `PopupWindow` never
 shows in a still frame; to look at one (the emoji palette), render a
 scratch copy of the tree with it turned into a `Rectangle`. Two
 renders of the same fixture, before and after a change, diffed pixel
@@ -548,17 +548,27 @@ Memory-mode servers (persistence off) still use the legacy
 - Nothing in the app layer knew the negotiated feature set until the
   lobby; `NetworkMessage::Connected { lobby }` is the pattern for the
   next bit a client must gate on (add a field, not a new message).
-- Settings code talks to `settingsui::surface(app)` (an enum over
-  the desktop `SettingsWindow` and Android's in-window page), never
-  to `app.settings_win` directly — the field is the desktop window's
-  storage only. The page is wired once in `app::run`; the window when
-  first created. The stream viewer is the same shape: `viewers::Viewer`
-  owns a private `Surface::{Window, Page}` and the rest of the app
-  only calls its methods (`raise`, `update_frame`, `close`,
-  `apply_text_scale`) — never a `.win`. Anything that opens its own
-  `Window` on the desktop gets a `*Panel` component + `State.*-open`
-  page on Android (ANDROID-SPEC.md D22/D23); that is the pattern for
-  the admin panel too.
+- **Settings and the admin panel are pages on every host**
+  (ANDROID-SPEC.md D71): a `*Panel` component under `State.*-open` in
+  `main.slint`, wired once in `app::run`; Settings code talks to
+  `settingsui::surface(app)`, admin code to the main window's
+  `AdminState`. A page's key scope takes Back in the capture phase and
+  Escape in the bubble phase (so what has the keyboard inside — a
+  keybind being recorded, a confirmation — answers first); it is
+  focused on open and again whenever `focus-composer` runs while it
+  is open, so a main-window dialog closed over it hands the keyboard
+  back. Only one page at a time (`adminui::open` saves and closes
+  Settings, `settingsui::open_on` closes the panel). Settings' Close
+  puts back what the page changed (ANDROID-SPEC D72): **a setting the
+  page applies live must also be pushed by
+  `AppState::apply_settings_live`** (devices.rs), which Close and
+  Reset to defaults both end with, and a field of `Settings` the page
+  does not own must be carried over in `OpenedWith::restored_onto`, or
+  Close will undo it too. The stream viewer
+  is the one window left on the desktop: `viewers::Viewer` owns a
+  private `Surface::{Window, Page}` and the rest of the app only calls
+  its methods (`raise`, `update_frame`, `close`, `apply_text_scale`) —
+  never a `.win`.
 - **`VideoDecoder::flush()` is advisory.** The client calls it before
   every IDR; FFmpeg honours it (cheap), MediaCodec deliberately does
   not (it would discard the pipeline's pictures every 2 s, see
@@ -729,9 +739,9 @@ Memory-mode servers (persistence off) still use the legacy
   `min-height`), then render; `State.narrow-chat-open: true` shows
   the chat page, `State.touch-host: true` the touch-only affordances
   (the DM ✕); `State.settings-open: true` the Settings page, with
-  `settings-tab` and `settings-section-open` picking list or section.
-  `--component SettingsWindow ... settings.slint` with `{"tab": 2}`
-  checks the desktop window didn't move. The slide itself (a `Timer`-free `animate`) cannot be
+  `settings-tab` and `settings-section-open` picking list or section
+  (`admin-open`, `admin-tab`, `admin-section-open` the same for the
+  admin panel); at 1000×640 the same keys show the wide pages. The slide itself (a `Timer`-free `animate`) cannot be
   captured. Check 1000×640 after any change there: the wide layout
   must not move.
 - **Drive the real `MainWindow` headless** when a fix is about
@@ -944,6 +954,76 @@ Memory-mode servers (persistence off) still use the legacy
   voice into empty rooms is "X joined Y". Notifications exist only while
   the app is connected — nothing reaches a phone whose app is closed
   until push exists (PRODUCTION-PLAN.md PRD-1).
+- **One message to several sessions is `send_to`** (`server.rs`):
+  encoded and framed once, the bytes shared. `send_msg` in a loop over
+  an audience encoded it once per person (twenty such loops were left
+  after P2-32; review 2026-10-14 SRV-9). Two audiences that read
+  different variants (`ChatFrom` / `Chat`, `FileMessage` / its plain
+  form) are split with `partition` and get one `send_to` each. A
+  relayed upload is framed once too: `transport::frame_media`, then
+  `send_media_framed` per receiver.
+- **The voice relay reads `room_members`**, `channel_of` turned around:
+  whatever changes `channel_of` calls `index_rooms()` after it (a
+  connect, a leave, a move, a new channel list). Rebuilt on those
+  events, never per packet.
+- **A list sent as one message has a cap the wire can carry, and a
+  test that holds the two together** (`MAX_BLOCKS` in `safety.rs`,
+  `MAX_ROLES` in `admin.rs`): at the longest names the whole list must
+  encode under 17 KiB, or it never arrives. A free-text field that
+  travels in such lists has a byte cap too (`MAX_ADMIN_REASON_BYTES`,
+  cut by `AdminCommand::clip_reason` on both sides).
+- **A persistence command that writes a table `load_policy` reads says
+  so in `Command::changes_policy`** (an exhaustive match): only those
+  make a policy snapshot stale. Counting every write made snapshots
+  stale for a read mark or an audit line.
+- **The TLS key log is off unless `BAUCORD_TLS_KEYLOG=1`** is set beside
+  `SSLKEYLOGFILE`, on either side: for a packet capture, on purpose.
+
+- **A chat row carries no picture** (`pictures.rs`): `ChatRow.image`
+  is only a playing GIF's frame. The pane asks
+  `Logic.chat-picture(row-id, image-rev)` for the rows it built; the
+  store answers from its previews or queues a decode and the app bumps
+  `image-rev` when it lands (`AppState::picture_ready`). Its handler
+  runs inside Slint's layout and drawing: it touches the store only,
+  never `AppState`. Bytes go in with `pictures::insert` and out with
+  `pictures::remove` wherever a row does; parked conversations keep
+  theirs.
+- **A tooltip is posted, not drawn** (`Tip` / `TipLayer`,
+  `widgets.slint`): a control calls `Tip.show(text, its window
+  rectangle, below)` on hover and `Tip.hide(text)` on leave and click;
+  each window has one `TipLayer` as its last child. A tooltip drawn
+  as the control's own child goes under every sibling that comes after
+  it in the tree — the sidebar, the channel names.
+- **A hold is not also a tap.** A touch target with a long press
+  (`LongPress`, `widgets.slint`) returns from its `clicked` while
+  `fired` (`held` on a chat row): the finger's release comes after
+  the hold's action and would run the tap's too. A nested target (a
+  picture, a link, a file button in a row) checks the row's `held`.
+- **No symbol characters in what the app draws as text.** The app
+  ships no font: Windows draws with Segoe UI, Android with Roboto, and
+  Slint 1.18 does not fall back to another font for a character they
+  lack — Android shows a square (Skia's missing glyph), as Windows did
+  for the dropdowns' "▾". Roboto has none of ▾ ▼ ● ○ → ↑ ↓ ⚠ ✓
+  (checked with fontTools, 2026-10-15); Segoe UI has the WGL4 set (●
+  ○ arrows ≥) but not ▾ ⚠ ✓. Draw it instead — a Lucide icon
+  (`IconSet.ChevronDown` for a caret), a `Rectangle` for a dot — or say
+  it in words. Latin-1 and general punctuation (· × — … “ ”) are safe.
+  To see it here: run the page simulator with a `FONTCONFIG_FILE` that
+  lists only `/usr/share/fonts/truetype/roboto` (`fonts-roboto-unhinted`):
+  a missing character then draws as nothing.
+- **A window's `icon` is its taskbar icon too, on Windows**: Slint
+  gives the one image to both `WM_SETICON` slots (title bar and
+  taskbar/Alt-Tab; `i-slint-backend-winit` `set_window_icon`). The
+  windows load the tray's glyph (`tray.png`); the exe's own icon is
+  `icon.ico`, embedded by `desktop/build.rs`. Slint 1.18.1 multiplies
+  an icon's colours by alpha twice (decoded premultiplied, then again
+  in `icon_to_winit`), so soft edges come out a little dark on a light
+  title bar — upstream's to fix, not worth a workaround here.
+- **The tray's menu says a state in words** (`tray.slint`): no native
+  backend draws a check mark, and a `checkable` item sets its own
+  `checked` on activation, which breaks the binding. Its labels and
+  people come from `tray::sync`, which returns early when nothing it
+  shows changed (every change rebuilds the platform menu).
 
 ### Memory (the "RAM tripled" pass)
 What the app retains is now measurable: **`/mem`** prints (and logs)
@@ -962,7 +1042,10 @@ the next one) — both clear it now; chat preview textures follow the
 window's scale factor (`preview_max_edge`: 360² on a 1× display,
 720² only at 2×, a quarter of the memory per picture for most
 Windows users); avatars from other clients are clamped to 128² at
-decode (ours already are at pick time). Since 1.1.9 the stream
+decode (ours already are at pick time). Since 2026-10-14 a chat
+picture is decoded only while its row is on screen, off the UI
+thread, and kept in a 16 MB LRU after (`pictures.rs`); `/mem` reports
+how many are decoded. Since 1.1.9 the stream
 viewer reuses a ring of three `SharedPixelBuffer`s per stream and the
 decoders' buffers go round `video::pool` (ANDROID-SPEC D57), so the
 8 MB allocation per 1080p frame is gone too. Left to measure: the `StyledText`

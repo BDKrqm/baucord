@@ -688,7 +688,10 @@ impl AppState {
             )
     }
 
-    pub(crate) fn send_admin(&mut self, command: AdminCommand, then: PendingAdmin) {
+    pub(crate) fn send_admin(&mut self, mut command: AdminCommand, then: PendingAdmin) {
+        // What the server keeps of a reason (it cuts the same way); a
+        // longer one could not even be sent as one message.
+        command.clip_reason();
         // A printed answer lands in the conversation shown when it was
         // asked for — a menu pick as much as a typed command.
         let request_id = self.next_request_id;
@@ -822,13 +825,10 @@ impl AppState {
                 for u in users.into_iter().take(COMMAND_LIST_ROWS) {
                     let roles: Vec<String> =
                         u.roles.iter().map(|r| self.role_name_of(*r)).collect();
+                    // Online is said in words: no "●", which Android's
+                    // system font cannot draw.
                     let line = format!(
-                        "{}{} — {} — {} — {}",
-                        if u.client_id.is_some() {
-                            "● "
-                        } else {
-                            "○ "
-                        },
+                        "{} — {} — {} — {}",
                         u.name,
                         if roles.is_empty() {
                             t!("admin-list-no-roles")
@@ -836,7 +836,11 @@ impl AppState {
                             roles.join(", ")
                         },
                         short_id(&u.user_id),
-                        describe_ago(u.last_seen)
+                        if u.client_id.is_some() {
+                            t!("admin-now")
+                        } else {
+                            describe_ago(u.last_seen)
+                        }
                     );
                     self.push_command_output(&line);
                 }
@@ -931,7 +935,8 @@ impl AppState {
                         line.push(')');
                     }
                     if r.resolved {
-                        line.push_str(" ✓");
+                        line.push_str(" — ");
+                        line.push_str(&t!("chat-admin-report-handled"));
                     }
                     self.push_command_output(&line);
                 }

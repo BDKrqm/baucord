@@ -21,6 +21,8 @@ tab-keyboard = Controles
 tab-credits = Créditos
 tab-about = Acerca de
 save-and-close = Guardar y cerrar
+# Settings' footer: leave without keeping what was changed since it opened.
+settings-close = Cerrar
 reset-defaults = Restablecer
 reset-confirm-body = Todas las opciones vuelven a su valor predeterminado, incluidos tus servidores guardados, tu apodo y tu foto.
 reset-confirm = Restablecer todo
@@ -93,7 +95,7 @@ chat-server-muted-locked = El servidor te silenció; vas a poder activar el micr
 chat-your-roles-changed = Tus roles ahora son: { $roles }
 roles-none = ninguno
 reason-none = (sin motivo)
-chat-admin-users-header = { $count } usuario(s) registrados (● conectados):
+chat-admin-users-header = { $count } usuario(s) registrados:
 chat-admin-list-more = … y { $count } más. El panel de administración los muestra todos.
 chat-admin-restrictions-header = { $count } restricción(es):
 chat-admin-invites-header = { $count } invitación(es):
@@ -141,7 +143,9 @@ live = En vivo
 stream-stats-quality = { $quality } · { $viewers } viendo
 stream-stats-frame = { $kb }KB · { $ms }ms cod
 stream-stats-degraded = { $fps }% fps · pérdida { $loss }%
-latency-line = Audio: { $audio } | Server: { $network } | ↑{ $up } ↓{ $down } Mb
+latency-line = Audio: { $audio } | Server: { $network }
+# The transfer rates' unit, after the download rate (the arrows are drawn).
+latency-unit = Mb
 
 # ── Chat ────────────────────────────────────────────────────────────────
 send = Enviar
@@ -171,6 +175,11 @@ unknown-device = dispositivo desconocido
 # ── Bandeja y visor ─────────────────────────────────────────────────────
 tray-show = Mostrar
 tray-quit = Salir
+tray-tip-muted = baucord — muteado
+tray-tip-deafened = baucord — ensordecido
+# In the tray's menu, one item per person in our voice room: muting is for you alone.
+tray-mute-person = Silenciar a { $name }
+tray-unmute-person = Dejar de silenciar a { $name }
 viewer-title = Pantalla de { $name } ({ $width }x{ $height })
 stop-watching = Dejar de ver
 viewer-stats = { $res } { $fps }fps { $kbps }KB/s { $mb }MB | búfer { $depth }/{ $target }ms jitter { $jitter }ms
@@ -356,6 +365,9 @@ menu-unmute-chat = Reactivar el chat
 menu-disconnect = Desconectar…
 menu-kick = Expulsar…
 menu-ban = Banear…
+# The admin panel's Actions menu (Users tab): each asks first.
+menu-reset-profile = Restablecer perfil…
+menu-purge = Purgar…
 role-guest = Invitado
 role-member = Miembro
 role-organizer = Organizador
@@ -504,6 +516,8 @@ sounds-lead = Qué eventos hacen sonar algo.
 sounds-share-started = Alguien en tu canal empieza a compartir
 sounds-viewer-joined = Alguien empieza a ver tu transmisión
 sounds-viewer-joined-hint = Más suave, y solo lo escuchás vos.
+sounds-mute-toggle = Te silenciás o ensordecés
+sounds-mute-toggle-hint = Una nota suave: más grave al silenciarte, más aguda al volver.
 sounds-enabled = Activar sonidos
 sounds-enabled-hint = Apagado, silencia todos los sonidos.
 sounds-join-leave = Alguien entra o sale de tu canal
@@ -692,6 +706,8 @@ admin-ban = Banear
 admin-reset-profile = Restablecer perfil
 admin-purge = Purgar
 admin-set-role = Asignar rol…
+# A person's row in the admin panel: the button that opens their actions.
+admin-actions = Acciones
 admin-roles = Roles
 admin-roles-lead = Conjuntos de permisos. La posición de un rol sigue a lo que puede hacer.
 admin-holders = titular(es)
@@ -802,7 +818,6 @@ admin-channel-lead = La auditoría, en vivo. Los comandos funcionan acá: /kick,
 admin-channel-commands-only = Este canal solo acepta comandos — empezá con /
 
 # ── Hosts de teléfono (ANDROID-SPEC.md, IOS-SPEC.md; una ventana por proceso) ──
-host-single-window = Todavía no está disponible en el teléfono — en escritorio esto se abre en su propia ventana.
 quit-ios = En el iPhone las apps se cierran desde el selector de apps: deslizá hacia arriba desde el borde inferior, esperá un momento y deslizá baucord hacia arriba.
 pick-from-photos = Fotos
 pick-from-files = Archivos
@@ -868,6 +883,8 @@ admin-act-report-user = denunció a
 admin-act-report-resolve = atendió la denuncia
 admin-act-user-delete = borró, a pedido de su dueño, la cuenta
 chat-admin-reports-header = { $count } denuncias, las más nuevas primero
+# After a report /reports lists that was already dealt with.
+chat-admin-report-handled = atendida
 chat-command-usage-resolve = Uso: /resolve <número de denuncia> (ver /reports)
 # ── La línea de términos de la tarjeta de conexión (1.2) ──────────────
 terms-notice = Al conectarte aceptás los

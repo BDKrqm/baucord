@@ -215,16 +215,15 @@ impl AppState {
         s.set_deafened(false);
         s.set_sharing(false);
         s.set_stream_stats("".into());
-        s.set_status_text(format!("●  {}", t!("status-disconnected")).into());
+        s.set_status_text(t!("status-disconnected").into());
         s.set_status_color(slint::Color::from_rgb_u8(0xE0, 0x1E, 0x5A));
-        s.set_latency_line(
-            t!("latency-line",
-                "audio" => "--", "network" => "--", "up" => "--", "down" => "--")
-            .into(),
-        );
+        s.set_latency_line(t!("latency-line", "audio" => "--", "network" => "--").into());
+        s.set_latency_up("--".into());
+        s.set_latency_down("--".into());
         s.set_resource_line(" ".into());
         s.set_users_count_label(t!("users-count", "count" => 0u32).into());
         self.users_model.set_vec(Vec::new());
+        self.sync_tray();
     }
 
     /// Transfers end with the session: nothing more arrives for them.
@@ -255,6 +254,9 @@ impl AppState {
     pub fn show_connect_phase(&mut self) {
         self.refresh_device_warning();
         self.main.global::<State>().set_phase(Phase::Connect);
+        // The admin panel is the session's: it does not outlive it
+        // (Settings may stay, the connect page opens it too).
+        crate::adminui::close(self);
         // The session is over (unless a reconnect is on its way): the
         // host may let the app sleep again.
         if !std::mem::take(&mut self.reconnect_hold) {
@@ -289,6 +291,22 @@ impl AppState {
             return;
         }
         self.set_muted(!self.session.is_muted);
+        self.toggle_tone(self.session.is_muted);
+    }
+
+    /// The soft note for our own mute or deafen, from wherever it was
+    /// toggled (the button, a keybind, the tray, a stream's bar): lower
+    /// going quiet, higher coming back. It plays where the room plays —
+    /// a phone in the lobby has no playback and stays silent.
+    fn toggle_tone(&self, quiet: bool) {
+        if self.settings.sounds.mute_toggle_on() {
+            let sound = if quiet {
+                SoundType::WentQuiet
+            } else {
+                SoundType::BackLive
+            };
+            self.voice.tx.send(VoiceControl::PlaySound(sound)).ok();
+        }
     }
 
     /// Set the mute state and tell the voice thread, the server and
@@ -336,6 +354,7 @@ impl AppState {
             .set_deafened(self.session.is_deafened);
         self.push_self_audio();
         self.update_user_list();
+        self.toggle_tone(self.session.is_deafened);
     }
 
     pub(super) fn handle_toggle_screenshare(&mut self) {

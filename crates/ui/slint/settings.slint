@@ -1,4 +1,4 @@
-// settings.slint — the settings window.
+// settings.slint — Settings, a page over the main window.
 //
 // Left nav (Profile / General / Audio / Keyboard / Servers / Debug /
 // About),
@@ -8,8 +8,8 @@
 //
 // Live semantics carry over: every control applies immediately through
 // a callback (per keystroke / per tick), persistence happens when the
-// window closes. Meters read levels the shell pushes at 8 Hz while the
-// window is open (the shell stops the timer on close).
+// page closes. Meters read levels the shell pushes at 8 Hz while the
+// page is open (the shell stops the timer on close).
 //
 // Layout grammar, the same on every tab: a `PanelHeader` (what this
 // tab is about, one line), then `Setting` groups — label, control,
@@ -84,6 +84,7 @@ export global SettingsState {
     in-out property <bool> dm-sound: true;
     in-out property <bool> share-started-sound: true;
     in-out property <bool> viewer-joined-sound: true;
+    in-out property <bool> mute-toggle-sound: true;
     // Notifications (phones only: ANDROID-SPEC.md D52, IOS-SPEC.md D50)
     in property <bool> notifications-available: false;
     in-out property <bool> notify-messages: true;
@@ -137,7 +138,7 @@ export global SettingsState {
     /// macOS without the Accessibility permission: a bound key works
     /// but is taken from every other program.
     in property <bool> keybinds-need-access;
-    /// True while some row is recording — arms the window's key capture.
+    /// True while some row is recording — arms the panel's key capture.
     in property <bool> capturing: false;
 
     // ── Debug ──
@@ -194,6 +195,7 @@ export global SettingsLogic {
     callback dm-sound-changed(bool);
     callback share-started-sound-changed(bool);
     callback viewer-joined-sound-changed(bool);
+    callback mute-toggle-sound-changed(bool);
     callback notify-messages-changed(bool);
     callback notify-first-join-changed(bool);
     callback show-timestamps-changed(bool);
@@ -241,6 +243,10 @@ export global SettingsLogic {
     callback clear-log();
 
     callback save-and-close();
+    /// The footer's Close: put back what was changed since the page
+    /// opened, then close. (Escape, Back and the arrow save, as Save
+    /// and close does.)
+    callback discard-and-close();
     callback reset-defaults();
     callback closed();
     // Another tab is showing: the meters run on Audio only.
@@ -259,6 +265,9 @@ component NavItem inherits Rectangle {
     /// The narrow layout's list: a finger-sized row with a chevron
     /// (the row opens a page there rather than selecting a tab).
     in property <bool> tall: false;
+    /// Takes something away (the phone list's Reset to defaults): the
+    /// danger color, no chevron.
+    in property <bool> danger: false;
     callback clicked;
     height: root.tall ? 48px : 36px;
     border-radius: Theme.radius-md;
@@ -273,18 +282,18 @@ component NavItem inherits Rectangle {
             IconDisplay {
                 icon: root.icon;
                 size: 16px;
-                stroke: root.active ? Theme.on-accent : Theme.text-muted;
+                stroke: root.active ? Theme.on-accent : root.danger ? Theme.danger-text : Theme.text-muted;
             }
         }
         Text {
             vertical-alignment: center;
             text: root.text;
-            color: root.active ? Theme.on-accent : Theme.text-secondary;
+            color: root.active ? Theme.on-accent : root.danger ? Theme.danger-text : Theme.text-secondary;
             font-size: Theme.font-body;
             font-weight: root.active ? 600 : 400;
             horizontal-stretch: 1;
         }
-        if root.tall : Rectangle {
+        if root.tall && !root.danger : Rectangle {
             width: 16px;
             IconDisplay {
                 icon: IconSet.ChevronRight;
@@ -938,6 +947,13 @@ component SoundsPanel inherits VerticalLayout {
             toggled(on) => { SettingsLogic.viewer-joined-sound-changed(on); }
         }
         CheckRow {
+            text: Tr.sounds-mute-toggle;
+            hint: Tr.sounds-mute-toggle-hint;
+            enabled: SettingsState.sounds-enabled;
+            checked <=> SettingsState.mute-toggle-sound;
+            toggled(on) => { SettingsLogic.mute-toggle-sound-changed(on); }
+        }
+        CheckRow {
             text: Tr.sounds-dm;
             enabled: SettingsState.sounds-enabled;
             checked <=> SettingsState.dm-sound;
@@ -1309,7 +1325,8 @@ component AboutPanel inherits VerticalLayout {
     }
     // Slint's royalty-free license asks for this widget in the About
     // screen (Settings → Licenses has the license). It
-    // draws itself from the style's palette: the windows set it dark.
+    // draws itself from the style's palette: the main window sets it
+    // dark.
     HorizontalLayout {
         alignment: start;
         AboutSlint {
@@ -1467,19 +1484,19 @@ component CreditsPanel inherits VerticalLayout {
     Rectangle { }
 }
 
-// ── Window ──────────────────────────────────────────────────────────────
+// ── The panel ───────────────────────────────────────────────────────────
 
-// The settings UI itself: nav, the tab panels, the button row. The
-// desktop wraps it in `SettingsWindow`; a single-window host (Android,
-// ANDROID-SPEC.md D22) shows it as a page inside `MainWindow`
-// (`State.settings-open`). Same globals either way, so
-// `settingsui.rs` drives both through one `SettingsSurface`.
+// The settings UI itself: nav, the tab panels, the button row, shown
+// as a page over `MainWindow` on every host (`State.settings-open`;
+// ANDROID-SPEC.md D22, D71).
 /// The section list: the wide layout's left column, the narrow
 /// layout's first page.
 component SettingsNav inherits VerticalLayout {
     in property <int> tab;
     in property <bool> narrow: false;
     callback picked(int);
+    /// Narrow: the list's Reset to defaults row was tapped.
+    callback reset-asked();
     padding: Theme.gap-md;
     spacing: Theme.gap-xs;
     // Indices are mirrored by `settingsui::TAB_*`. The narrow list
@@ -1492,7 +1509,7 @@ component SettingsNav inherits VerticalLayout {
     if !State.touch-host : NavItem { text: Tr.tab-keyboard;  icon: IconSet.Keyboard; tall: root.narrow; active: !root.narrow && root.tab == 4; clicked => { root.picked(4); } }
     NavItem { text: Tr.tab-servers;   icon: IconSet.Server;            tall: root.narrow; active: !root.narrow && root.tab == 5; clicked => { root.picked(5); } }
     NavItem { text: Tr.tab-debug;     icon: IconSet.Bug;               tall: root.narrow; active: !root.narrow && root.tab == 8; clicked => { root.picked(8); } }
-    // Credits and About: their own group. The window's column puts it
+    // Credits and About: their own group. The wide column puts it
     // at the bottom; the phone's list keeps it under the rest, a group
     // gap apart, instead of past a screen of empty space.
     if !root.narrow : Rectangle { }
@@ -1500,6 +1517,17 @@ component SettingsNav inherits VerticalLayout {
     NavItem { text: Tr.tab-credits;   icon: IconSet.Heart;             tall: root.narrow; active: !root.narrow && root.tab == 6; clicked => { root.picked(6); } }
     NavItem { text: Tr.tab-about;     icon: IconSet.Info;              tall: root.narrow; active: !root.narrow && root.tab == 7; clicked => { root.picked(7); } }
     NavItem { text: Tr.tab-licenses;  icon: IconSet.Scale;             tall: root.narrow; active: !root.narrow && root.tab == 9; clicked => { root.picked(9); } }
+    // Narrow: Reset to defaults ends the list, a group gap under the
+    // rest — the phone's footer has room for Close and Save and close
+    // only. The footer still asks first.
+    if root.narrow : Rectangle { height: Theme.gap-lg; }
+    if root.narrow : NavItem {
+        text: Tr.reset-defaults;
+        icon: IconSet.RotateCcw;
+        tall: true;
+        danger: true;
+        clicked => { root.reset-asked(); }
+    }
     if root.narrow : Rectangle { }
 }
 
@@ -1509,9 +1537,8 @@ component SettingsContent inherits ScrollView {
     in property <int> tab;
     in property <length> pad: Theme.gap-xl;
     vertical-stretch: 1;
-    // Fluent's ScrollView does not pan on a drag; on the Android page
-    // a finger needs it to (ANDROID-SPEC.md D27). (The desktop
-    // window's own State leaves this false.)
+    // Fluent's ScrollView does not pan on a drag; on a phone a finger
+    // needs it to (ANDROID-SPEC.md D27).
     mouse-drag-pan-enabled: State.touch-host;
     VerticalLayout {
         padding: root.pad;
@@ -1538,10 +1565,13 @@ component SettingsContent inherits ScrollView {
 
 /// Reset to defaults · Save & close. Resetting erases the saved
 /// servers, the nickname and the picture, so it asks first, right here:
-/// the footer turns into the question (one place for the window and
-/// the phone page, no dialog on top of a dialog).
+/// the footer turns into the question (one place for the wide page
+/// and the phone's, no dialog on top of a dialog).
 component SettingsFooter inherits Rectangle {
-    property <bool> confirming: false;
+    /// Asking whether to reset: the footer is the question.
+    in-out property <bool> confirming: false;
+    /// Narrow: Reset to defaults is the section list's last row.
+    in property <bool> narrow: false;
     height: footer.preferred-height;
     background: Theme.bg-primary;
     Rectangle { y: 0; height: 1px; width: 100%; background: Theme.border; }
@@ -1554,12 +1584,19 @@ component SettingsFooter inherits Rectangle {
             font-size: Theme.font-sm;
             wrap: word-wrap;
         }
+        // Reset apart on the left, the two ways out together on the
+        // right: Close puts back what was changed, Save and close keeps
+        // it.
         HorizontalLayout {
             spacing: Theme.gap-sm;
-            Rectangle { }
-            if !root.confirming : Btn {
+            if !root.confirming && !root.narrow : Btn {
                 text: Tr.reset-defaults;
                 clicked => { root.confirming = true; }
+            }
+            Rectangle { }
+            if !root.confirming : Btn {
+                text: Tr.settings-close;
+                clicked => { SettingsLogic.discard-and-close(); }
             }
             if !root.confirming : Btn {
                 text: Tr.save-and-close;
@@ -1598,6 +1635,14 @@ export component SettingsPanel inherits FocusScope {
     changed section-open => { SettingsLogic.tab-shown(); }
 
     public function focus-capture() { root.focus(); }
+    // Recording a keybind (the Keyboard tab's rows): the keys have to
+    // reach the capture handler below, so the panel takes the keyboard
+    // — whatever had it (a field, the page around the panel) would
+    // otherwise see them first or not pass them in.
+    property <bool> recording: SettingsState.capturing;
+    changed recording => {
+        if (self.recording) { root.focus(); }
+    }
 
     /// One step back: from a section to the list (narrow), else out
     /// of Settings — saved, as the button does. The top bar's arrow
@@ -1621,6 +1666,15 @@ export component SettingsPanel inherits FocusScope {
         accept
     }
 
+    // The footer's question (Reset to defaults?), shared by both
+    // layouts: narrow, the list's last row asks it.
+    property <bool> reset-asking: false;
+    // The section and its footer share one column beside the nav, at
+    // most the content's 560 px measure plus its padding: on a
+    // maximized window Save and close stays under the form it saves,
+    // not at the far edge.
+    property <length> column: Math.min(root.width - 188px, 560px + 2 * Theme.gap-xl);
+
     if !root.narrow : HorizontalLayout {
         width: 100%;
         height: 100%;
@@ -1633,10 +1687,13 @@ export component SettingsPanel inherits FocusScope {
             }
         }
         VerticalLayout {
+            width: root.column;
             if root.tab != 9 : SettingsContent { tab: root.tab; }
             if root.tab == 9 : LicensesView { pad: Theme.gap-xl; }
-            SettingsFooter { }
+            SettingsFooter { confirming <=> root.reset-asking; }
         }
+        // The rest of a wide window.
+        Rectangle { }
     }
 
     if root.narrow : VerticalLayout {
@@ -1679,45 +1736,19 @@ export component SettingsPanel inherits FocusScope {
                 root.tab = i;
                 root.section-open = true;
             }
+            reset-asked => { root.reset-asking = true; }
         }
         if root.section-open && root.tab != 9 : SettingsContent {
             tab: root.tab;
             pad: Theme.gap-lg;
         }
         if root.section-open && root.tab == 9 : LicensesView { pad: Theme.gap-lg; }
-        SettingsFooter { }
+        SettingsFooter {
+            narrow: true;
+            confirming <=> root.reset-asking;
+        }
     }
 }
 
-export component SettingsWindow inherits Window {
-    title: Tr.settings-title;
-    background: Theme.bg-primary;
-    preferred-width: 800px;
-    preferred-height: 740px;
-    min-width: 680px;
-    min-height: 580px;
-
-    in-out property <int> tab <=> panel.tab;
-
-    // The app is dark whatever the OS is: the stock widgets drawn from
-    // the style's palette (scrollbars, Settings → About's AboutSlint)
-    // follow.
-    init => { Palette.color-scheme = ColorScheme.dark; }
-
-    // Same Windows minimize→restore workaround as MainWindow: the OS
-    // clears the surface while damage tracking trusts the back buffer;
-    // flipping this dirties the full window for one complete repaint.
-    in property <bool> repaint-flip;
-    Rectangle {
-        width: 100%;
-        height: 100%;
-        background: root.repaint-flip ? #FFFFFF01 : transparent;
-    }
-
-    public function focus-capture() { panel.focus-capture(); }
-
-    panel := SettingsPanel { }
-}
-
-// Shared with the admin window (admin.slint).
+// Shared with the admin panel (admin.slint).
 export { NavItem, PanelHeader }

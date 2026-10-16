@@ -113,7 +113,12 @@ export struct ChatRow {
     body: string,        // message text / system text / code (kind 3)
     styled: bool,        // kind 0 — body carries *bold*/_italic_/`code` markup
     body-styled: styled-text, // kind 0 when styled — pre-parsed by the shell
-    image: image,        // kind 2 — current frame (Rust swaps for GIFs)
+    image: image,        // kind 2 — a playing GIF's frame; empty otherwise
+    /// kind 2 — the picture itself is not in the row (a row would keep
+    /// it for its whole life): the pane asks `Logic.chat-picture` for
+    /// it while the row is on screen, and the host bumps this when a
+    /// picture asked for is ready.
+    image-rev: int,
     img-w: float,        // native px, for aspect layout
     img-h: float,
     row-id: int,         // stable id for gif hover/click callbacks
@@ -232,9 +237,13 @@ export global State {
     in property <bool> show-timestamps: true;
     in property <bool> compact-rows: false;
     in property <bool> sharing;
-    in property <string> status-text;      // "● Connected"
+    in property <string> status-text;      // "Connected" (the dot is drawn, in status-color)
     in property <color> status-color: #2BAC76;
-    in property <string> latency-line;
+    in property <string> latency-line;     // "Audio: 42ms | Net: 38ms"
+    // The transfer rates after it, in Mb, beside drawn arrows (no
+    // "↑"/"↓": Android's system font has neither).
+    in property <string> latency-up: "--";
+    in property <string> latency-down: "--";
     in property <string> resource-line;
     in property <string> stream-stats;     // "" hides the block
     in property <bool> stream-degraded;
@@ -254,16 +263,23 @@ export global State {
     /// row id; -1 = none). The row's menu and a double-click toggle it.
     in-out property <int> selecting-row: -1;
 
-    // ── Settings as a page (single-window hosts; ANDROID-SPEC.md D22) ──
-    // The desktop opens SettingsWindow; Android shows the same
-    // SettingsPanel inside MainWindow while this is set. The tab is
-    // what SettingsWindow.tab is there (settingsui::TAB_*).
+    // ── Settings as a page (every host; ANDROID-SPEC.md D22, D71) ──
+    // SettingsPanel covers the main window while this is set: its
+    // section list where the sidebar was. The tab is `settingsui::TAB_*`.
     in property <bool> settings-open: false;
     in-out property <int> settings-tab: 0;
     /// The narrow page shows that tab's section rather than the list
     /// (D28): cleared when the page opens, set by picking a section —
     /// or by the shell when it opens Settings at a tab.
     in-out property <bool> settings-section-open: false;
+
+    // ── The admin panel as a page (every host; ANDROID-SPEC.md D71) ──
+    // AdminPanel covers the main window while this is set, as Settings
+    // does. The tab is `adminui::TAB_*`; narrow, the tab list and one
+    // tab's page are two pages, as Settings' are.
+    in property <bool> admin-open: false;
+    in-out property <int> admin-tab: 0;
+    in-out property <bool> admin-section-open: false;
 
     // ── Stream viewer as a page (single-window hosts; ANDROID-SPEC.md D23)
     // The desktop opens one StreamViewerWindow per watched peer;
@@ -543,6 +559,10 @@ export global Logic {
     callback paste-rich();                // Ctrl/Cmd+V — host runs the paste chain
     callback link-clicked(string);
     callback row-open-image(int);
+    /// Row `row-id`'s picture, as decoded for the screen: empty until
+    /// it is ready (the host then bumps the row's `image-rev`, which is
+    /// here only so the pane asks again).
+    pure callback chat-picture(row-id: int, rev: int) -> image;
     callback edit-cancel();
     callback load-earlier();
     callback confirm-accept();
