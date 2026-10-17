@@ -8,13 +8,13 @@
 // Lists are filled by the host from the matching `AdminOutcome`;
 // `AdminState.busy` is the tab's refresh in flight.
 
-import { ScrollView } from "std-widgets.slint";
-import { Icon, IconSet, IconDisplay } from "@lucide";
+import { ListView, ScrollView } from "std-widgets.slint";
+import { IconSet, IconDisplay } from "@lucide";
 import { Theme } from "theme.slint";
 import { Tr } from "tr.slint";
 import { State } from "globals.slint";
-import { Btn, IconBtn, Field, FieldLabel, Hint, Sep, Dropdown, CheckRow, RoleGlyph } from "widgets.slint";
-import { NavItem, PanelHeader } from "settings.slint";
+import { Btn, IconBtn, Field, FieldLabel, Hint, Sep, Dropdown, CheckRow, RoleGlyph, Modal } from "widgets.slint";
+import { NavItem, NavScroll, PanelHeader } from "settings.slint";
 
 export struct AdminUserRow {
     user-id: string,        // hex, the target for actions
@@ -416,15 +416,31 @@ component UserCard inherits Row {
     }
 }
 
+// The people are a list a server can make long: they scroll in a
+// ListView under the tab's head, which builds only the rows in view
+// (every row, with its pickers, was built at once; review 2026-10,
+// P3-23).
 component UsersTab inherits VerticalLayout {
     in property <bool> compact;
+    in property <length> pad;
+    /// `AdminContent`'s: the list's own right edge, and how far short
+    /// of it its rows stop.
+    in property <length> edge;
+    in property <length> inset;
+    padding: root.pad;
+    padding-right: root.edge;
     spacing: Theme.gap-md;
-    TabHead { title: Tr.admin-users; lead: Tr.admin-users-lead; tab: 0; }
+    TabHead { title: Tr.admin-users; lead: Tr.admin-users-lead; tab: 0; padding-right: root.inset; }
     if AdminState.users.length == 0 && !AdminState.busy : Empty { text: Tr.admin-none; }
-    VerticalLayout {
-        for u in AdminState.users : VerticalLayout {
-            if !root.compact : UserLine { u: u; }
-            if root.compact : UserCard { u: u; }
+    ListView {
+        vertical-stretch: 1;
+        mouse-drag-pan-enabled: State.touch-host;
+        for u in AdminState.users : HorizontalLayout {
+            padding-right: root.inset;
+            VerticalLayout {
+                if !root.compact : UserLine { u: u; }
+                if root.compact : UserCard { u: u; }
+            }
         }
     }
 }
@@ -446,160 +462,189 @@ component TileFlow inherits Rectangle {
     }
 }
 
-component RolesTab inherits VerticalLayout {
-    in property <bool> compact;
+/// A role's editor, as a page of the Roles tab in place of the list
+/// (ANDROID-SPEC.md D76): the way back and what is being made at the
+/// top, then a name, the badge and every permission as a checkbox. Rank
+/// is derived from the set, so there is nothing else to pick. Cancel,
+/// the arrow and Escape bring the list back; a save that lands does
+/// too (`adminui`), one that fails says why under the head.
+component RoleEditor inherits VerticalLayout {
+    /// The phone's page has a top bar whose arrow does this already.
+    in property <bool> top-bar;
     spacing: Theme.gap-md;
-    TabHead { title: Tr.admin-roles; lead: Tr.admin-roles-lead; tab: 1; }
     VerticalLayout {
-        for r in AdminState.roles : Row {
-            // Narrow: the standing goes under the name, so the name is
-            // never the part that gets cut.
-            row-height: root.compact ? role-body.preferred-height : 52px;
-            HorizontalLayout {
-                padding-left: Theme.gap-xs;
-                padding-right: Theme.gap-xs;
-                spacing: Theme.gap-sm;
-                role-body := VerticalLayout {
-                    alignment: center;
-                    padding-top: root.compact ? Theme.gap-sm : 0px;
-                    padding-bottom: root.compact ? Theme.gap-sm : 0px;
-                    spacing: 2px;
-                    horizontal-stretch: 1;
-                    HorizontalLayout {
-                        spacing: Theme.gap-xs;
-                        if r.icon != "" : RoleGlyph {
-                            name: r.icon;
-                            size: 14px;
-                            stroke: r.has-color ? r.color : Theme.text-secondary;
-                        }
-                        // The name keeps its width; the rest follows it.
-                        Cell { text: r.name; font-weight: 600; horizontal-stretch: 0;
-                            color: r.has-color ? r.color : Theme.text-primary; }
-                        if !root.compact : Muted {
-                            text: "· " + r.standing + " · " + r.holders + " " + Tr.admin-holders;
-                            horizontal-stretch: 1;
-                        }
-                    }
-                    if root.compact : Muted { text: r.standing + " · " + r.holders + " " + Tr.admin-holders; }
-                    // Narrow: every permission, wrapped (the row grows).
-                    Muted {
-                        text: r.permissions;
-                        wrap: root.compact ? TextWrap.word-wrap : TextWrap.no-wrap;
-                    }
+        spacing: Theme.gap-xs;
+        HorizontalLayout {
+            spacing: Theme.gap-sm;
+            if !root.top-bar : Rectangle {
+                width: 32px;
+                height: 32px;
+                IconBtn {
+                    size: 32px;
+                    icon-size: 18px;
+                    icon: IconSet.ArrowLeft;
+                    idle-color: Theme.text-primary;
+                    tooltip: Tr.cancel;
+                    tooltip-below: true;
+                    clicked => { AdminLogic.role-edit-cancel(); }
                 }
-                if !r.builtin : Chip { text: Tr.admin-edit; clicked => { AdminLogic.role-select(r.id); } }
-                if !r.builtin : Chip { text: Tr.admin-delete; danger: true;
-                    clicked => { AdminLogic.role-delete(r.id); } }
-                if r.builtin : Muted { text: Tr.admin-builtin; }
+            }
+            PanelHeader {
+                title: AdminState.role-edit-id < 0 ? Tr.admin-role-new : Tr.admin-role-editing;
+                lead: Tr.admin-role-rank-hint;
+                horizontal-stretch: 1;
+            }
+        }
+        if AdminState.notice != "" : Text {
+            text: AdminState.notice;
+            color: Theme.danger-text;
+            font-size: Theme.font-sm;
+            wrap: word-wrap;
+        }
+    }
+    VerticalLayout {
+        spacing: Theme.gap-xs;
+        FieldLabel { text: Tr.admin-role-name; }
+        Field { text <=> AdminState.role-edit-name; placeholder: "streamer"; }
+        Hint { text: Tr.admin-role-name-hint; }
+    }
+    // The badge: a glyph and a color, both optional. Seventeen of
+    // each, so they wrap where the page is narrower than a row.
+    // A finger gets bigger tiles.
+    VerticalLayout {
+        spacing: Theme.gap-xs;
+        FieldLabel { text: Tr.admin-role-badge; }
+        glyphs := TileFlow {
+            count: AdminState.role-icons.length + 1;
+            tile: State.touch-host ? 40px : 30px;
+            Rectangle {
+                x: glyphs.x-of(0);
+                y: glyphs.y-of(0);
+                width: glyphs.tile;
+                height: glyphs.tile;
+                border-radius: Theme.radius-sm;
+                background: AdminState.role-edit-icon == "" ? Theme.accent : Theme.bg-tertiary;
+                Text { text: "—"; color: Theme.text-secondary; font-size: Theme.font-sm; }
+                TouchArea { mouse-cursor: pointer; clicked => { AdminState.role-edit-icon = ""; } }
+            }
+            for icon[i] in AdminState.role-icons : Rectangle {
+                x: glyphs.x-of(i + 1);
+                y: glyphs.y-of(i + 1);
+                width: glyphs.tile;
+                height: glyphs.tile;
+                border-radius: Theme.radius-sm;
+                background: AdminState.role-edit-icon == icon ? Theme.accent : Theme.bg-tertiary;
+                animate background { duration: 100ms; }
+                RoleGlyph {
+                    name: icon;
+                    size: 16px;
+                    stroke: AdminState.role-edit-icon == icon ? Theme.on-accent : Theme.text-secondary;
+                }
+                TouchArea { mouse-cursor: pointer; clicked => { AdminState.role-edit-icon = icon; } }
+            }
+        }
+        swatches := TileFlow {
+            count: AdminState.role-colors.length + 1;
+            tile: State.touch-host ? 32px : 22px;
+            Rectangle {
+                x: swatches.x-of(0);
+                y: swatches.y-of(0);
+                width: swatches.tile;
+                height: swatches.tile;
+                border-radius: self.width / 2;
+                border-width: AdminState.role-edit-color < 0 ? 2px : 1px;
+                border-color: AdminState.role-edit-color < 0 ? Theme.text-primary : Theme.border;
+                background: Theme.bg-tertiary;
+                Text { text: "—"; color: Theme.text-muted; font-size: Theme.font-xs; }
+                TouchArea { mouse-cursor: pointer; clicked => { AdminState.role-edit-color = -1; } }
+            }
+            for c[i] in AdminState.role-colors : Rectangle {
+                x: swatches.x-of(i + 1);
+                y: swatches.y-of(i + 1);
+                width: swatches.tile;
+                height: swatches.tile;
+                border-radius: self.width / 2;
+                background: c;
+                border-width: AdminState.role-edit-color == i ? 2px : 0px;
+                border-color: Theme.text-primary;
+                TouchArea { mouse-cursor: pointer; clicked => { AdminState.role-edit-color = i; } }
             }
         }
     }
-    if !AdminState.role-edit-open : HorizontalLayout {
-        Btn { text: Tr.admin-role-new; clicked => { AdminLogic.role-new(); } }
+    VerticalLayout {
+        spacing: 2px;
+        for name[i] in AdminState.perm-names : CheckRow {
+            text: name;
+            checked: AdminState.perm-on[i];
+            toggled(on) => { AdminLogic.role-perm-toggled(i, on); }
+        }
+    }
+    HorizontalLayout {
+        spacing: Theme.gap-sm;
+        Btn { text: Tr.cancel; clicked => { AdminLogic.role-edit-cancel(); } }
+        Btn { text: Tr.admin-role-save; accent: true; clicked => { AdminLogic.role-save(); } }
         Rectangle { }
     }
-    // The editor: a name and every permission as a checkbox. Rank is
-    // derived from the set, so there is nothing else to pick.
-    if AdminState.role-edit-open : Rectangle {
-        border-radius: Theme.radius-md;
-        background: Theme.bg-secondary;
-        border-width: 1px;
-        border-color: Theme.border;
+}
+
+component RolesTab inherits VerticalLayout {
+    in property <bool> compact;
+    in property <bool> top-bar;
+    spacing: Theme.gap-md;
+    // The list, or the editor in its place.
+    if !AdminState.role-edit-open : VerticalLayout {
+        spacing: Theme.gap-md;
+        TabHead { title: Tr.admin-roles; lead: Tr.admin-roles-lead; tab: 1; }
         VerticalLayout {
-            padding: Theme.gap-md;
-            spacing: Theme.gap-md;
-            Text {
-                text: AdminState.role-edit-id < 0 ? Tr.admin-role-new : Tr.admin-role-editing;
-                color: Theme.text-primary;
-                font-size: Theme.font-body;
-                font-weight: 600;
-            }
-            VerticalLayout {
-                spacing: Theme.gap-xs;
-                FieldLabel { text: Tr.admin-role-name; }
-                Field { text <=> AdminState.role-edit-name; placeholder: "streamer"; }
-                Hint { text: Tr.admin-role-name-hint; }
-            }
-            // The badge: a glyph and a color, both optional. Seventeen of
-            // each, so they wrap where the page is narrower than a row.
-            // A finger gets bigger tiles.
-            VerticalLayout {
-                spacing: Theme.gap-xs;
-                FieldLabel { text: Tr.admin-role-badge; }
-                glyphs := TileFlow {
-                    count: AdminState.role-icons.length + 1;
-                    tile: State.touch-host ? 40px : 30px;
-                    Rectangle {
-                        x: glyphs.x-of(0);
-                        y: glyphs.y-of(0);
-                        width: glyphs.tile;
-                        height: glyphs.tile;
-                        border-radius: Theme.radius-sm;
-                        background: AdminState.role-edit-icon == "" ? Theme.accent : Theme.bg-tertiary;
-                        Text { text: "—"; color: Theme.text-secondary; font-size: Theme.font-sm; }
-                        TouchArea { mouse-cursor: pointer; clicked => { AdminState.role-edit-icon = ""; } }
-                    }
-                    for icon[i] in AdminState.role-icons : Rectangle {
-                        x: glyphs.x-of(i + 1);
-                        y: glyphs.y-of(i + 1);
-                        width: glyphs.tile;
-                        height: glyphs.tile;
-                        border-radius: Theme.radius-sm;
-                        background: AdminState.role-edit-icon == icon ? Theme.accent : Theme.bg-tertiary;
-                        animate background { duration: 100ms; }
-                        RoleGlyph {
-                            name: icon;
-                            size: 16px;
-                            stroke: AdminState.role-edit-icon == icon ? Theme.on-accent : Theme.text-secondary;
+            for r in AdminState.roles : Row {
+                // Narrow: the standing goes under the name, so the name is
+                // never the part that gets cut.
+                row-height: root.compact ? role-body.preferred-height : 52px;
+                HorizontalLayout {
+                    padding-left: Theme.gap-xs;
+                    padding-right: Theme.gap-xs;
+                    spacing: Theme.gap-sm;
+                    role-body := VerticalLayout {
+                        alignment: center;
+                        padding-top: root.compact ? Theme.gap-sm : 0px;
+                        padding-bottom: root.compact ? Theme.gap-sm : 0px;
+                        spacing: 2px;
+                        horizontal-stretch: 1;
+                        HorizontalLayout {
+                            spacing: Theme.gap-xs;
+                            if r.icon != "" : RoleGlyph {
+                                name: r.icon;
+                                size: 14px;
+                                stroke: r.has-color ? r.color : Theme.text-secondary;
+                            }
+                            // The name keeps its width; the rest follows it.
+                            Cell { text: r.name; font-weight: 600; horizontal-stretch: 0;
+                                color: r.has-color ? r.color : Theme.text-primary; }
+                            if !root.compact : Muted {
+                                text: "· " + r.standing + " · " + r.holders + " " + Tr.admin-holders;
+                                horizontal-stretch: 1;
+                            }
                         }
-                        TouchArea { mouse-cursor: pointer; clicked => { AdminState.role-edit-icon = icon; } }
+                        if root.compact : Muted { text: r.standing + " · " + r.holders + " " + Tr.admin-holders; }
+                        // Narrow: every permission, wrapped (the row grows).
+                        Muted {
+                            text: r.permissions;
+                            wrap: root.compact ? TextWrap.word-wrap : TextWrap.no-wrap;
+                        }
                     }
+                    if !r.builtin : Chip { text: Tr.admin-edit; clicked => { AdminLogic.role-select(r.id); } }
+                    if !r.builtin : Chip { text: Tr.admin-delete; danger: true;
+                        clicked => { AdminLogic.role-delete(r.id); } }
+                    if r.builtin : Muted { text: Tr.admin-builtin; }
                 }
-                swatches := TileFlow {
-                    count: AdminState.role-colors.length + 1;
-                    tile: State.touch-host ? 32px : 22px;
-                    Rectangle {
-                        x: swatches.x-of(0);
-                        y: swatches.y-of(0);
-                        width: swatches.tile;
-                        height: swatches.tile;
-                        border-radius: self.width / 2;
-                        border-width: AdminState.role-edit-color < 0 ? 2px : 1px;
-                        border-color: AdminState.role-edit-color < 0 ? Theme.text-primary : Theme.border;
-                        background: Theme.bg-tertiary;
-                        Text { text: "—"; color: Theme.text-muted; font-size: Theme.font-xs; }
-                        TouchArea { mouse-cursor: pointer; clicked => { AdminState.role-edit-color = -1; } }
-                    }
-                    for c[i] in AdminState.role-colors : Rectangle {
-                        x: swatches.x-of(i + 1);
-                        y: swatches.y-of(i + 1);
-                        width: swatches.tile;
-                        height: swatches.tile;
-                        border-radius: self.width / 2;
-                        background: c;
-                        border-width: AdminState.role-edit-color == i ? 2px : 0px;
-                        border-color: Theme.text-primary;
-                        TouchArea { mouse-cursor: pointer; clicked => { AdminState.role-edit-color = i; } }
-                    }
-                }
-            }
-            VerticalLayout {
-                spacing: 2px;
-                for name[i] in AdminState.perm-names : CheckRow {
-                    text: name;
-                    checked: AdminState.perm-on[i];
-                    toggled(on) => { AdminLogic.role-perm-toggled(i, on); }
-                }
-            }
-            Hint { text: Tr.admin-role-rank-hint; }
-            HorizontalLayout {
-                spacing: Theme.gap-sm;
-                Btn { text: Tr.cancel; clicked => { AdminLogic.role-edit-cancel(); } }
-                Btn { text: Tr.admin-role-save; accent: true; clicked => { AdminLogic.role-save(); } }
-                Rectangle { }
             }
         }
+        HorizontalLayout {
+            Btn { text: Tr.admin-role-new; clicked => { AdminLogic.role-new(); } }
+            Rectangle { }
+        }
     }
+    if AdminState.role-edit-open : RoleEditor { top-bar: root.top-bar; }
 }
 
 component RestrictionsTab inherits VerticalLayout {
@@ -794,21 +839,35 @@ component AuditCard inherits Row {
     }
 }
 
+// The audit grows a page at a time: a ListView too, its column heads
+// and "load more" outside it (P3-23).
 component AuditTab inherits VerticalLayout {
     in property <bool> compact;
+    in property <length> pad;
+    /// As `UsersTab`'s.
+    in property <length> edge;
+    in property <length> inset;
+    padding: root.pad;
+    padding-right: root.edge;
     spacing: Theme.gap-md;
-    TabHead { title: Tr.admin-audit; lead: Tr.admin-audit-lead; tab: 6; }
+    TabHead { title: Tr.admin-audit; lead: Tr.admin-audit-lead; tab: 6; padding-right: root.inset; }
     if AdminState.audit.length == 0 && !AdminState.busy : Empty { text: Tr.admin-none; }
-    if root.compact && AdminState.audit.length > 0 : VerticalLayout {
-        for e in AdminState.audit : AuditCard { e: e; }
+    if root.compact && AdminState.audit.length > 0 : ListView {
+        vertical-stretch: 1;
+        mouse-drag-pan-enabled: State.touch-host;
+        for e in AdminState.audit : HorizontalLayout {
+            padding-right: root.inset;
+            AuditCard { e: e; }
+        }
     }
     // A table: fixed columns for when, who and what; the target and
     // the details share the rest. Headers say what each is.
     if !root.compact && AdminState.audit.length > 0 : VerticalLayout {
+        vertical-stretch: 1;
         HorizontalLayout {
             height: 28px;
             padding-left: Theme.gap-xs;
-            padding-right: Theme.gap-xs;
+            padding-right: Theme.gap-xs + root.inset;
             spacing: Theme.gap-sm;
             ColHead { text: Tr.admin-col-when; width: 84px; }
             ColHead { text: Tr.admin-col-who; width: 96px; }
@@ -816,26 +875,36 @@ component AuditTab inherits VerticalLayout {
             ColHead { text: Tr.admin-col-target; width: 116px; }
             ColHead { text: Tr.admin-col-detail; horizontal-stretch: 1; }
         }
-        Rectangle { height: 1px; background: Theme.border; }
-        for e in AdminState.audit : Row {
-            row-height: 44px;
-            HorizontalLayout {
-                padding-left: Theme.gap-xs;
-                padding-right: Theme.gap-xs;
-                spacing: Theme.gap-sm;
-                Muted { text: e.when; width: 84px; }
-                Cell { text: e.actor; font-weight: 600; width: 96px; }
-                Cell { text: e.action; color: Theme.accent-text; width: 132px; }
-                Cell { text: e.target; color: Theme.text-secondary; width: 116px; }
-                // Two lines when it needs them, elided past that.
-                Text {
-                    text: e.detail;
-                    color: Theme.text-secondary;
-                    font-size: Theme.font-xs;
-                    vertical-alignment: center;
-                    wrap: word-wrap;
-                    overflow: elide;
-                    horizontal-stretch: 1;
+        HorizontalLayout {
+            padding-right: root.inset;
+            Rectangle { height: 1px; background: Theme.border; }
+        }
+        ListView {
+            vertical-stretch: 1;
+            mouse-drag-pan-enabled: State.touch-host;
+            for e in AdminState.audit : HorizontalLayout {
+                padding-right: root.inset;
+                Row {
+                    row-height: 44px;
+                    HorizontalLayout {
+                        padding-left: Theme.gap-xs;
+                        padding-right: Theme.gap-xs;
+                        spacing: Theme.gap-sm;
+                        Muted { text: e.when; width: 84px; }
+                        Cell { text: e.actor; font-weight: 600; width: 96px; }
+                        Cell { text: e.action; color: Theme.accent-text; width: 132px; }
+                        Cell { text: e.target; color: Theme.text-secondary; width: 116px; }
+                        // Two lines when it needs them, elided past that.
+                        Text {
+                            text: e.detail;
+                            color: Theme.text-secondary;
+                            font-size: Theme.font-xs;
+                            vertical-alignment: center;
+                            wrap: word-wrap;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+                    }
                 }
             }
         }
@@ -976,28 +1045,49 @@ component AdminNav inherits VerticalLayout {
     if root.narrow : Rectangle { }
 }
 
-/// The selected tab, scrolling: the wide panel's right column, the
-/// narrow page's second page.
-component AdminContent inherits ScrollView {
+/// The selected tab: the wide panel's right column, the narrow page's
+/// second page. The long lists (people, the audit) scroll in a list of
+/// their own under the tab's head; the other tabs scroll whole.
+component AdminContent inherits Rectangle {
     in property <int> tab;
     in property <bool> compact;
     in property <length> pad: Theme.gap-xl;
+    /// The wide panel's measure: the tab's content stops this far from
+    /// its left edge while its lists' scroll bars stay at the window's
+    /// edge (ANDROID-SPEC.md D75). 0: no measure (the phone's page).
+    in property <length> max-column: 0px;
+    /// The phone's page: a top bar above with its own way back.
+    in property <bool> top-bar;
+    // The lists' own right padding, and how much further in their rows,
+    // the head and a whole-scrolling tab's content end.
+    property <length> edge: root.max-column > 0 ? 0px : root.pad;
+    property <length> inset: root.max-column > 0
+        ? Math.max(0px, root.width - root.max-column) + root.pad : 0px;
     vertical-stretch: 1;
-    // Fluent's ScrollView does not pan on a drag; a finger needs it to
-    // (ANDROID-SPEC.md D27).
-    mouse-drag-pan-enabled: State.touch-host;
-    VerticalLayout {
-        padding: root.pad;
-        alignment: start;
-        if root.tab == 0 : UsersTab { compact: root.compact; }
-        if root.tab == 1 : RolesTab { compact: root.compact; }
-        if root.tab == 2 : RestrictionsTab { compact: root.compact; }
-        if root.tab == 3 : InvitesTab { }
-        if root.tab == 4 : ChannelsTab { }
-        if root.tab == 5 : FilesTab { }
-        if root.tab == 6 : AuditTab { compact: root.compact; }
-        if root.tab == 7 : ServerTab { compact: root.compact; }
-        if root.tab == 8 : ReportsTab { compact: root.compact; }
+    if root.tab == 0 : UsersTab { compact: root.compact; pad: root.pad; edge: root.edge; inset: root.inset; }
+    if root.tab == 6 : AuditTab { compact: root.compact; pad: root.pad; edge: root.edge; inset: root.inset; }
+    if root.tab != 0 && root.tab != 6 : ScrollView {
+        width: 100%;
+        height: 100%;
+        // The roles' list and its editor swap in place: each starts at
+        // the top, not where the other was scrolled to.
+        property <bool> role-editing: AdminState.role-edit-open;
+        changed role-editing => { self.content-y = 0; }
+        // Fluent's ScrollView does not pan on a drag; a finger needs it
+        // to (ANDROID-SPEC.md D27).
+        mouse-drag-pan-enabled: State.touch-host;
+        VerticalLayout {
+            padding: root.pad;
+            padding-right: root.edge + root.inset;
+            alignment: start;
+            if root.tab == 1 : RolesTab { compact: root.compact; top-bar: root.top-bar; }
+            if root.tab == 2 : RestrictionsTab { compact: root.compact; }
+            if root.tab == 3 : InvitesTab { }
+            if root.tab == 4 : ChannelsTab { }
+            if root.tab == 5 : FilesTab { }
+            if root.tab == 7 : ServerTab { compact: root.compact; }
+            if root.tab == 8 : ReportsTab { compact: root.compact; }
+        }
     }
 }
 
@@ -1011,10 +1101,11 @@ export component AdminPanel inherits Rectangle {
     in property <bool> narrow: false;
     /// Narrow only: a tab's page is showing, not the list.
     in-out property <bool> section-open: false;
-    // The tab and its Close button share one column beside the tabs,
-    // at most 840 px wide: on a maximized window a row's controls stay
-    // near its name and the button under the list, not at the far edge.
-    property <length> column: Math.min(root.width - 188px, 840px);
+    // The tab keeps to a column beside the tabs, at most 960 px wide
+    // (`AdminContent.max-column`): on a maximized window a row's
+    // controls stay within reach of its name. Its lists' scroll bars and
+    // the Close bar under it reach the window's edge (ANDROID-SPEC.md D75).
+    property <length> column: Math.min(root.width - 188px, 960px);
     // The column is narrower than a wide row needs (the Users row's
     // Actions and role pickers beside the name; the audit table's
     // columns): rows stack instead.
@@ -1025,10 +1116,14 @@ export component AdminPanel inherits Rectangle {
         AdminLogic.refresh(t);
     }
 
-    /// One step back: from a tab to the list (narrow), else out of the
-    /// panel. The top bar's arrow, Escape and Android's Back.
+    /// One step back: out of the role editor to the roles, from a tab
+    /// to the list (narrow), else out of the panel. The top bar's arrow,
+    /// Escape and Android's Back.
     public function back() {
-        if (root.narrow && root.section-open) {
+        if (root.tab == 1 && AdminState.role-edit-open
+            && (!root.narrow || root.section-open)) {
+            AdminLogic.role-edit-cancel();
+        } else if (root.narrow && root.section-open) {
             root.section-open = false;
         } else {
             AdminLogic.close();
@@ -1039,14 +1134,21 @@ export component AdminPanel inherits Rectangle {
         Rectangle {
             width: 188px;
             background: Theme.surface;
-            AdminNav {
-                tab: root.tab;
-                picked(t) => { root.open-tab(t); }
+            NavScroll {
+                width: 100%;
+                height: 100%;
+                AdminNav {
+                    tab: root.tab;
+                    picked(t) => { root.open-tab(t); }
+                }
             }
         }
         VerticalLayout {
-            width: root.column;
-            AdminContent { tab: root.tab; compact: root.compact; }
+            AdminContent {
+                tab: root.tab;
+                compact: root.compact;
+                max-column: 960px;
+            }
             Rectangle {
                 height: 64px;
                 background: Theme.bg-primary;
@@ -1059,8 +1161,6 @@ export component AdminPanel inherits Rectangle {
                 }
             }
         }
-        // The rest of a wide window.
-        Rectangle { }
     }
 
     if root.narrow : VerticalLayout {
@@ -1093,85 +1193,69 @@ export component AdminPanel inherits Rectangle {
                 }
             }
         }
-        if !root.section-open : AdminNav {
+        if !root.section-open : NavScroll {
             vertical-stretch: 1;
-            narrow: true;
-            tab: root.tab;
-            picked(t) => {
-                root.open-tab(t);
-                root.section-open = true;
+            AdminNav {
+                narrow: true;
+                tab: root.tab;
+                picked(t) => {
+                    root.open-tab(t);
+                    root.section-open = true;
+                }
             }
         }
         if root.section-open : AdminContent {
             tab: root.tab;
             compact: true;
             pad: Theme.gap-lg;
+            top-bar: true;
         }
     }
 
     // ── Confirmation (every action that bites goes through it) ─────
     // What it is about, what it does, a reason when the action takes
     // one (kept in the audit and shown to the person), Escape, Back or
-    // Cancel to back out (the page's key handler hands Back here).
-    if AdminState.confirm-open : Rectangle {
-        background: Theme.scrim;
-        TouchArea { clicked => { AdminLogic.confirm-cancel(); } }
-        confirm-keys := FocusScope {
-            init => { self.focus(); }
-            key-pressed(ev) => {
-                if (ev.text == Key.Escape) { AdminLogic.confirm-cancel(); return accept; }
-                reject
+    // Cancel to back out (the page's key handler hands Back here). The
+    // app's own dialog, as every other one (review 2026-10, P3-21):
+    // centred in the panel, which is the page.
+    if AdminState.confirm-open : Modal {
+        card-width: 420px;
+        dismissed => { AdminLogic.confirm-cancel(); }
+        key(ev) => {
+            if (ev.text == Key.Return) { AdminLogic.confirm-accept(); return accept; }
+            reject
+        }
+        Text {
+            text: AdminState.confirm-title;
+            color: Theme.text-primary;
+            font-size: Theme.font-md;
+            font-weight: 600;
+            wrap: word-wrap;
+        }
+        Text {
+            text: AdminState.confirm-text;
+            color: Theme.text-secondary;
+            font-size: Theme.font-sm;
+            wrap: word-wrap;
+        }
+        if AdminState.confirm-asks-reason : VerticalLayout {
+            spacing: Theme.gap-xs;
+            FieldLabel { text: Tr.admin-reason; }
+            Field {
+                text <=> AdminState.confirm-reason;
+                placeholder: Tr.admin-reason-placeholder;
+                accepted => { AdminLogic.confirm-accept(); }
             }
-            Rectangle {
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                width: Math.min(420px, root.width - 48px);
-                height: confirm-col.preferred-height;
-                border-radius: Theme.radius-md;
-                background: Theme.bg-secondary;
-                border-width: 1px;
-                border-color: Theme.border;
-                drop-shadow-color: #00000088;
-                drop-shadow-blur: 16px;
-                drop-shadow-offset-y: 6px;
-                TouchArea { }
-                confirm-col := VerticalLayout {
-                    padding: Theme.gap-lg;
-                    spacing: Theme.gap-md;
-                    Text {
-                        text: AdminState.confirm-title;
-                        color: Theme.text-primary;
-                        font-size: Theme.font-md;
-                        font-weight: 600;
-                        wrap: word-wrap;
-                    }
-                    Text {
-                        text: AdminState.confirm-text;
-                        color: Theme.text-secondary;
-                        font-size: Theme.font-sm;
-                        wrap: word-wrap;
-                    }
-                    if AdminState.confirm-asks-reason : VerticalLayout {
-                        spacing: Theme.gap-xs;
-                        FieldLabel { text: Tr.admin-reason; }
-                        Field {
-                            text <=> AdminState.confirm-reason;
-                            placeholder: Tr.admin-reason-placeholder;
-                            accepted => { AdminLogic.confirm-accept(); }
-                        }
-                    }
-                    HorizontalLayout {
-                        spacing: Theme.gap-sm;
-                        Rectangle { }
-                        Btn { text: Tr.cancel; clicked => { AdminLogic.confirm-cancel(); } }
-                        Btn {
-                            text: AdminState.confirm-label;
-                            danger: AdminState.confirm-danger;
-                            accent: !AdminState.confirm-danger;
-                            clicked => { AdminLogic.confirm-accept(); }
-                        }
-                    }
-                }
+        }
+        HorizontalLayout {
+            spacing: Theme.gap-sm;
+            Rectangle { }
+            Btn { text: Tr.cancel; clicked => { AdminLogic.confirm-cancel(); } }
+            Btn {
+                text: AdminState.confirm-label;
+                danger: AdminState.confirm-danger;
+                accent: !AdminState.confirm-danger;
+                clicked => { AdminLogic.confirm-accept(); }
             }
         }
     }

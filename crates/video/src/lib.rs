@@ -47,6 +47,8 @@ pub mod pool;
 pub mod pointer;
 #[cfg(target_os = "ios")]
 pub mod videotoolbox;
+#[cfg(target_os = "linux")]
+pub mod x11;
 pub mod yuv;
 
 /// Quality preset for screen sharing.
@@ -133,14 +135,18 @@ impl Quality {
     /// This is the *actual* encoder target (ABR + VBV), not a hint. The
     /// sender may run below it under uplink pressure — see
     /// [`Quality::scaled_bitrate`] and [`VideoEncoder::set_bitrate_scale_pct`].
+    ///
+    /// 1080p was raised a quarter on 2026-10-17 (8 → 10 Mbit/s at 60 fps,
+    /// 6 → 7.5 at 30): the frames between keyframes, ~59 of 60, are what
+    /// the target buys, and at 8 they softened on motion and scrolling.
     #[must_use]
     pub const fn bitrate(self) -> u32 {
         match self {
             Self::HD30 => 3_500_000,
             Self::HD60 => 4_500_000,
-            Self::FHD30 => 6_000_000,
-            Self::FHD60 => 8_000_000,
-            Self::QHD30 => 10_000_000,
+            Self::FHD30 => 7_500_000,
+            // 1440p at 30 has about the pixel rate of 1080p at 60.
+            Self::FHD60 | Self::QHD30 => 10_000_000,
         }
     }
 
@@ -288,7 +294,6 @@ pub struct DecodedFrame {
     pub data: Vec<u8>,
     pub width: u32,
     pub height: u32,
-    pub timestamp_ms: u64,
     pub format: PictureFormat,
 }
 
@@ -335,25 +340,9 @@ pub enum CodecError {
 /// and this makes them visible from the sender's log alone.
 #[must_use]
 pub fn describe_annexb_nals(data: &[u8]) -> String {
-    let mut names: Vec<String> = Vec::new();
-    let mut i = 0usize;
-    while i + 3 < data.len() {
-        if data[i] != 0 || data[i + 1] != 0 {
-            i += 1;
-            continue;
-        }
-        let hdr = if data[i + 2] == 1 {
-            i + 3
-        } else if data[i + 2] == 0 && i + 4 < data.len() && data[i + 3] == 1 {
-            i + 4
-        } else {
-            i += 1;
-            continue;
-        };
-        if hdr >= data.len() {
-            break;
-        }
-        let name = match data[hdr] & 0x1F {
+    let names: Vec<String> = annexb::nal_units(data)
+        .into_iter()
+        .map(|unit| match annexb::nal_type(unit) {
             1 => "slice".to_string(),
             5 => "IDR".to_string(),
             6 => "SEI".to_string(),
@@ -361,10 +350,8 @@ pub fn describe_annexb_nals(data: &[u8]) -> String {
             8 => "PPS".to_string(),
             9 => "AUD".to_string(),
             t => format!("nal{t}"),
-        };
-        names.push(name);
-        i = hdr + 1;
-    }
+        })
+        .collect();
     if names.is_empty() {
         "no start codes found".to_string()
     } else {
@@ -451,13 +438,15 @@ pub trait VideoEncoder {
         true
     }
 
-    /// The last frame came out too large to send (over
-    /// `protocol::MAX_VIDEO_FRAME_BYTES`) and was dropped: raise the
-    /// minimum quantizer the next session opens with, so the keyframe
-    /// that replaces it is smaller. Returns the new floor, or `None` when
-    /// the backend has none or the highest is already in force. The
-    /// floor relaxes on its own once frames fit again.
-    fn frame_too_large(&mut self) -> Option<u32> {
+    /// The last frame came out `bytes` long, over `limit`
+    /// (`protocol::MAX_VIDEO_FRAME_BYTES`), and was dropped: raise the
+    /// minimum quantizer the next session opens with — as far as that
+    /// frame needed — so the keyframe that replaces it is smaller. It
+    /// binds every frame of the session, not only keyframes. Returns the
+    /// new floor, or `None` when the backend has none or the highest is
+    /// already in force. The floor eases on its own once keyframes come
+    /// out with room under the limit.
+    fn frame_too_large(&mut self, _bytes: usize, _limit: usize) -> Option<u32> {
         None
     }
 
@@ -546,23 +535,40 @@ pub trait VideoDecoder {
     fn next_poll(&self, _now: std::time::Instant) -> Option<std::time::Instant> {
         None
     }
+
+    /// The decoder lost its session (a failed decode; iOS takes it back
+    /// in the background) and drops every frame until a keyframe: the
+    /// caller asks the sharer for one. A still share sends none of its
+    /// own, and the picture stayed frozen (review 2026-10, P1-10).
+    fn needs_keyframe(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn nal_types_are_named_in_order() {
+        let au = [
+            0, 0, 0, 1, 0x67, 1, 0, 0, 1, 0x68, 2, 0, 0, 1, 0x65, 3, 0, 0, 1, 0x0C, 4,
+        ];
+        assert_eq!(describe_annexb_nals(&au), "SPS,PPS,IDR,nal12");
+        assert_eq!(describe_annexb_nals(&[1, 2, 3]), "no start codes found");
+    }
+
     mod scaled_bitrate {
         use super::*;
 
         #[test]
         fn returns_preset_bitrate_at_100() {
-            assert_eq!(Quality::FHD60.scaled_bitrate(100), 8_000_000);
+            assert_eq!(Quality::FHD60.scaled_bitrate(100), 10_000_000);
         }
 
         #[test]
         fn scales_linearly() {
-            assert_eq!(Quality::FHD60.scaled_bitrate(50), 4_000_000);
+            assert_eq!(Quality::FHD60.scaled_bitrate(50), 5_000_000);
         }
 
         #[test]

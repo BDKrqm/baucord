@@ -3,12 +3,11 @@
 baucord is a voice, text and screen-sharing app in Rust: a self-hosted
 relay server (QUIC, no media mixing), a desktop client for Windows,
 macOS and Linux, and clients for Android and iPhone that run the same
-Rust engine and the same Slint UI. It is in daily use: 1.1.9 on every
-platform (1.2.1, the Play closed-testing release with the 2026-10-10
-review's fixes, is next), desktop
-users on the in-app updater, Android as a sideloaded APK and on Play's
-internal test, iPhone as an Ad Hoc build, the official server in
-Docker.
+Rust engine and the same Slint UI. It is in daily use: 1.2.1 is the
+latest release (2026-10-13; 1.3.0, with the 2026-10 review's fixes, is
+next, CHANGELOG.md), desktop users on the in-app updater, Android as a
+sideloaded APK and on Play's internal test, iPhone as an Ad Hoc build,
+the official server in Docker.
 
 This file is the way in. Read it first, then follow the reading order
 for the work at hand (§3). Everything else is linked from here.
@@ -48,8 +47,8 @@ for the work at hand (§3). Everything else is linked from here.
   every platform's icon comes from `assets/icons/icon.png` — the
   desktop's through `scripts/desktop-icons.py`, whose output
   (`icon.ico`, the website's favicon) is committed; the tray's and the
-  desktop windows' flat glyph (`tray.png`, `tray-quiet.png`) is drawn
-  by `scripts/tray-icons.py`, committed too.)
+  desktop windows' icon (`tray.png`, and `tray-quiet.png` while muted)
+  is the same dog on a disc, made by hand at 64 px, committed too.)
 - **Work:** the assistant unpacks it into its sandbox, edits,
   compile-checks every platform it can (host, Android, iOS — see
   SESSION-GUIDE §1), runs the tests, renders every `.slint` change at
@@ -85,12 +84,12 @@ for the work at hand (§3). Everything else is linked from here.
 | `ARCHITECTURE.md` | the runtime: threads, lanes, transport, the server tick, persistence, the client, the hosts | before server, protocol or client-core work |
 | `PERSISTENCE-SPEC.md` | the 1.1 design (accounts by device key, invites, roles, history, DMs, files, profiles, admin) — all shipped; §12 is every later decision | before touching admission, roles, history, DMs, files |
 | `AEC-SPEC.md` | echo cancellation on every platform; §12 the decisions (E1…) | before audio-path work |
-| `ANDROID-SPEC.md` | the Android client as it is (§0–§13); decisions D1…D9 in §1, D10…D70 in §14 (from D23 on, newest first) | before Android work |
-| `IOS-SPEC.md` | the iPhone client as it is (§0–§13); decisions D1…D13 in §1, D14…D60 in §14 (in order) | before iOS work |
+| `ANDROID-SPEC.md` | the Android client as it is (§0–§13); decisions D1…D9 in §1, from D10 on in §14 (from D23 on, newest first) | before Android work |
+| `IOS-SPEC.md` | the iPhone client as it is (§0–§13); decisions D1…D13 in §1, from D14 on in §14 (in order) | before iOS work |
 | `android/README.md`, `ios/README.md` | building, running and releasing each phone app | when the user builds |
 | `DEVICE-CHECKLIST.md` | what has to be seen on a real Windows machine, Android phone and iPhone before a release: every change the sandbox could not run, as *do this → expect that* | when the user tests; add a line for every platform change made unrun |
 | `licenses/README.md` | the third-party notices: what writes them, what CI does | before adding a native library |
-| `tools/chat-scroll-sim/` | the chat pane's scrolling harness (ANDROID-SPEC D66) | before touching the chat's scrolling |
+| `tools/chat-scroll-sim/` | the chat pane's scrolling harness (ANDROID-SPEC D66); CI runs it on every pull request | before touching the chat's scrolling |
 
 The specs describe what is built at the top and keep a decision log
 at the end: why each thing is the way it is, in the order it was
@@ -135,10 +134,12 @@ The full list is SESSION-GUIDE §4; these break things when forgotten:
   (no text there): `frontend/build.rs` generates its line of `fill_tr`
   and fails the build when a catalog lacks it.
 - **Every `.slint` change** is compile-checked and rendered, at phone
-  width and at 1000×640. A change to the chat's scrolling also runs
+  width and at 1000×640. A change to the chat's scrolling, or to
+  `app_core::chat`'s row caps, also runs
   `cargo run --manifest-path tools/chat-scroll-sim/Cargo.toml`
   (ANDROID-SPEC D66): it drives the real pane and fails on a wrong
-  follow.
+  follow. CI runs it `--locked`, so commit its `Cargo.lock` when the
+  run changes it.
 - **Phone builds are always `-p android` / `-p ios`**: a workspace build
   unifies the desktop features back in.
 - **No worker polls on a short timer, no per-frame log lines.**
@@ -147,8 +148,10 @@ The full list is SESSION-GUIDE §4; these break things when forgotten:
 
 ## 5. Where things stand (2026-10-09)
 
-- **Version 1.2.1** in the crates (released: 1.1.9; 1.2.1 carries the
-  fixes of the 2026-10-10 review, PRODUCTION-PLAN.md §2a); the crate map is
+- **Version 1.3.0** in the crates (released: 1.2.1, 2026-10-13, with
+  the fixes of the 2026-10-10 review; 1.3.0 carries Settings and the
+  admin panel as pages and the 2026-10 review's fixes, PRODUCTION-PLAN.md
+  §2a, CHANGELOG.md); the crate map is
   SESSION-GUIDE §2, the list of what it carries SESSION-GUIDE §3. 1.2
   adds what the stores require of a chat app — block, report, delete
   my account, the terms on the connect card (PERSISTENCE-SPEC §12 S1),
