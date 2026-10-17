@@ -293,7 +293,7 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
-          $obj = "ci/ffmpeg-$($env:VCPKG_COMMIT.Substring(0,10))-x264-gpl-nvcodec-amf-x64-windows-static-md.zip"
+          $obj = "ci/ffmpeg-$($env:VCPKG_COMMIT.Substring(0,10))-avcodec-avformat-swscale-x264-gpl-nvcodec-amf-x64-windows-static-md.zip"
           aws s3 cp "s3://baucord/$obj" ffmpeg-prebuilt.zip --endpoint-url https://6bcc35de83e46a771896026baf11b4ac.r2.cloudflarestorage.com
           7z x ffmpeg-prebuilt.zip -oC:\ffmpeg-prebuilt
           echo "FFMPEG_DIR=C:\ffmpeg-prebuilt\x64-windows-static-md" >> $env:GITHUB_ENV

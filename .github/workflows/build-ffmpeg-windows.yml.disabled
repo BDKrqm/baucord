@@ -9,13 +9,14 @@ name: Build FFmpeg prebuilt (Windows)
 # workflow) whenever VCPKG_COMMIT, the feature set, or the triplet changes.
 # The object is named the way release.yml's "Download prebuilt FFmpeg
 # (Windows)" step asks for it: ci/ffmpeg-<first 10 of VCPKG_COMMIT>-
-# x264-gpl-nvcodec-amf-x64-windows-static-md.zip. A new pin is a new
-# name by itself; a new feature set or triplet changes the name here
-# and there together. Never overwrite an object that a shipped workflow
-# revision still references -- old commits must stay buildable. (This
-# took a name to type, whose default matched nothing release.yml reads:
-# review 2026-10. Kept disabled by the owner's decision; enable it by
-# dropping `.disabled` when the pin moves.)
+# avcodec-avformat-swscale-x264-gpl-nvcodec-amf-x64-windows-static-md.zip.
+# A new pin is a new name by itself; a new feature set or triplet
+# changes the name here and there together. Never overwrite an object
+# that a shipped workflow revision still references -- old commits must
+# stay buildable. (This took a name to type, whose default matched
+# nothing release.yml reads: review 2026-10. Kept disabled by the
+# owner's decision; enable it by dropping `.disabled` when the pin
+# moves.)
 
 on:
   workflow_dispatch:
@@ -50,15 +51,16 @@ jobs:
       # mfx dispatch (the vpl switch came later) and is untested with our
       # static-md link; the runtime encoder probe handles its absence.
       # Re-add only with a full retest.
-      # vcpkg's default features also build avfilter, swresample and
-      # avdevice, which nothing links since review 2026-10 P3-38:
-      # harmless in the zip. Trimming them (`core,avcodec,avformat,
-      # swscale`, as readme.md does for local builds) is a new feature
-      # set: a new object name here and in release.yml, and a run of
-      # this workflow before the next release.
+      # `core` and the three libraries baucord links, as readme.md does.
+      # Not harmless to leave vcpkg's defaults: with swresample built,
+      # FFmpeg compiles its Opus decoder into avcodec.lib, which then
+      # calls swr_*; nothing links swresample since review 2026-10
+      # P3-38, so the release link failed (LNK2019 swr_alloc and five
+      # more). The object name carries the feature set: the zip of the
+      # default set stays for the commits that still link swresample.
       - name: Build FFmpeg via vcpkg
         shell: pwsh
-        run: C:\vcpkg\vcpkg.exe install ffmpeg[x264,gpl,nvcodec,amf]:x64-windows-static-md --recurse
+        run: C:\vcpkg\vcpkg.exe install "ffmpeg[core,avcodec,avformat,swscale,x264,gpl,nvcodec,amf]:x64-windows-static-md" --recurse
 
       - name: Package installed tree
         shell: pwsh
@@ -78,5 +80,5 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
-          $obj = "ci/ffmpeg-$($env:VCPKG_COMMIT.Substring(0,10))-x264-gpl-nvcodec-amf-x64-windows-static-md.zip"
+          $obj = "ci/ffmpeg-$($env:VCPKG_COMMIT.Substring(0,10))-avcodec-avformat-swscale-x264-gpl-nvcodec-amf-x64-windows-static-md.zip"
           aws s3 cp ffmpeg-prebuilt.zip "s3://baucord/$obj" --endpoint-url https://6bcc35de83e46a771896026baf11b4ac.r2.cloudflarestorage.com
