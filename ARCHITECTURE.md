@@ -933,7 +933,11 @@ nobody spatially (`AdaptiveJitterBuffer::set_stereo`). The master
 limiter is linked across the two ears. Placing is the frontend's
 `app/space.rs` and `ui/slint/space.slint`; it spreads the room out by
 itself on a join or a leave (`auto_spread_voice_space`, once per
-`flush_roster`). Each peer also has a five-band equalizer of its own
+`flush_roster`). The radius is heard as distance (past `NEAR`: up to
+`DISTANCE_DB` quieter and `AIR_DEPTH` duller), with the direction whole
+from `FULL_AT` out; the listener's width (`PeerTable::set_width`) adds a
+broadband level difference and a larger head on top of the model. The
+dialog's Distance slider rescales every placed peer's radius. Each peer also has a five-band equalizer of its own
 (`processor/eq.rs`, `PeerAudioSettings::eq`: after the volume, before
 the peer's limiter), and the finished voice mix one voice tone
 (`ToneFilter`: natural, crisp, bass boosted; Settings → Audio), which

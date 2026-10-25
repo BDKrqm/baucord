@@ -90,7 +90,7 @@ use std::{
 type DeviceListCache = Mutex<Option<(Instant, Vec<(String, bool)>)>>;
 
 pub use aec::{AecMode, AecReport, AecTier, OutputKind};
-pub use config::{PeerAudioSettings, VoiceChatConfig};
+pub use config::{PeerAudioSettings, VoiceChatConfig, DEFAULT_SPATIAL_WIDTH};
 use cpal::traits::{DeviceTrait, HostTrait};
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
 pub use encoder::MAX_VOICE_PAYLOAD;
@@ -705,6 +705,7 @@ impl VoiceChat {
             peers: {
                 let table = transport::jitter_buffer::PeerTable::with_spatial(config.spatial_voice);
                 table.set_tone(config.voice_tone);
+                table.set_width(config.spatial_width);
                 Arc::new(table)
             },
             #[cfg(windows)]
@@ -1706,6 +1707,12 @@ impl VoiceChat {
     /// The colour over everyone's voice (`processor::eq`).
     pub fn set_voice_tone(&self, tone: VoiceTone) {
         self.peers.set_tone(tone);
+    }
+
+    /// How wide the voice space sounds: 0 a real head's width … 1 the
+    /// widest (`spatial.rs`).
+    pub fn set_spatial_width(&self, width: f32) {
+        self.peers.set_width(width);
     }
 
     pub fn add_peer(&self, peer_id: u64) {

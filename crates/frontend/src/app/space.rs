@@ -15,12 +15,13 @@ use ui::SpacePerson;
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
-/// How far out "Spread out" puts people: near the rim, where the
-/// direction is all there.
-const SPREAD_RADIUS: f32 = 0.85;
 /// Nearer the middle than this is no place (as `spatial.rs` has it):
 /// kept as the middle itself.
 const CENTRE: f32 = 0.05;
+/// The Distance slider's ends (of the radius): from where a voice is as
+/// loud as sent (`spatial::NEAR`) out to the rim.
+const DISTANCE_MIN: f32 = 0.3;
+const DISTANCE_MAX: f32 = 1.0;
 
 impl AppState {
     /// The voice space opens (the sidebar's button, a person's menu).
@@ -28,6 +29,8 @@ impl AppState {
         let s = self.main.global::<State>();
         s.set_space_spatial(self.settings.audio.spatial_voice);
         s.set_space_auto(self.settings.audio.space_auto_spread);
+        s.set_space_distance(self.space_distance());
+        s.set_space_width(self.settings.audio.space_width.clamp(0.0, 1.0));
         s.set_space_open(true);
         self.sync_voice_space();
     }
@@ -172,11 +175,61 @@ impl AppState {
     /// `members` spread out (`spread`), kept, and shown.
     fn spread_people(&mut self, members: &[u64]) {
         let n = members.len();
+        let distance = self.space_distance();
         for (i, &client_id) in members.iter().enumerate() {
-            self.place_peer(client_id, spread(i, n), true);
+            self.place_peer(client_id, spread(i, n, distance), true);
         }
         self.save_settings();
         self.sync_voice_space();
+    }
+
+    /// The Distance slider as kept, within its ends.
+    fn space_distance(&self) -> f32 {
+        let d = self.settings.audio.space_distance;
+        if d.is_finite() {
+            d.clamp(DISTANCE_MIN, DISTANCE_MAX)
+        } else {
+            client::config::DEFAULT_SPACE_DISTANCE
+        }
+    }
+
+    /// The Distance slider moved: everyone placed in our room moves to
+    /// that distance, each in their own direction (whoever sits in the
+    /// middle stays there), heard at once; `released`, also kept.
+    pub(super) fn voice_space_distance(&mut self, distance: f32, released: bool) {
+        self.settings.audio.space_distance = distance;
+        let distance = self.space_distance();
+        for client_id in self.room_members() {
+            let Some([x, y]) = self.session.users.get(&client_id).map(|u| u.audio.position) else {
+                continue;
+            };
+            let r = x.hypot(y);
+            if r < CENTRE {
+                continue;
+            }
+            self.place_peer(client_id, [x / r * distance, y / r * distance], released);
+        }
+        if released {
+            self.save_settings();
+        }
+        self.sync_voice_space();
+    }
+
+    /// The Width slider moved: heard at once; `released`, also kept.
+    pub(super) fn voice_space_width(&mut self, width: f32, released: bool) {
+        let width = if width.is_finite() {
+            width.clamp(0.0, 1.0)
+        } else {
+            audio::DEFAULT_SPATIAL_WIDTH
+        };
+        self.settings.audio.space_width = width;
+        self.voice
+            .tx
+            .send(VoiceControl::SetSpatialWidth(width))
+            .ok();
+        if released {
+            self.save_settings();
+        }
     }
 
     /// "All to the middle": nobody placed, as before spatial voice.
@@ -236,18 +289,18 @@ fn on_disc([x, y]: [f32; 2]) -> [f32; 2] {
     }
 }
 
-/// Where the `i`th of `n` people goes when the space is spread out: up
-/// to five across the half in front of us — two are hard left and
-/// right, as far apart as ears can tell — and more round the whole
-/// circle, evenly.
-fn spread(i: usize, n: usize) -> [f32; 2] {
+/// Where the `i`th of `n` people goes when the space is spread out, at
+/// `distance` from us: up to five across the half in front of us — two
+/// are hard left and right, as far apart as ears can tell — and more
+/// round the whole circle, evenly.
+fn spread(i: usize, n: usize, distance: f32) -> [f32; 2] {
     let degrees = match n {
         0 | 1 => 0.0,
         2..=5 => -90.0 + 180.0 * i as f32 / (n - 1) as f32,
         _ => -180.0 + 360.0 * (i as f32 + 0.5) / n as f32,
     };
     let a = degrees.to_radians();
-    [SPREAD_RADIUS * a.sin(), SPREAD_RADIUS * a.cos()]
+    [distance * a.sin(), distance * a.cos()]
 }
 
 #[cfg(test)]
@@ -260,21 +313,31 @@ mod tests {
 
     #[test]
     fn two_people_go_hard_left_and_right() {
-        assert!((degrees(spread(0, 2)) + 90.0).abs() < 1e-3);
-        assert!((degrees(spread(1, 2)) - 90.0).abs() < 1e-3);
+        assert!((degrees(spread(0, 2, 0.6)) + 90.0).abs() < 1e-3);
+        assert!((degrees(spread(1, 2, 0.6)) - 90.0).abs() < 1e-3);
     }
 
     #[test]
     fn up_to_five_stay_in_front_and_more_go_round() {
         for n in 1..=5 {
             for i in 0..n {
-                let [_, y] = spread(i, n);
+                let [_, y] = spread(i, n, 0.6);
                 assert!(y >= -1e-6, "{i} of {n} is behind");
             }
         }
-        let angles: Vec<f32> = (0..8).map(|i| degrees(spread(i, 8))).collect();
+        let angles: Vec<f32> = (0..8).map(|i| degrees(spread(i, 8, 0.6))).collect();
         for pair in angles.windows(2) {
             assert!((pair[1] - pair[0] - 45.0).abs() < 1e-3, "{angles:?}");
+        }
+    }
+
+    #[test]
+    fn spreading_puts_everyone_at_the_distance() {
+        for n in 1..=8 {
+            for i in 0..n {
+                let [x, y] = spread(i, n, 0.45);
+                assert!((x.hypot(y) - 0.45).abs() < 1e-5, "{i} of {n}");
+            }
         }
     }
 

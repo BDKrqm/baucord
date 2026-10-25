@@ -15,7 +15,46 @@
 import { Theme } from "theme.slint";
 import { Tr } from "tr.slint";
 import { State, Logic, SpacePerson } from "globals.slint";
-import { AvatarTile, Btn, Card, CheckRow, Hint, PageRect } from "widgets.slint";
+import { AvatarTile, Btn, Card, CheckRow, Hint, HSlider, PageRect } from "widgets.slint";
+
+/// A slider with its name above and what each end means under it.
+component SpaceSlider inherits VerticalLayout {
+    in property <string> label;
+    in property <string> low;
+    in property <string> high;
+    in property <float> minimum;
+    in property <float> maximum;
+    in-out property <float> value;
+    callback live-changed(float);
+    callback released(float);
+
+    spacing: 2px;
+    Text {
+        text: root.label;
+        color: Theme.text-primary;
+        font-size: Theme.font-body;
+    }
+    HSlider {
+        minimum: root.minimum;
+        maximum: root.maximum;
+        value <=> root.value;
+        live-changed(v) => { root.live-changed(v); }
+        released(v) => { root.released(v); }
+    }
+    HorizontalLayout {
+        Text {
+            text: root.low;
+            color: Theme.text-muted;
+            font-size: Theme.font-xs;
+        }
+        Rectangle { horizontal-stretch: 1; }
+        Text {
+            text: root.high;
+            color: Theme.text-muted;
+            font-size: Theme.font-xs;
+        }
+    }
+}
 
 /// The disc and the people on it.
 export component VoiceSpacePad inherits Rectangle {
@@ -232,9 +271,9 @@ export component VoiceSpaceDialog inherits Rectangle {
                     people: State.space-people;
                     live: State.space-spatial;
                     // The room the card has, across and down (the rest
-                    // of the card is ~320 px), never under 180 px.
+                    // of the card is ~400 px), never under 180 px.
                     side: Math.max(180px, Math.min(300px,
-                        Math.min(root.card-width - 2 * Theme.gap-lg, root.area-height - 340px)));
+                        Math.min(root.card-width - 2 * Theme.gap-lg, root.area-height - 420px)));
                 }
                 if State.space-people.length == 0 : Text {
                     text: Tr.space-empty;
@@ -242,6 +281,31 @@ export component VoiceSpaceDialog inherits Rectangle {
                     font-size: Theme.font-sm;
                     horizontal-alignment: center;
                     wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: Theme.gap-lg;
+                    SpaceSlider {
+                        horizontal-stretch: 1;
+                        label: Tr.space-distance;
+                        low: Tr.space-near;
+                        high: Tr.space-far;
+                        minimum: 0.3;
+                        maximum: 1.0;
+                        value <=> State.space-distance;
+                        live-changed(v) => { Logic.space-distance-changed(v); }
+                        released(v) => { Logic.space-distance-released(v); }
+                    }
+                    SpaceSlider {
+                        horizontal-stretch: 1;
+                        label: Tr.space-width;
+                        low: Tr.space-narrow;
+                        high: Tr.space-wide;
+                        minimum: 0.0;
+                        maximum: 1.0;
+                        value <=> State.space-width;
+                        live-changed(v) => { Logic.space-width-changed(v); }
+                        released(v) => { Logic.space-width-released(v); }
+                    }
                 }
                 CheckRow {
                     text: Tr.space-toggle;

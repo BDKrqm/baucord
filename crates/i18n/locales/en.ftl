@@ -657,6 +657,12 @@ space-right = R
 space-you = You
 space-auto = Spread out automatically
 space-auto-hint = Whenever someone joins or leaves your voice channel, everyone is spread out again. Places you set by hand last until then.
+space-distance = Distance
+space-near = Near
+space-far = Far
+space-width = Width
+space-narrow = Natural
+space-wide = Wide
 menu-voice-space = Voice space…
 # A person's own equalizer, from their menu. Local only.
 menu-equalizer = Equalizer…

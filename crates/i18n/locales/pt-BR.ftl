@@ -657,6 +657,12 @@ space-right = D
 space-you = Você
 space-auto = Espalhar automaticamente
 space-auto-hint = Sempre que alguém entra ou sai do seu canal de voz, todos são espalhados de novo. Os lugares que você define à mão duram até lá.
+space-distance = Distância
+space-near = Perto
+space-far = Longe
+space-width = Amplitude
+space-narrow = Natural
+space-wide = Ampla
 menu-voice-space = Espaço de voz…
 # O equalizador de cada pessoa, no menu dela. Só neste dispositivo.
 menu-equalizer = Equalizador…

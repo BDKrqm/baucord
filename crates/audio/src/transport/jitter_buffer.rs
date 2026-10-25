@@ -263,6 +263,8 @@ pub struct PeerTable {
     /// The voice tone over the mix (`VoiceTone::to_u8`; 0, the
     /// default, is natural).
     tone: std::sync::atomic::AtomicU8,
+    /// How wide the voice space sounds, 0…1 (`f32` bits; `spatial.rs`).
+    width: std::sync::atomic::AtomicU32,
     /// Bumped by every change.
     generation: std::sync::atomic::AtomicU64,
 }
@@ -291,6 +293,18 @@ impl PeerTable {
     pub fn set_tone(&self, tone: VoiceTone) {
         self.tone
             .store(tone.to_u8(), std::sync::atomic::Ordering::Release);
+        self.changed();
+    }
+
+    /// How wide the voice space sounds, 0 (a real head) … 1.
+    pub fn set_width(&self, width: f32) {
+        let width = if width.is_finite() {
+            width.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        self.width
+            .store(width.to_bits(), std::sync::atomic::Ordering::Release);
         self.changed();
     }
 
@@ -350,6 +364,8 @@ pub struct AdaptiveJitterBuffer {
     /// their place.
     spatial_on: bool,
     stereo: bool,
+    /// How wide the voice space sounds (`PeerTable::set_width`).
+    width: f32,
     /// The voice tone over the finished mix (`PeerTable::set_tone`).
     tone: ToneFilter,
 
@@ -413,6 +429,7 @@ impl AdaptiveJitterBuffer {
             removed_scratch: Vec::new(),
             spatial_on: true,
             stereo: false,
+            width: 0.0,
             tone: ToneFilter::new(),
             loopback: VecDeque::with_capacity(LOOPBACK_CAP),
             scratch: Vec::new(),
@@ -466,7 +483,7 @@ impl AdaptiveJitterBuffer {
         let spatial = self.spatial_on && self.stereo;
         for peer in self.buffers.values_mut() {
             peer.spatial
-                .place(spatial.then_some(peer.settings.position));
+                .place(spatial.then_some(peer.settings.position), self.width);
         }
     }
 
@@ -583,8 +600,10 @@ impl AdaptiveJitterBuffer {
                         .get(&peer_id)
                         .cloned()
                         .unwrap_or_default();
-                    p.spatial
-                        .place((self.spatial_on && self.stereo).then_some(p.settings.position));
+                    p.spatial.place(
+                        (self.spatial_on && self.stereo).then_some(p.settings.position),
+                        self.width,
+                    );
                     p.spatial.silence();
                     p.eq.set(p.settings.eq);
                     v.insert(p)
@@ -734,6 +753,7 @@ impl AdaptiveJitterBuffer {
         drop(settings);
         self.peers_seen = Some(generation);
         self.spatial_on = !self.peers.flat.load(std::sync::atomic::Ordering::Acquire);
+        self.width = f32::from_bits(self.peers.width.load(std::sync::atomic::Ordering::Acquire));
         self.tone.set(VoiceTone::from_u8(
             self.peers.tone.load(std::sync::atomic::Ordering::Acquire),
         ));

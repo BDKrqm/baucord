@@ -1317,6 +1317,22 @@ fn wire_logic(state: &Rc<RefCell<AppState>>) {
     logic.on_space_auto_toggled(move |on| {
         with_app(&w, |app| app.set_space_auto_spread(on));
     });
+    let w = Rc::downgrade(state);
+    logic.on_space_distance_changed(move |d| {
+        with_app(&w, |app| app.voice_space_distance(d, false));
+    });
+    let w = Rc::downgrade(state);
+    logic.on_space_distance_released(move |d| {
+        with_app(&w, |app| app.voice_space_distance(d, true));
+    });
+    let w = Rc::downgrade(state);
+    logic.on_space_width_changed(move |width| {
+        with_app(&w, |app| app.voice_space_width(width, false));
+    });
+    let w = Rc::downgrade(state);
+    logic.on_space_width_released(move |width| {
+        with_app(&w, |app| app.voice_space_width(width, true));
+    });
 
     // ── A person's equalizer ────────────────────────────────────
     let w = Rc::downgrade(state);

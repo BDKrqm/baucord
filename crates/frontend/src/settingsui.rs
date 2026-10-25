@@ -143,6 +143,8 @@ impl OpenedWith {
         restored.audio.lowering_told = now.audio.lowering_told;
         restored.audio.spatial_voice = now.audio.spatial_voice;
         restored.audio.space_auto_spread = now.audio.space_auto_spread;
+        restored.audio.space_distance = now.audio.space_distance;
+        restored.audio.space_width = now.audio.space_width;
         restored.ui.messages_collapsed = now.ui.messages_collapsed;
         restored.ui.sidebar_width = now.ui.sidebar_width;
         restored.ui.messages_height = now.ui.messages_height;

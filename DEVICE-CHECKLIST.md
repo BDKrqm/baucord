@@ -149,6 +149,12 @@ built-in speakers is the machine that matters most.
   others placed: a third joins → all three are spread out again (left,
   front, right); one leaves → the other two go hard left and right.
   Off: a join leaves everyone where they were.
+- [ ] **new (spatial voice)** — *Distance*: dragging it moves every
+  placed dot in or out together and the voices follow (far: quieter,
+  duller); *Spread out* lands everyone at the slider's distance.
+  *Width* all the way down: like a real head; all the way up: a voice
+  on the left is clearly in the left ear even at its low end, and two
+  people talking at once stay apart. Both kept after a restart.
 - [ ] **new (equalizers)** — a person's *Equalizer…*: 300 Hz at −12 dB
   thins their voice at once, 3 kHz at +6 dB brings it forward; restart
   the app, the bands are still there; *Flat* gives the voice back

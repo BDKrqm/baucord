@@ -163,7 +163,11 @@ and the release pipeline.
   or new. Best with headphones; a mono output (a Bluetooth headset in
   call mode, a phone's call path) hears everyone in the middle.
   *Spread out automatically* (on by default) spreads everyone out again
-  whenever someone joins or leaves your voice channel.
+  whenever someone joins or leaves your voice channel. The *Distance*
+  slider moves everyone nearer or farther at once (farther is quieter
+  and duller, as in a room), and *Width* sets how far apart the sides
+  sound — from a real head's width to wide, where two voices stay apart
+  down to their low end.
 - **Equalizers.** *Equalizer…* in a person's menu gives that person five
   bands of their own (100 Hz, 300 Hz, 1 kHz, 3 kHz, 8 kHz, ±12 dB), kept
   with their volume; *Flat* undoes it. Settings → Audio → *Voice tone*

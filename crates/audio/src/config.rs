@@ -3,6 +3,10 @@
 //! Simple, flat configuration. Everything has sane defaults.
 //! Users pick devices by name, we handle sample rates and channels automatically.
 
+/// Spatial voice's width out of the box: well past a real head, so two
+/// voices talking at once stay apart down to their low end.
+pub const DEFAULT_SPATIAL_WIDTH: f32 = 0.7;
+
 /// Top-level configuration for [`VoiceChat`](crate::VoiceChat).
 ///
 /// Only expose what users actually need to decide. Sample rates, channel
@@ -66,6 +70,11 @@ pub struct VoiceChatConfig {
     /// Changed at runtime via
     /// [`VoiceChat::set_spatial_voice`](crate::VoiceChat::set_spatial_voice).
     pub spatial_voice: bool,
+    /// How wide spatial voice sounds: 0 a real head's width … 1 the
+    /// widest (`spatial.rs`). Default: [`DEFAULT_SPATIAL_WIDTH`].
+    /// Changed at runtime via
+    /// [`VoiceChat::set_spatial_width`](crate::VoiceChat::set_spatial_width).
+    pub spatial_width: f32,
     /// The colour over everyone's voice (`processor::eq`). Default:
     /// [`VoiceTone::Natural`](crate::VoiceTone::Natural), no equalizer.
     /// Changed at runtime via
@@ -83,6 +92,7 @@ impl Default for VoiceChatConfig {
             gate_threshold: 0.012,
             echo_cancellation: crate::aec::AecMode::Auto,
             spatial_voice: true,
+            spatial_width: DEFAULT_SPATIAL_WIDTH,
             voice_tone: crate::VoiceTone::Natural,
         }
     }

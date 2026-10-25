@@ -4,10 +4,12 @@
 //!
 //! The listener sits at the centre facing "up" (+y). A peer at
 //! `[x, y]` (`PeerAudioSettings::position`) comes from the azimuth
-//! `atan2(x, y)` — 0 straight ahead, +90° the right, ±180° behind —
-//! and the distance from the centre is how much of that direction is
-//! applied: at the centre none (the voice is the same in both ears,
-//! sample for sample what it was without this), at the rim all of it.
+//! `atan2(x, y)` — 0 straight ahead, +90° the right, ±180° behind.
+//! The centre itself is no place: the voice is the same in both ears,
+//! sample for sample what it was without this. Leaving it, the
+//! direction comes in over the first fifth of the radius
+//! ([`FULL_AT`]) and is whole from there on; further out, the distance
+//! is heard instead — quieter, and duller, towards the rim.
 //!
 //! The rendering is the spherical-head model of Brown and Duda (1998):
 //! no measured HRTF set to ship or license, and a few multiply-adds a
@@ -21,6 +23,13 @@
 //!   the far one, flat below ~1 kHz.
 //! - **Behind** — a gentle extra high cut for sources behind the
 //!   listener, which a bare head model cannot tell from the front.
+//! - **Width** — the listener's choice (`width`, 0…1, the voice space's
+//!   slider): on top of the head, a level difference across the whole
+//!   band (up to 12 dB at the far ear) and a larger head for the time
+//!   difference (up to ×1.5). A real head barely separates a voice's
+//!   low end; width is what keeps two voices apart when both talk.
+//! - **Distance** — past [`NEAR`], up to [`DISTANCE_DB`] quieter and
+//!   up to [`AIR_DEPTH`] of the highs gone by the rim.
 //!
 //! All of it moves smoothly: a dragged peer glides at most a couple of
 //! samples of delay per 10 ms hop, so a move is heard as a move and not
@@ -45,12 +54,27 @@ const DELAY_LEN: usize = 64;
 const DELAY_MASK: usize = DELAY_LEN - 1;
 /// Nearer the centre than this, a peer is not placed at all.
 const CENTRE: f32 = 0.05;
+/// From here out the direction is whole; between [`CENTRE`] and here it
+/// comes in smoothly, so leaving the middle is a glide, not a jump.
+pub(crate) const FULL_AT: f32 = 0.2;
+/// Distance is heard past this radius: nearer is as loud as sent.
+pub(crate) const NEAR: f32 = 0.3;
+/// How much quieter the rim is than [`NEAR`] (dB).
+pub(crate) const DISTANCE_DB: f32 = 8.0;
+/// How much of the highs (above ~4 kHz) the rim has lost.
+pub(crate) const AIR_DEPTH: f32 = 0.45;
+/// Width at its widest: the far ear this much quieter (dB) across the
+/// band, and the time difference this many times a real head's.
+const WIDTH_ILD_DB: f32 = 12.0;
+const WIDTH_ITD: f32 = 0.5;
 /// How far the rendering may move in one hop (10 ms): a delay glides at
-/// ~0.4 % pitch at most, and a swing from one side to the other takes
-/// ~160 ms.
+/// ~0.4 % pitch at most (a swing from one side to the other takes
+/// ~160 ms at a real head's width, ~240 ms at the widest), and a level
+/// at most ~0.7 dB a hop near full scale.
 const MAX_DELAY_STEP: f32 = 2.0;
 const MAX_ALPHA_STEP: f32 = 0.1;
-const MAX_REAR_STEP: f32 = 0.05;
+const MAX_GAIN_STEP: f32 = 0.08;
+const MAX_DULL_STEP: f32 = 0.05;
 /// The behind cue: up to half of what is above ~4 kHz.
 const REAR_DEPTH: f32 = 0.5;
 const REAR_CUTOFF_HZ: f32 = 4_000.0;
@@ -62,13 +86,26 @@ struct EarParams {
     alpha: f32,
     /// Delay in samples.
     delay: f32,
+    /// Level across the band (linear; 1 = as sent): width and distance.
+    gain: f32,
 }
 
-/// A direction as rendered: left ear, right ear, the behind cue.
+/// A place as rendered: left ear, right ear, and how much of the highs
+/// go (behind, and far away).
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Params {
     ears: [EarParams; 2],
-    rear: f32,
+    dull: f32,
+}
+
+/// 0 at `from`, 1 at `to`, smooth in between.
+fn smoothstep(from: f32, to: f32, x: f32) -> f32 {
+    let t = ((x - from) / (to - from)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn db_to_gain(db: f32) -> f32 {
+    10f32.powf(db / 20.0)
 }
 
 impl Params {
@@ -77,12 +114,14 @@ impl Params {
         ears: [EarParams {
             alpha: 1.0,
             delay: 0.0,
+            gain: 1.0,
         }; 2],
-        rear: 0.0,
+        dull: 0.0,
     };
 
-    /// The rendering for `position`; `None` at the centre.
-    fn at(position: [f32; 2]) -> Option<Self> {
+    /// The rendering for `position` at `width` (0…1); `None` at the
+    /// centre.
+    fn at(position: [f32; 2], width: f32) -> Option<Self> {
         let [x, y] = position;
         if !x.is_finite() || !y.is_finite() {
             return None;
@@ -91,7 +130,13 @@ impl Params {
         if distance < CENTRE {
             return None;
         }
-        let amount = distance.min(1.0);
+        let width = if width.is_finite() {
+            width.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let amount = smoothstep(CENTRE, FULL_AT, distance);
+        let far = ((distance.min(1.0) - NEAR) / (1.0 - NEAR)).clamp(0.0, 1.0);
         let azimuth = x.atan2(y);
         // Left ear at −90°, right at +90°.
         let theta = [
@@ -102,13 +147,21 @@ impl Params {
         // delayed at all, as an unplaced one is not.
         let delay = theta.map(delay_samples);
         let nearer = delay[0].min(delay[1]);
+        let head = 1.0 + WIDTH_ITD * width;
+        // −1 hard left … +1 hard right: the ear away from the voice
+        // loses up to the width's level.
+        let side = azimuth.sin();
+        let away = [side.max(0.0), (-side).max(0.0)];
+        let distance_db = -DISTANCE_DB * far;
         let ear = |i: usize| EarParams {
             alpha: 1.0 + amount * (shadow_alpha(theta[i]) - 1.0),
-            delay: amount * (delay[i] - nearer),
+            delay: amount * head * (delay[i] - nearer),
+            gain: db_to_gain(distance_db - amount * WIDTH_ILD_DB * width * away[i]),
         };
+        let rear = amount * REAR_DEPTH * (-azimuth.cos()).max(0.0);
         Some(Self {
             ears: [ear(0), ear(1)],
-            rear: amount * REAR_DEPTH * (-azimuth.cos()).max(0.0),
+            dull: (rear + AIR_DEPTH * far).min(1.0),
         })
     }
 
@@ -118,13 +171,14 @@ impl Params {
         let ear = |from: EarParams, to: EarParams| EarParams {
             alpha: step(from.alpha, to.alpha, MAX_ALPHA_STEP),
             delay: step(from.delay, to.delay, MAX_DELAY_STEP),
+            gain: step(from.gain, to.gain, MAX_GAIN_STEP),
         };
         Self {
             ears: [
                 ear(self.ears[0], goal.ears[0]),
                 ear(self.ears[1], goal.ears[1]),
             ],
-            rear: step(self.rear, goal.rear, MAX_REAR_STEP),
+            dull: step(self.dull, goal.dull, MAX_DULL_STEP),
         }
     }
 }
@@ -171,7 +225,7 @@ struct Ear {
     /// The head shadow's last input and output.
     x1: f32,
     y1: f32,
-    /// The behind cue's low-pass.
+    /// The low-pass the behind and distance cues blend in.
     lp: f32,
 }
 
@@ -222,10 +276,11 @@ impl Spatializer {
     }
 
     /// Where to hear this peer from: their saved position, or `None`
-    /// (spatial voice off, a mono output) for the centre. The voice
-    /// glides there over the next hops.
-    pub(crate) fn place(&mut self, position: Option<[f32; 2]>) {
-        self.target = position.and_then(Params::at);
+    /// (spatial voice off, a mono output) for the centre, at the
+    /// listener's `width` (0…1). The voice glides there over the next
+    /// hops.
+    pub(crate) fn place(&mut self, position: Option<[f32; 2]>, width: f32) {
+        self.target = position.and_then(|p| Params::at(p, width));
     }
 
     /// Unplaced and arrived: the voice passes through untouched.
@@ -289,9 +344,9 @@ impl Spatializer {
         {
             self.line[self.write] = s;
             let t = (i + 1) as f32 * inv;
-            let rear = lerp(from.rear, to.rear, t);
-            *l += self.ear(0, from.ears[0], to.ears[0], t, rear);
-            *r += self.ear(1, from.ears[1], to.ears[1], t, rear);
+            let dull = lerp(from.dull, to.dull, t);
+            *l += self.ear(0, from.ears[0], to.ears[0], t, dull);
+            *r += self.ear(1, from.ears[1], to.ears[1], t, dull);
             self.write = (self.write + 1) & DELAY_MASK;
         }
         self.current = to;
@@ -304,7 +359,7 @@ impl Spatializer {
 
     /// One ear's sample for the newest input, `t` of the way through
     /// this hop's glide.
-    fn ear(&mut self, which: usize, from: EarParams, to: EarParams, t: f32, rear: f32) -> f32 {
+    fn ear(&mut self, which: usize, from: EarParams, to: EarParams, t: f32, dull: f32) -> f32 {
         let x = self.tap(lerp(from.delay, to.delay, t));
         let alpha = lerp(from.alpha, to.alpha, t);
         let b0 = (1.0 + alpha * self.k) * self.norm;
@@ -314,7 +369,7 @@ impl Spatializer {
         ear.x1 = x;
         ear.y1 = y;
         ear.lp += self.rear_coeff * (y - ear.lp);
-        y - rear * (y - ear.lp)
+        (y - dull * (y - ear.lp)) * lerp(from.gain, to.gain, t)
     }
 
     /// The line `delay` samples back from the newest (linear
@@ -369,7 +424,7 @@ mod tests {
     fn an_unplaced_peer_is_untouched() {
         for position in [None, Some([0.0, 0.0]), Some([0.01, -0.02])] {
             let mut s = Spatializer::new();
-            s.place(position);
+            s.place(position, 1.0);
             let input: Vec<f32> = noise(&mut 3, HOP);
             let mut l = vec![0.5; HOP];
             let mut r = vec![0.5; HOP];
@@ -383,8 +438,9 @@ mod tests {
 
     #[test]
     fn a_peer_on_the_right_is_louder_and_earlier_on_the_right() {
+        // Width 0: the head model alone.
         let mut s = Spatializer::new();
-        s.place(Some([1.0, 0.0]));
+        s.place(Some([1.0, 0.0]), 0.0);
         s.silence(); // there at once
         let (l, r) = run(&mut s, 10);
         assert!(
@@ -405,10 +461,10 @@ mod tests {
     #[test]
     fn left_mirrors_right() {
         let mut right = Spatializer::new();
-        right.place(Some([0.8, 0.3]));
+        right.place(Some([0.8, 0.3]), 0.7);
         right.silence();
         let mut left = Spatializer::new();
-        left.place(Some([-0.8, 0.3]));
+        left.place(Some([-0.8, 0.3]), 0.7);
         left.silence();
         let (rl, rr) = run(&mut right, 5);
         let (ll, lr) = run(&mut left, 5);
@@ -420,7 +476,7 @@ mod tests {
     #[test]
     fn straight_ahead_is_the_same_in_both_ears() {
         let mut s = Spatializer::new();
-        s.place(Some([0.0, 1.0]));
+        s.place(Some([0.0, 1.0]), 1.0);
         s.silence();
         let (l, r) = run(&mut s, 5);
         assert!(energy(&l) > 0.0);
@@ -433,7 +489,7 @@ mod tests {
     fn behind_is_duller_than_ahead() {
         let hf = |position| {
             let mut s = Spatializer::new();
-            s.place(Some(position));
+            s.place(Some(position), 0.7);
             s.silence();
             let (l, _) = run(&mut s, 5);
             // First difference: a crude high-pass.
@@ -446,17 +502,74 @@ mod tests {
     #[test]
     fn a_move_glides_and_a_return_to_the_centre_ends_flat() {
         let mut s = Spatializer::new();
-        s.place(Some([-1.0, 0.0]));
+        s.place(Some([-1.0, 0.0]), 0.0);
         s.silence();
         run(&mut s, 3);
-        s.place(Some([1.0, 0.0]));
+        s.place(Some([1.0, 0.0]), 0.0);
         // One hop moves the delays two samples, not thirty.
         run(&mut s, 1);
         assert!(s.current.ears[1].delay > 25.0, "{:?}", s.current);
         run(&mut s, 30);
         assert_eq!(s.current, s.target.unwrap());
-        s.place(None);
+        s.place(None, 0.0);
         run(&mut s, 30);
         assert!(s.is_flat());
+    }
+
+    /// Right over left, in dB, of `position` heard at `width`.
+    fn side_db(position: [f32; 2], width: f32) -> f32 {
+        let mut s = Spatializer::new();
+        s.place(Some(position), width);
+        s.silence();
+        let (l, r) = run(&mut s, 5);
+        10.0 * (energy(&r) / energy(&l)).log10()
+    }
+
+    #[test]
+    fn width_pulls_the_ears_apart() {
+        let narrow = side_db([0.7, 0.7], 0.0);
+        let wide = side_db([0.7, 0.7], 1.0);
+        assert!(narrow > 0.0, "{narrow}");
+        assert!(wide - narrow > 6.0, "narrow {narrow} dB, wide {wide} dB");
+        // And the far ear hears it later than a real head would.
+        let head = Params::at([1.0, 0.0], 0.0).unwrap().ears[0].delay;
+        let wide = Params::at([1.0, 0.0], 1.0).unwrap().ears[0].delay;
+        assert!((wide / head - 1.5).abs() < 1e-3, "{head} → {wide}");
+    }
+
+    #[test]
+    fn the_direction_is_whole_a_little_way_out() {
+        let near = Params::at([FULL_AT, 0.0], 0.7).unwrap();
+        let rim = Params::at([1.0, 0.0], 0.7).unwrap();
+        for (n, r) in near.ears.iter().zip(&rim.ears) {
+            assert!((n.delay - r.delay).abs() < 1e-4);
+            assert!((n.alpha - r.alpha).abs() < 1e-4);
+        }
+        // Halfway out of the middle, about half of it.
+        let half = Params::at([f32::midpoint(CENTRE, FULL_AT), 0.0], 0.7).unwrap();
+        let ratio = half.ears[0].delay / rim.ears[0].delay;
+        assert!((ratio - 0.5).abs() < 0.05, "{ratio}");
+    }
+
+    #[test]
+    fn far_is_quieter_and_duller_than_near() {
+        let heard = |position: [f32; 2]| {
+            let mut s = Spatializer::new();
+            s.place(Some(position), 0.7);
+            s.silence();
+            let (l, _) = run(&mut s, 5);
+            let d: Vec<f32> = l.windows(2).map(|w| w[1] - w[0]).collect();
+            (energy(&l), energy(&d) / energy(&l))
+        };
+        let (near, near_hf) = heard([0.0, NEAR]);
+        let (far, far_hf) = heard([0.0, 1.0]);
+        let db = 10.0 * (far / near).log10();
+        // The level, and more for the highs gone (white noise is
+        // mostly highs: speech loses less).
+        assert!(
+            db < -DISTANCE_DB + 0.5 && db > -DISTANCE_DB - 6.5,
+            "{db} dB"
+        );
+        assert!(far_hf < near_hf);
     }
 }

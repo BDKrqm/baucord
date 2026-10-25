@@ -362,6 +362,10 @@ export global State {
     in property <bool> space-spatial: true;
     /// Everyone is spread out again as people join or leave (a setting).
     in property <bool> space-auto: true;
+    /// How far out everyone is (0.3…1 of the radius) and how wide the
+    /// space sounds (0…1): the dialog's two sliders, seeded by the host.
+    in-out property <float> space-distance: 0.6;
+    in-out property <float> space-width: 0.7;
 
     // ── A person's equalizer (main.slint's dialog, equalizer.slint) ──
     // Five bands in dB (±12): 100 Hz shelf, 300 Hz, 1 kHz, 3 kHz,
@@ -573,6 +577,12 @@ export global Logic {
     callback space-centre();
     callback space-toggled(bool);
     callback space-auto-toggled(bool);
+    // The Distance and Width sliders: every move is heard (and the dots
+    // follow the distance), the release is kept.
+    callback space-distance-changed(float);
+    callback space-distance-released(float);
+    callback space-width-changed(float);
+    callback space-width-released(float);
     // A person's equalizer: a band moved (heard at once) or let go
     // (kept), all flat again, the dialog closed.
     callback eq-changed(band: int, db: float);

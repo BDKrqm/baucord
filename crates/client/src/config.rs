@@ -203,6 +203,18 @@ fn default_true() -> bool {
     true
 }
 
+/// The voice space's Distance out of the box: near enough to be heard
+/// clearly, far enough that direction is all there.
+pub const DEFAULT_SPACE_DISTANCE: f32 = 0.6;
+
+fn default_space_distance() -> f32 {
+    DEFAULT_SPACE_DISTANCE
+}
+
+fn default_space_width() -> f32 {
+    audio::DEFAULT_SPATIAL_WIDTH
+}
+
 fn default_image_max_kb() -> u32 {
     u32::try_from(protocol::MAX_CHAT_IMAGE_BYTES / 1024).unwrap_or(u32::MAX)
 }
@@ -487,6 +499,10 @@ impl Default for AudioOutputSettings {
 // A key missing from the file takes its default, not the whole file
 // with it (review 2026-10, P3-43).
 #[serde(default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one key per user switch in settings.json; a bitset would hide them from the file"
+)]
 pub struct AudioSettings {
     pub input: AudioInputSettings,
     pub output: AudioOutputSettings,
@@ -513,6 +529,15 @@ pub struct AudioSettings {
     /// then).
     #[serde(default = "default_true")]
     pub space_auto_spread: bool,
+    /// How far out the voice space puts everyone (its Distance slider,
+    /// 0.3…1 of the radius): what "Spread out" uses, and where moving
+    /// the slider takes everyone placed. Further is quieter and duller.
+    #[serde(default = "default_space_distance")]
+    pub space_distance: f32,
+    /// How wide spatial voice sounds (its Width slider): 0 a real
+    /// head's width … 1 the widest.
+    #[serde(default = "default_space_width")]
+    pub space_width: f32,
     /// The colour over everyone's voice: `"natural"` (the default),
     /// `"crisp"`, `"bass_boost"` (`audio::VoiceTone`).
     #[serde(default)]
@@ -530,6 +555,8 @@ impl Default for AudioSettings {
             lowering_told: false,
             spatial_voice: true,
             space_auto_spread: true,
+            space_distance: DEFAULT_SPACE_DISTANCE,
+            space_width: audio::DEFAULT_SPATIAL_WIDTH,
             voice_tone: audio::VoiceTone::Natural,
         }
     }
