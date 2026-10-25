@@ -17,6 +17,8 @@
 //! as 1152×720, not a stretched 1280×720.
 
 pub mod buffer;
+// A camera as a share's source (Windows; empty elsewhere).
+pub mod camera;
 pub mod capture;
 #[cfg(target_os = "windows")]
 pub mod dxgi;

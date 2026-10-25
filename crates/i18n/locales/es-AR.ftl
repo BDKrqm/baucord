@@ -233,6 +233,9 @@ keybind-press-combo = Presioná una combinación...
 # ── Diálogo de compartir pantalla ───────────────────────────────────────
 monitor = Monitor
 monitor-primary = (principal)
+camera = Cámara
+share-camera = Compartir cámara
+no-cameras = No se encontró ninguna cámara. Conectá una — o, si ya está conectada, permití que las apps la usen en la configuración de privacidad de Windows (Cámara).
 quality = Calidad
 start-sharing = Empezar a compartir
 error-no-monitors = No se encontraron monitores

@@ -210,6 +210,18 @@ Play music in another app first, at a steady volume.
 
 ### 1.3 Sharing a screen [P2-22, P2-26, P2-41, P2-44, P3-28]
 
+- [ ] **new (camera)** — share dialog → *Camera*: the list shows the
+  PC's cameras (a USB webcam, a laptop's, a phone-as-webcam app). Start:
+  the camera's light comes on, viewers see it moving smoothly at the
+  chosen quality, and no PC sound goes with it. Stop: the light goes
+  off at once. log: `video capture backend: CAMERA — '<name>'` and
+  `camera: '<name>' at WxH`. Unplug it while sharing: the share ends
+  with an error, nothing hangs. A camera another app holds, or one
+  blocked in Windows' privacy settings: an error toast, no share.
+- [ ] **new (camera)** — no camera at all: *Camera* says none was found
+  and Start is greyed. Next time the dialog opens on what was shared
+  last; the share hotkey outside the app starts the saved camera.
+
 - [ ] **new** — share a busy 1080p60 screen (a code editor full of text,
   then a game) from an AMD machine and from a Mac for five minutes.
   log: the session line says `10000 kbit/s`; after any `encoded frame

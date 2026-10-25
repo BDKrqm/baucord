@@ -58,10 +58,11 @@ pub type PresentTallies = Arc<Mutex<HashMap<u64, PresentTally>>>;
 
 #[derive(Debug)]
 pub enum ScreenControl {
-    /// Start sharing our screen.
+    /// Start sharing our screen, or a camera.
     StartSharing {
         quality: Quality,
-        monitor_index: usize,
+        /// A monitor, or a camera (`video::camera`).
+        source: video::capture::ShareSource,
         /// Who may see the stream (channel-only or the whole server).
         scope: protocol::ShareScope,
     },
@@ -509,6 +510,11 @@ struct CaptureState {
     /// The share's sound capture should be running and is not: a
     /// restart failed. Tried again every [`SYSTEM_AUDIO_RETRY`].
     system_audio_lost: bool,
+    /// A camera's share: it carries no system sound, ever (not even
+    /// after a device change).
+    camera: bool,
+    /// The camera stopped, and why: the share loop ends the share.
+    camera_lost: Option<String>,
     /// Encoder bitrate ladder (see "Sender-side adaptation").
     ladder: BitrateLadder,
     /// The sharer's summary line (`viewlog`).
@@ -883,6 +889,9 @@ const SYSTEM_AUDIO_RETRY: Duration = Duration::from_secs(10);
 /// Stop the share's system-audio capture, if any, and start a new one —
 /// best-effort: a share without sound is still a share.
 fn restart_system_audio(state: &mut CaptureState, media_tx: &Sender<MediaOut>, why: &str) {
+    if state.camera {
+        return;
+    }
     // Stop the old capture (drops the dead WASAPI loopback stream).
     if let Some(mut old) = state.system_audio.take() {
         old.stop();
@@ -1346,10 +1355,12 @@ fn run_screen_loop(
             &shared.present,
         );
 
+        let mut camera_lost = None;
         if let Some(state) = &mut st.capture
             && Instant::now() >= next_capture
         {
             capture_and_encode(state, &network_tx, &media_tx, &shared);
+            camera_lost = state.camera_lost.take();
 
             // Advance from the previous target (not from now) so the
             // capture cadence stays exact instead of drifting. The
@@ -1360,6 +1371,23 @@ fn run_screen_loop(
             if next_capture < Instant::now() {
                 next_capture = Instant::now();
             }
+        }
+        // A camera that stopped (unplugged, taken by the system) does
+        // not come back by itself, unlike a screen's passing failure:
+        // the share ends, as if stopped, and the sharer is told why —
+        // rather than viewers watching its last picture for good.
+        if let Some(why) = camera_lost {
+            handle_control(
+                ScreenControl::StopSharing,
+                &mut st,
+                &event_tx,
+                &network_tx,
+                &media_tx,
+                &shared,
+            );
+            event_tx
+                .send(ScreenEvent::Error(format!("Camera: {why}")))
+                .ok();
         }
     }
 
@@ -1588,7 +1616,7 @@ fn handle_control(
     match ctrl {
         ScreenControl::StartSharing {
             quality,
-            monitor_index,
+            source,
             scope,
         } => {
             // Restart-while-sharing replaces the pipeline. The vendored
@@ -1597,8 +1625,8 @@ fn handle_control(
             drop(st.capture.take());
             // Create capturer — picks the best backend for the platform
             // (streaming on Windows, screenshots elsewhere / as
-            // fallback) and logs the choice.
-            let capturer = match Capturer::new(monitor_index, quality) {
+            // fallback) and logs the choice; or opens the camera.
+            let capturer = match Capturer::open(&source, quality) {
                 Ok(c) => c,
                 Err(e) => {
                     event_tx
@@ -1619,21 +1647,32 @@ fn handle_control(
                     }
                 };
 
+            let camera = matches!(source, video::capture::ShareSource::Camera(_));
             info!(
-                "Screen share started: {quality}, monitor {monitor_index}, capture backend: {}",
+                "Screen share started: {quality}, {}, capture backend: {}",
+                match &source {
+                    video::capture::ShareSource::Monitor(i) => format!("monitor {i}"),
+                    video::capture::ShareSource::Camera(_) => "camera".to_string(),
+                },
                 capturer.backend_name()
             );
 
-            // Start system audio capture (best-effort — non-fatal if unsupported)
-            let mut cap = SystemAudioCapture::new(system_audio_sink(media_tx));
-            let system_audio = match cap.start() {
-                Ok(()) => {
-                    info!("System audio capture started for screen share");
-                    Some(cap)
-                }
-                Err(e) => {
-                    warn!("System audio capture failed to start: {e}");
-                    None
+            // Start system audio capture (best-effort — non-fatal if
+            // unsupported). Not for a camera: the PC's sound is no part
+            // of a picture of the room, and the voice goes by voice.
+            let system_audio = if camera {
+                None
+            } else {
+                let mut cap = SystemAudioCapture::new(system_audio_sink(media_tx));
+                match cap.start() {
+                    Ok(()) => {
+                        info!("System audio capture started for screen share");
+                        Some(cap)
+                    }
+                    Err(e) => {
+                        warn!("System audio capture failed to start: {e}");
+                        None
+                    }
                 }
             };
 
@@ -1650,6 +1689,8 @@ fn handle_control(
                 system_audio,
                 system_audio_retry: None,
                 system_audio_lost: false,
+                camera,
+                camera_lost: None,
                 ladder: BitrateLadder::new(quality),
                 log: Sharing::new(Instant::now()),
                 offered_bytes: 0,
@@ -2002,6 +2043,10 @@ fn capture_and_encode(
         Ok(s) => s,
         Err(e) => {
             warn!("Capture failed: {e}");
+            if state.camera {
+                // The loop ends the share (`camera_lost`).
+                state.camera_lost = Some(e.to_string());
+            }
             return;
         }
     };

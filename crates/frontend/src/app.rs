@@ -263,6 +263,9 @@ pub(crate) struct Session {
     /// Who was in our voice room when the voice space last spread them
     /// out by itself (`space.rs`, `audio.space_auto_spread`).
     space_room: Vec<u64>,
+    /// The cameras the share dialog listed, in its order: what a picked
+    /// index means (`open_share_dialog`).
+    share_cameras: Vec<video::camera::CameraInfo>,
     /// Everyone's look, from the server (spec §7.1).
     profiles: HashMap<u64, client::protocol::Profile>,
     /// Names and looks by account (1.2): whoever the server introduced
@@ -324,6 +327,7 @@ impl Default for Session {
             moderation: None,
             eq_peer: None,
             space_room: Vec::new(),
+            share_cameras: Vec::new(),
             profiles: HashMap::new(),
             author_looks: HashMap::new(),
             lurkers: HashMap::new(),
@@ -1610,9 +1614,9 @@ fn wire_logic(state: &Rc<RefCell<AppState>>) {
 
     // ── Screen share dialog ─────────────────────────────────────
     let w = Rc::downgrade(state);
-    logic.on_start_share(move |monitor_index, quality_index, everyone| {
+    logic.on_start_share(move |camera, index, quality_index, everyone| {
         with_app(&w, |app| {
-            let monitor_index = usize::try_from(monitor_index).unwrap_or(0);
+            let index = usize::try_from(index).unwrap_or(0);
             let quality = usize::try_from(quality_index)
                 .ok()
                 .and_then(|i| video::Quality::ALL.get(i))
@@ -1621,8 +1625,18 @@ fn wire_logic(state: &Rc<RefCell<AppState>>) {
             // Remember the choices: the dialog pre-fills from these
             // next time, and the share hotkey starts a stream with
             // them directly when Baucord isn't the focused window.
+            let source = if camera {
+                let Some(id) = app.session.share_cameras.get(index).map(|c| c.id.clone()) else {
+                    return;
+                };
+                app.settings.share.camera = Some(id.clone());
+                video::capture::ShareSource::Camera(id)
+            } else {
+                app.settings.share.monitor = u32::try_from(index).ok();
+                video::capture::ShareSource::Monitor(index)
+            };
+            app.settings.share.use_camera = camera;
             app.settings.share.quality = quality.key().to_string();
-            app.settings.share.monitor = u32::try_from(monitor_index).ok();
             app.settings.share.everyone = everyone;
             app.save_settings();
             video::capture::set_pointer_shown(app.settings.share.pointer);
@@ -1630,7 +1644,7 @@ fn wire_logic(state: &Rc<RefCell<AppState>>) {
                 .tx
                 .send(ScreenControl::StartSharing {
                     quality,
-                    monitor_index,
+                    source,
                     scope: if everyone {
                         client::ShareScope::Everyone
                     } else {

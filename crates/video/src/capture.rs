@@ -149,6 +149,15 @@ const SCREENSHOT_API: &str = "CGWindowList";
 )))]
 const SCREENSHOT_API: &str = "X11/Wayland";
 
+/// What a share shows: a monitor, or a camera.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShareSource {
+    /// The monitor at this index of [`list_monitors`].
+    Monitor(usize),
+    /// The camera with this id ([`crate::camera::CameraInfo::id`]).
+    Camera(String),
+}
+
 /// Unified capture front: picks the best backend for the platform and
 /// exposes the poll/frame API the screen-share loop drives.
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
@@ -161,10 +170,40 @@ pub enum Capturer {
     X11(Box<crate::x11::X11Capturer>),
     /// Per-frame screenshot capture (fallback, always available).
     Screenshot(ScreenCapturer),
+    /// A camera instead of a screen (Windows; `crate::camera`).
+    #[cfg(target_os = "windows")]
+    Camera(crate::camera::CameraCapturer),
 }
 
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 impl Capturer {
+    /// A capturer for `source`: [`Self::new`] for a monitor, the camera
+    /// itself for a camera.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::new`]; for a camera, [`CaptureError::Capture`] when it
+    /// will not open (or there are no cameras on this system).
+    pub fn open(source: &ShareSource, quality: Quality) -> Result<Self, CaptureError> {
+        match source {
+            ShareSource::Monitor(index) => Self::new(*index, quality),
+            #[cfg(target_os = "windows")]
+            ShareSource::Camera(id) => {
+                let camera = crate::camera::CameraCapturer::new(id, quality)?;
+                info!(
+                    "video capture backend: CAMERA — '{}' via Media Foundation",
+                    camera.name
+                );
+                Ok(Self::Camera(camera))
+            }
+            #[cfg(not(target_os = "windows"))]
+            ShareSource::Camera(id) => {
+                crate::camera::CameraCapturer::new(id, quality)?;
+                Err(CaptureError::Capture("no cameras on this system".into()))
+            }
+        }
+    }
+
     /// Create a capturer for the given monitor index and quality preset.
     ///
     /// Windows: tries the vendored DXGI streaming backend first and
@@ -272,7 +311,7 @@ impl Capturer {
 
             let retry = match &mut *self {
                 Self::Screenshot(sc) => sc.stream_retry.take_if(|r| r.at <= Instant::now()),
-                Self::Stream(_) => None,
+                Self::Stream(_) | Self::Camera(_) => None,
             };
             if let Some(mut retry) = retry {
                 match StreamCapturer::new(retry.monitor_index, retry.quality) {
@@ -300,6 +339,8 @@ impl Capturer {
             #[cfg(target_os = "linux")]
             Self::X11(s) => s.poll(),
             Self::Screenshot(s) => s.poll(),
+            #[cfg(target_os = "windows")]
+            Self::Camera(c) => c.poll(),
         }
     }
 
@@ -316,6 +357,8 @@ impl Capturer {
             #[cfg(target_os = "linux")]
             Self::X11(s) => s.frame(advance_timestamp),
             Self::Screenshot(s) => s.frame(advance_timestamp),
+            #[cfg(target_os = "windows")]
+            Self::Camera(c) => c.frame(advance_timestamp),
         }
     }
 
@@ -328,6 +371,8 @@ impl Capturer {
             #[cfg(target_os = "linux")]
             Self::X11(_) => "X11 (GetImage on DAMAGE)",
             Self::Screenshot(_) => concat_backend_name(),
+            #[cfg(target_os = "windows")]
+            Self::Camera(_) => "camera (Media Foundation)",
         }
     }
 }
@@ -1055,6 +1100,10 @@ impl Capturer {
         Err(CaptureError::Capture(
             "screen capture is not supported on this platform".into(),
         ))
+    }
+
+    pub fn open(_source: &ShareSource, quality: Quality) -> Result<Self, CaptureError> {
+        Self::new(0, quality)
     }
 
     pub fn poll(&mut self) -> Result<CaptureStatus, CaptureError> {

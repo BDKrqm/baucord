@@ -410,6 +410,12 @@ export global State {
     in property <int> default-quality: 0;
     // 0 = my channel, 1 = everyone — prefilled from saved settings.
     in property <int> default-scope: 0;
+    /// The cameras connected now, by name (Windows; empty elsewhere),
+    /// the one picked last, and what the dialog opens on: 0 a monitor,
+    /// 1 a camera.
+    in property <[string]> cameras;
+    in property <int> default-camera: 0;
+    in property <int> default-source: 0;
 
     // Image send preview overlay
     in property <bool> preview-open: false;
@@ -663,7 +669,9 @@ export global Logic {
     callback preview-cancel();
 
     // Screen share dialog
-    callback start-share(int, int, bool); // monitor index, quality index, everyone?
+    /// A camera (true) or a monitor; its index in State.cameras or
+    /// State.monitors; the quality index; everyone?
+    callback start-share(bool, int, int, bool);
 
     // Voice channels
     callback channel-clicked(int);        // channel id (header row tapped)

@@ -390,25 +390,41 @@ impl AppState {
     /// back to primary monitor / FHD30 / channel-only). Hotkey path
     /// while another app is focused.
     pub(super) fn start_share_with_saved(&mut self) {
-        let monitors = video::capture::list_monitors().unwrap_or_default();
-        if monitors.is_empty() {
-            self.show_error(&t!("error-no-monitors"));
-            return;
-        }
-        let monitor_index = self.saved_or_primary_monitor(&monitors);
+        // The last share was a camera's and a camera is there: that one.
+        let camera = if self.settings.share.use_camera {
+            let cameras = video::camera::list_cameras().unwrap_or_default();
+            self.saved_or_first_camera(&cameras)
+                .map(|i| cameras[i].id.clone())
+        } else {
+            None
+        };
+        let source = if let Some(id) = camera {
+            video::capture::ShareSource::Camera(id)
+        } else {
+            let monitors = video::capture::list_monitors().unwrap_or_default();
+            if monitors.is_empty() {
+                self.show_error(&t!("error-no-monitors"));
+                return;
+            }
+            video::capture::ShareSource::Monitor(self.saved_or_primary_monitor(&monitors))
+        };
         let quality =
             video::Quality::from_key(&self.settings.share.quality).unwrap_or(video::Quality::FHD30);
         let everyone = self.settings.share.everyone;
         log::info!(
             "share hotkey pressed outside Baucord — starting immediately with saved \
-             settings: {quality}, monitor {monitor_index}, everyone={everyone}"
+             settings: {quality}, {}, everyone={everyone}",
+            match &source {
+                video::capture::ShareSource::Monitor(i) => format!("monitor {i}"),
+                video::capture::ShareSource::Camera(_) => "camera".to_string(),
+            }
         );
         video::capture::set_pointer_shown(self.settings.share.pointer);
         self.screen
             .tx
             .send(ScreenControl::StartSharing {
                 quality,
-                monitor_index,
+                source,
                 scope: if everyone {
                     client::ShareScope::Everyone
                 } else {
@@ -418,13 +434,26 @@ impl AppState {
             .ok();
     }
 
-    /// Open the share picker, pre-filled with the last-used settings.
+    /// Open the share picker, pre-filled with the last-used settings:
+    /// a monitor, or a camera (the dialog's switch).
     pub(super) fn open_share_dialog(&mut self) {
         let monitors = video::capture::list_monitors().unwrap_or_default();
-        if monitors.is_empty() {
+        let cameras = video::camera::list_cameras().unwrap_or_else(|e| {
+            log::warn!("camera list: {e}");
+            Vec::new()
+        });
+        if monitors.is_empty() && cameras.is_empty() {
             self.show_error(&t!("error-no-monitors"));
             return;
         }
+        let camera_labels: Vec<slint::SharedString> =
+            cameras.iter().map(|c| c.name.as_str().into()).collect();
+        let default_camera = self.saved_or_first_camera(&cameras).unwrap_or(0);
+        // On Camera if that is what was shared last (and one is here),
+        // or if there is nothing else to share.
+        let on_camera =
+            !cameras.is_empty() && (self.settings.share.use_camera || monitors.is_empty());
+        self.session.share_cameras = cameras;
         let labels: Vec<slint::SharedString> = monitors
             .iter()
             .map(|m| {
@@ -453,7 +482,29 @@ impl AppState {
         s.set_default_monitor(i32::try_from(default_monitor).unwrap_or(0));
         s.set_default_quality(i32::try_from(default_q).unwrap_or(0));
         s.set_default_scope(i32::from(self.settings.share.everyone));
+        s.set_cameras(ModelRc::new(VecModel::from(camera_labels)));
+        s.set_default_camera(i32::try_from(default_camera).unwrap_or(0));
+        s.set_default_source(i32::from(on_camera));
         self.main.invoke_open_share_dialog();
+    }
+
+    /// The saved camera if it is still connected, otherwise the first;
+    /// `None` with no camera at all.
+    pub(super) fn saved_or_first_camera(
+        &self,
+        cameras: &[video::camera::CameraInfo],
+    ) -> Option<usize> {
+        if cameras.is_empty() {
+            return None;
+        }
+        Some(
+            self.settings
+                .share
+                .camera
+                .as_ref()
+                .and_then(|id| cameras.iter().position(|c| &c.id == id))
+                .unwrap_or(0),
+        )
     }
 
     /// The saved monitor index if that monitor still exists, otherwise

@@ -168,6 +168,12 @@ and the release pipeline.
   and duller, as in a room), and *Width* sets how far apart the sides
   sound — from a real head's width to wide, where two voices stay apart
   down to their low end.
+- **Share a camera** (Windows). The share dialog has a *Monitor* |
+  *Camera* switch: on *Camera* the list shows the cameras connected to
+  the PC, and the one picked is streamed instead of the screen, at the
+  chosen quality (the camera's nearest format, scaled like a screen).
+  A camera's share carries no PC sound. The choice is remembered, and
+  the share hotkey starts the camera when that was the last share.
 - **Equalizers.** *Equalizer…* in a person's menu gives that person five
   bands of their own (100 Hz, 300 Hz, 1 kHz, 3 kHz, 8 kHz, ±12 dB), kept
   with their volume; *Flat* undoes it. Settings → Audio → *Voice tone*

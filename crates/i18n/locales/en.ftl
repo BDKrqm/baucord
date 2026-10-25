@@ -232,6 +232,9 @@ keybind-press-combo = Press a key combo...
 # ── Screen share dialog ─────────────────────────────────────────────────
 monitor = Monitor
 monitor-primary = (primary)
+camera = Camera
+share-camera = Share Camera
+no-cameras = No camera found. Connect one — or, if it is connected, let apps use it in Windows' privacy settings (Camera).
 quality = Quality
 start-sharing = Start Sharing
 error-no-monitors = No monitors found

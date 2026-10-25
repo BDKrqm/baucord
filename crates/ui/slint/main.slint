@@ -59,6 +59,8 @@ export component MainWindow inherits Window {
     property <int> share-monitor: State.default-monitor;
     property <int> share-quality: State.default-quality;
     property <int> share-scope: State.default-scope;   // 0 = my channel, 1 = everyone
+    property <int> share-source: State.default-source; // 0 = a monitor, 1 = a camera
+    property <int> share-camera: State.default-camera;
 
     public function chat-pin-bottom() { chat-pane.pin-to-bottom(); }
     public function chat-follow-appended() -> bool { return chat-pane.follow-appended(); }
@@ -111,6 +113,8 @@ export component MainWindow inherits Window {
         // Prefilled from the last share (saved settings) — the dialog
         // shows exactly what the share hotkey would start.
         share-scope = State.default-scope;
+        share-source = State.default-source;
+        share-camera = State.default-camera;
         share-dialog-open = true;
     }
 
@@ -945,15 +949,37 @@ export component MainWindow inherits Window {
         card-width: 380px;
         dismissed => { root.share-dialog-open = false; }
         Text {
-            text: Tr.share-screen;
+            text: root.share-source == 1 ? Tr.share-camera : Tr.share-screen;
             color: Theme.text-primary;
             font-size: Theme.font-md;
             font-weight: 600;
         }
-        FieldLabel { text: Tr.monitor; }
-        Dropdown {
+        // What to share: a monitor or a camera. The list below follows.
+        HorizontalLayout {
+            spacing: Theme.gap-xs;
+            Btn {
+                horizontal-stretch: 1;
+                text: Tr.monitor;
+                engaged: root.share-source == 0;
+                clicked => { root.share-source = 0; }
+            }
+            Btn {
+                horizontal-stretch: 1;
+                text: Tr.camera;
+                engaged: root.share-source == 1;
+                clicked => { root.share-source = 1; }
+            }
+        }
+        if root.share-source == 0 : Dropdown {
             options: State.monitors;
             current <=> root.share-monitor;
+        }
+        if root.share-source == 1 && State.cameras.length > 0 : Dropdown {
+            options: State.cameras;
+            current <=> root.share-camera;
+        }
+        if root.share-source == 1 && State.cameras.length == 0 : Hint {
+            text: Tr.no-cameras;
         }
         FieldLabel { text: Tr.quality; }
         Dropdown {
@@ -968,10 +994,12 @@ export component MainWindow inherits Window {
         Btn {
             text: Tr.start-sharing;
             accent: true;
+            enabled: root.share-source == 1 ? State.cameras.length > 0 : State.monitors.length > 0;
             clicked => {
                 root.share-dialog-open = false;
-                Logic.start-share(root.share-monitor, root.share-quality,
-                    root.share-scope == 1);
+                Logic.start-share(root.share-source == 1,
+                    root.share-source == 1 ? root.share-camera : root.share-monitor,
+                    root.share-quality, root.share-scope == 1);
             }
         }
     }

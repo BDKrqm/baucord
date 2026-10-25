@@ -608,6 +608,13 @@ pub struct ShareSettings {
     /// unless this file says `false`.
     #[serde(default = "default_true")]
     pub pointer: bool,
+    /// The last share was a camera's (the dialog's Monitor/Camera
+    /// switch): the dialog opens on Camera, and the share hotkey starts
+    /// the camera.
+    pub use_camera: bool,
+    /// The last camera shared, by its id (`video::camera::CameraInfo`);
+    /// gone or `None`, the first camera.
+    pub camera: Option<String>,
 }
 
 impl Default for ShareSettings {
@@ -617,6 +624,8 @@ impl Default for ShareSettings {
             monitor: None,
             everyone: false,
             pointer: true,
+            use_camera: false,
+            camera: None,
         }
     }
 }
