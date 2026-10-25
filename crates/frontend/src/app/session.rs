@@ -159,6 +159,9 @@ impl AppState {
             crate::settingsui::test_ended(self);
         }
         self.main.global::<State>().set_moderation_open(false);
+        // Nobody left to place or to equalize.
+        self.close_voice_space();
+        self.main.global::<State>().set_eq_open(false);
         self.push_permissions();
         {
             let state = self.main.global::<State>();

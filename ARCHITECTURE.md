@@ -917,6 +917,28 @@ turned down for nothing to cancel (review 2026-10, P1-5; AEC-SPEC
 §4.6). The desktop re-plans on a presence change only when the plan
 moves.
 
+The voice output is stereo (1.3, spatial voice): the jitter buffer
+mixes each peer into two ears through a `Spatializer` of its own
+(`audio/src/spatial.rs`, a Brown–Duda spherical head: a per-ear
+fractional delay, a first-order head-shadow filter, a light high cut
+for sources behind), from the place the listener gave it in the voice
+space (`PeerAudioSettings::position`, kept per person in
+`settings.json`, never on the wire — it works against any server). An
+unplaced peer is the same sample in both ears, exactly the old mono
+mix. The ring to the device holds interleaved frames, written whole
+(`output::push_frames`); `RenderPump::pull_stereo` puts them on the
+front pair, or sums them on a mono endpoint, and an output that is
+mono (WASAPI or cpal reporting one channel, a phone's call path) plays
+nobody spatially (`AdaptiveJitterBuffer::set_stereo`). The master
+limiter is linked across the two ears. Placing is the frontend's
+`app/space.rs` and `ui/slint/space.slint`; it spreads the room out by
+itself on a join or a leave (`auto_spread_voice_space`, once per
+`flush_roster`). Each peer also has a five-band equalizer of its own
+(`processor/eq.rs`, `PeerAudioSettings::eq`: after the volume, before
+the peer's limiter), and the finished voice mix one voice tone
+(`ToneFilter`: natural, crisp, bass boosted; Settings → Audio), which
+the chimes and a watched stream skip.
+
 A watched stream's audio has an output of its own (stereo, its own
 volume, untouched by deafen) — except on a phone's call path, where it
 is mixed into the voice output instead (`stream::mix`, ANDROID-SPEC

@@ -82,6 +82,10 @@ pub enum VoiceControl {
     AddPeer(u64),
     RemovePeer(u64),
     SetPeerAudio(u64, PeerAudioSettings),
+    /// Spatial voice on or off (`VoiceChat::set_spatial_voice`).
+    SetSpatialVoice(bool),
+    /// The colour over everyone's voice (`VoiceChat::set_voice_tone`).
+    SetVoiceTone(audio::VoiceTone),
     /// Loss on our outbound path in percent (0–50), from the relay's
     /// voice receiver report (only when the window held enough packets
     /// to mean something). Feeds the encoder's FEC hint.
@@ -173,6 +177,8 @@ pub fn engine_config(s: &Settings) -> VoiceChatConfig {
         input_gain: s.audio.input.gain,
         output_gain: s.audio.output.gain,
         echo_cancellation: s.audio.echo_cancellation,
+        spatial_voice: s.audio.spatial_voice,
+        voice_tone: s.audio.voice_tone,
     }
 }
 
@@ -558,6 +564,16 @@ impl VoiceLoopState {
             VoiceControl::SetPeerAudio(id, settings) => {
                 if let Some(v) = &self.vc {
                     v.set_peer_settings(id, settings);
+                }
+            }
+            VoiceControl::SetSpatialVoice(on) => {
+                if let Some(v) = &self.vc {
+                    v.set_spatial_voice(on);
+                }
+            }
+            VoiceControl::SetVoiceTone(tone) => {
+                if let Some(v) = &self.vc {
+                    v.set_voice_tone(tone);
                 }
             }
             VoiceControl::SetUplinkLoss(pct) => {

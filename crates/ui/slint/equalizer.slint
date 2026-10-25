@@ -1,0 +1,77 @@
+// equalizer.slint — one person's five-band equalizer (a person's menu →
+// Equalizer…). Every move is heard at once (the host sends it to the
+// audio engine, `audio`'s processor/eq.rs) and kept when the slider is
+// let go (`app/equalizer.rs`). Local only, like the voice space: the
+// server never hears of it. main.slint puts the body in a `Modal`.
+
+import { Theme } from "theme.slint";
+import { Tr } from "tr.slint";
+import { State, Logic } from "globals.slint";
+import { Btn, HSlider, Hint } from "widgets.slint";
+
+/// One band: its frequency, the slider (−12…+12 dB) and the gain.
+component EqBand inherits HorizontalLayout {
+    in property <string> label;
+    in property <int> band;
+    in-out property <float> db;
+    // Half-dB steps, as the host keeps them.
+    property <float> shown: Math.round(root.db * 2) / 2;
+
+    spacing: Theme.gap-sm;
+    Text {
+        width: 56px;
+        text: root.label;
+        color: Theme.text-secondary;
+        font-size: Theme.font-sm;
+        vertical-alignment: center;
+    }
+    HSlider {
+        horizontal-stretch: 1;
+        minimum: -12.0;
+        maximum: 12.0;
+        value <=> root.db;
+        live-changed(v) => { Logic.eq-changed(root.band, v); }
+        released(v) => { Logic.eq-released(root.band, v); }
+    }
+    Text {
+        width: 56px;
+        text: root.shown > 0 ? "+\{root.shown} dB"
+            : root.shown < 0 ? "\{root.shown} dB"
+            : "0 dB";
+        color: root.shown == 0 ? Theme.text-muted : Theme.text-primary;
+        font-size: Theme.font-sm;
+        vertical-alignment: center;
+        horizontal-alignment: right;
+    }
+}
+
+/// The dialog's body: the title, the five bands, Flat and Done.
+export component EqBody inherits VerticalLayout {
+    spacing: Theme.gap-md;
+    Text {
+        text: State.eq-title;
+        color: Theme.text-primary;
+        font-size: Theme.font-md;
+        font-weight: 600;
+        overflow: elide;
+    }
+    Hint { text: Tr.eq-hint; }
+    EqBand { label: "100 Hz"; band: 0; db <=> State.eq-b0; }
+    EqBand { label: "300 Hz"; band: 1; db <=> State.eq-b1; }
+    EqBand { label: "1 kHz"; band: 2; db <=> State.eq-b2; }
+    EqBand { label: "3 kHz"; band: 3; db <=> State.eq-b3; }
+    EqBand { label: "8 kHz"; band: 4; db <=> State.eq-b4; }
+    HorizontalLayout {
+        spacing: Theme.gap-sm;
+        Btn {
+            text: Tr.eq-flat;
+            clicked => { Logic.eq-reset(); }
+        }
+        Rectangle { horizontal-stretch: 1; }
+        Btn {
+            text: Tr.space-done;
+            accent: true;
+            clicked => { Logic.eq-close(); }
+        }
+    }
+}

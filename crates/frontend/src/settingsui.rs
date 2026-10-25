@@ -132,14 +132,17 @@ impl OpenedWith {
 
     /// `now` with the page's fields as they were at open. What is not
     /// the page's stays as it is: the main window's layout (sidebar
-    /// width, the Messages divider, hidden DMs), per-person volumes,
-    /// the share dialog's defaults, the ducking notice's flag.
+    /// width, the Messages divider, hidden DMs), per-person volumes and
+    /// places, the share dialog's defaults, the ducking notice's flag,
+    /// the voice space's switches.
     fn restored_onto(&self, now: &Settings) -> Settings {
         let mut restored = self.settings.clone();
         restored.window.clone_from(&now.window);
         restored.peer_settings.clone_from(&now.peer_settings);
         restored.share.clone_from(&now.share);
         restored.audio.lowering_told = now.audio.lowering_told;
+        restored.audio.spatial_voice = now.audio.spatial_voice;
+        restored.audio.space_auto_spread = now.audio.space_auto_spread;
         restored.ui.messages_collapsed = now.ui.messages_collapsed;
         restored.ui.sidebar_width = now.ui.sidebar_width;
         restored.ui.messages_height = now.ui.messages_height;
@@ -678,6 +681,20 @@ pub fn populate(app: &mut AppState) {
         .collect();
     s.set_aec_modes(ModelRc::new(VecModel::from(aec_modes)));
     s.set_aec_index(i32::try_from(settings.audio.echo_cancellation.index()).unwrap_or(0));
+    // The voice tone, in VoiceTone::ALL order.
+    let tones: Vec<slint::SharedString> = audio::VoiceTone::ALL
+        .iter()
+        .map(|tone| {
+            t!(match tone {
+                audio::VoiceTone::Natural => "audio-tone-natural",
+                audio::VoiceTone::Crisp => "audio-tone-crisp",
+                audio::VoiceTone::BassBoost => "audio-tone-bass",
+            })
+            .into()
+        })
+        .collect();
+    s.set_voice_tones(ModelRc::new(VecModel::from(tones)));
+    s.set_voice_tone_index(i32::try_from(settings.audio.voice_tone.index()).unwrap_or(0));
     let report = app.voice_aec().lock().ok().and_then(|g| g.clone());
     s.set_aec_status(aec_status(report.as_ref()).into());
     s.set_aec_lowering(
@@ -1024,6 +1041,15 @@ fn wire(sf: SettingsSurface<'_>) {
             app.voice_tx()
                 .send(VoiceControl::SetEchoCancellation(mode))
                 .ok();
+        });
+    });
+    // Heard at once, like the volume; Close without saving puts the
+    // old tone back (`apply_settings_live`).
+    logic.on_voice_tone_selected(|index| {
+        app::with_current(move |app| {
+            let tone = audio::VoiceTone::from_index(usize::try_from(index).unwrap_or(0));
+            app.settings.audio.voice_tone = tone;
+            app.voice_tx().send(VoiceControl::SetVoiceTone(tone)).ok();
         });
     });
 

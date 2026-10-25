@@ -129,6 +129,10 @@ export global SettingsState {
     in property <[string]> aec-modes;
     in-out property <int> aec-index: 0;
     in property <string> aec-status;
+    /// The voice tone over everyone's voice: Natural / Crisp / Bass
+    /// boosted (audio::VoiceTone::ALL order).
+    in property <[string]> voice-tones;
+    in-out property <int> voice-tone-index: 0;
     /// Windows is lowering the user's other apps because of our call
     /// streams and would not be asked not to (AEC-SPEC.md E15).
     in property <bool> aec-lowering;
@@ -222,6 +226,7 @@ export global SettingsLogic {
     callback toggle-test-mic();
     callback transmission-selected(int);
     callback aec-selected(int);
+    callback voice-tone-selected(int);
     /// Open the system's sound settings (Windows: Communications tab).
     callback open-sound-settings();
 
@@ -1125,6 +1130,15 @@ component AudioPanel inherits VerticalLayout {
                 color: Theme.text-muted; font-size: Theme.font-sm;
                 vertical-alignment: center; horizontal-alignment: right;
             }
+        }
+    }
+    Setting {
+        label: Tr.audio-voice-tone;
+        hint: Tr.audio-voice-tone-hint;
+        Dropdown {
+            options: SettingsState.voice-tones;
+            current <=> SettingsState.voice-tone-index;
+            selected(i) => { SettingsLogic.voice-tone-selected(i); }
         }
     }
     Rectangle { }

@@ -70,32 +70,48 @@ impl Limiter {
     /// downstream needs to clamp again.
     pub fn process_samples(&mut self, samples: &mut [f32]) {
         for s in samples.iter_mut() {
-            // Asymmetric envelope: fast rise, slower fall
-            let abs = s.abs();
-            let env_coeff = if abs > self.envelope {
-                self.env_attack_coeff
-            } else {
-                self.env_release_coeff
-            };
-            self.envelope += env_coeff * (abs - self.envelope);
-
-            // Desired gain: soft ratio compression above threshold
-            let desired = if self.envelope > self.threshold {
-                self.threshold / self.envelope
-            } else {
-                1.0
-            };
-
-            // Smooth gain changes (fast attack, slow release)
-            let coeff = if desired < self.gain {
-                self.attack_coeff
-            } else {
-                self.release_coeff
-            };
-            self.gain += coeff * (desired - self.gain);
-            self.gain = self.gain.min(1.0);
-
-            *s = (*s * self.gain).clamp(-0.99, 0.99);
+            let gain = self.next_gain(s.abs());
+            *s = (*s * gain).clamp(-0.99, 0.99);
         }
+    }
+
+    /// Limit a stereo pair in place, one gain for both channels (the
+    /// master bus with spatial voice): a loud voice on one side ducks
+    /// both ears alike, so nobody else's place in the picture moves.
+    pub fn process_stereo(&mut self, left: &mut [f32], right: &mut [f32]) {
+        for (l, r) in left.iter_mut().zip(right.iter_mut()) {
+            let gain = self.next_gain(l.abs().max(r.abs()));
+            *l = (*l * gain).clamp(-0.99, 0.99);
+            *r = (*r * gain).clamp(-0.99, 0.99);
+        }
+    }
+
+    /// One sample's step: the envelope follows `abs`, the gain follows
+    /// the envelope.
+    fn next_gain(&mut self, abs: f32) -> f32 {
+        // Asymmetric envelope: fast rise, slower fall
+        let env_coeff = if abs > self.envelope {
+            self.env_attack_coeff
+        } else {
+            self.env_release_coeff
+        };
+        self.envelope += env_coeff * (abs - self.envelope);
+
+        // Desired gain: soft ratio compression above threshold
+        let desired = if self.envelope > self.threshold {
+            self.threshold / self.envelope
+        } else {
+            1.0
+        };
+
+        // Smooth gain changes (fast attack, slow release)
+        let coeff = if desired < self.gain {
+            self.attack_coeff
+        } else {
+            self.release_coeff
+        };
+        self.gain += coeff * (desired - self.gain);
+        self.gain = self.gain.min(1.0);
+        self.gain
     }
 }

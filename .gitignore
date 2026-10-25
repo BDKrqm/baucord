@@ -1,4 +1,6 @@
 /target
+# Release packages built locally (published as GitHub release assets).
+/dist
 .DS_Store
 prompt.md
 *.log

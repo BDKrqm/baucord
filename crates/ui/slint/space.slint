@@ -1,0 +1,280 @@
+// space.slint — the voice space (spatial voice).
+//
+// Us in the middle of a disc, facing up; everyone in our voice room
+// around us as a dot with their picture. A dot dragged somewhere is
+// heard from there at once (the host sends every move to the audio
+// engine, `audio`'s spatial.rs) and kept when it is let go
+// (`app/space.rs`). The middle is no place: whoever sits there is heard
+// as before, the same in both ears. Local only — nothing of it goes to
+// the server, so it works on any server.
+//
+// The dialog is drawn here rather than in a `Modal`: a Modal's body
+// sits in a ScrollView, which on a touch host takes a finger's drag for
+// a scroll before a dot can.
+
+import { Theme } from "theme.slint";
+import { Tr } from "tr.slint";
+import { State, Logic, SpacePerson } from "globals.slint";
+import { AvatarTile, Btn, Card, CheckRow, Hint, PageRect } from "widgets.slint";
+
+/// The disc and the people on it.
+export component VoiceSpacePad inherits Rectangle {
+    in property <[SpacePerson]> people;
+    /// The disc's diameter (set by the dialog from the room it has: a
+    /// size from our own width would be a layout loop).
+    in property <length> side: 300px;
+    /// Spatial voice is off: drawn faded, still arranged by drags.
+    in property <bool> live: true;
+
+    property <length> dot: 40px;
+    /// How far from the middle a dot's centre may go: the rim.
+    property <length> reach: root.side / 2 - root.dot / 2 - 2px;
+    property <length> cx: root.width / 2;
+    property <length> cy: root.side / 2;
+    // The dot under a finger or the pointer, and where it is now (the
+    // disc's units: x right, y ahead, inside the unit circle).
+    property <int> drag-index: -1;
+    property <float> drag-x;
+    property <float> drag-y;
+    property <float> drag-r;
+
+    height: root.side;
+    min-width: root.side;
+
+    /// The dot's centre at `at-x`, `at-y` (our coordinates) as a place,
+    /// kept on the disc.
+    function drag-to(at-x: length, at-y: length) {
+        root.drag-x = (at-x - root.cx) / root.reach;
+        root.drag-y = (root.cy - at-y) / root.reach;
+        root.drag-r = Math.sqrt(root.drag-x * root.drag-x + root.drag-y * root.drag-y);
+        if (root.drag-r > 1) {
+            root.drag-x = root.drag-x / root.drag-r;
+            root.drag-y = root.drag-y / root.drag-r;
+        }
+    }
+
+    // The room: a disc with a ring at half way and a cross through us.
+    Rectangle {
+        x: root.cx - root.side / 2;
+        y: 0;
+        width: root.side;
+        height: root.side;
+        border-radius: root.side / 2;
+        background: Theme.bg-primary;
+        border-width: 1px;
+        border-color: Theme.border;
+        opacity: root.live ? 1.0 : 0.5;
+        Rectangle {
+            width: root.reach;
+            height: root.reach;
+            border-radius: root.reach / 2;
+            border-width: 1px;
+            border-color: Theme.subtle;
+        }
+        Rectangle {
+            width: root.side - 2 * root.dot;
+            height: 1px;
+            background: Theme.subtle;
+        }
+        Rectangle {
+            width: 1px;
+            height: root.side - 2 * root.dot;
+            background: Theme.subtle;
+        }
+        Text {
+            y: 6px;
+            text: Tr.space-ahead;
+            color: Theme.text-muted;
+            font-size: Theme.font-xs;
+        }
+        Text {
+            y: parent.height - self.height - 6px;
+            text: Tr.space-behind;
+            color: Theme.text-muted;
+            font-size: Theme.font-xs;
+        }
+        Text {
+            x: 8px;
+            text: Tr.space-left;
+            color: Theme.text-muted;
+            font-size: Theme.font-xs;
+        }
+        Text {
+            x: parent.width - self.width - 8px;
+            text: Tr.space-right;
+            color: Theme.text-muted;
+            font-size: Theme.font-xs;
+        }
+    }
+
+    // Us, facing up: a disc with a notch where the nose is.
+    Path {
+        x: root.cx - 6px;
+        y: root.cy - 22px;
+        width: 12px;
+        height: 7px;
+        viewbox-width: 12;
+        viewbox-height: 7;
+        commands: "M 0 7 L 6 0 L 12 7 Z";
+        fill: Theme.accent;
+    }
+    Rectangle {
+        x: root.cx - 14px;
+        y: root.cy - 14px;
+        width: 28px;
+        height: 28px;
+        border-radius: 14px;
+        background: Theme.accent;
+        Text {
+            text: Tr.space-you;
+            color: Theme.on-accent;
+            font-size: Theme.font-xs;
+            font-weight: 600;
+        }
+    }
+
+    for p[i] in root.people : spot := Rectangle {
+        property <bool> held: root.drag-index == i;
+        property <float> at-x: self.held ? root.drag-x : p.x;
+        property <float> at-y: self.held ? root.drag-y : p.y;
+        x: root.cx + self.at-x * root.reach - root.dot / 2;
+        y: root.cy - self.at-y * root.reach - root.dot / 2;
+        width: root.dot;
+        height: root.dot;
+
+        AvatarTile {
+            source: p.avatar;
+            has-image: p.has-avatar;
+            initial: p.initial;
+            tint: p.tile-tint;
+            side: root.dot - 8px;
+            corner: (root.dot - 8px) / 2;
+            ring: p.speaking;
+            struck: p.local-muted;
+        }
+        Text {
+            x: (parent.width - self.width) / 2;
+            y: parent.height;
+            width: 96px;
+            text: p.name;
+            color: spot.held ? Theme.text-primary : Theme.text-secondary;
+            font-size: Theme.font-xs;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+        TouchArea {
+            mouse-cursor: spot.held ? MouseCursor.grabbing : MouseCursor.grab;
+            pointer-event(ev) => {
+                if (ev.kind == PointerEventKind.down) {
+                    root.drag-index = i;
+                    root.drag-x = p.x;
+                    root.drag-y = p.y;
+                } else if (ev.kind == PointerEventKind.up && root.drag-index == i) {
+                    Logic.space-released(i, root.drag-x, root.drag-y);
+                    root.drag-index = -1;
+                }
+            }
+            // Absolute positions: the dot moves under the pointer, so
+            // its own coordinates would count every step twice. The
+            // grab's offset from the dot's centre is kept.
+            moved => {
+                if (root.drag-index == i) {
+                    root.drag-to(
+                        self.absolute-position.x + self.mouse-x - self.pressed-x + root.dot / 2 - root.absolute-position.x,
+                        self.absolute-position.y + self.mouse-y - self.pressed-y + root.dot / 2 - root.absolute-position.y);
+                    Logic.space-moved(i, root.drag-x, root.drag-y);
+                }
+            }
+        }
+    }
+}
+
+/// The voice space as a dialog over the page: the disc, the switch,
+/// and the two arrangements. Escape, Back, a click outside or Done
+/// closes it.
+export component VoiceSpaceDialog inherits Rectangle {
+    /// Where the card may sit (as `Modal` has it). Unset: the window.
+    in property <PageRect> page;
+    property <length> area-x: root.page.width > 0 ? root.page.x : 0;
+    property <length> area-y: root.page.height > 0 ? root.page.y : 0;
+    property <length> area-width: root.page.width > 0 ? root.page.width : root.width;
+    property <length> area-height: root.page.height > 0 ? root.page.height : root.height;
+    property <length> card-width: Math.min(400px, root.area-width - 32px);
+
+    background: Theme.scrim;
+    TouchArea { clicked => { Logic.space-close(); } }
+    FocusScope {
+        init => { self.focus(); }
+        key-pressed(ev) => {
+            if (ev.text == Key.Escape || ev.text == Key.Back) {
+                Logic.space-close();
+                return accept;
+            }
+            reject
+        }
+        Card {
+            width: root.card-width;
+            height: body.preferred-height;
+            x: root.area-x + (root.area-width - self.width) / 2;
+            y: root.area-y + Math.max(Theme.gap-sm, (root.area-height - self.height) / 2);
+            TouchArea { }   // swallow clicks inside the card
+            body := VerticalLayout {
+                padding: Theme.gap-lg;
+                spacing: Theme.gap-md;
+                Text {
+                    text: Tr.space-title;
+                    color: Theme.text-primary;
+                    font-size: Theme.font-md;
+                    font-weight: 600;
+                }
+                Hint { text: Tr.space-hint; }
+                VoiceSpacePad {
+                    people: State.space-people;
+                    live: State.space-spatial;
+                    // The room the card has, across and down (the rest
+                    // of the card is ~320 px), never under 180 px.
+                    side: Math.max(180px, Math.min(300px,
+                        Math.min(root.card-width - 2 * Theme.gap-lg, root.area-height - 340px)));
+                }
+                if State.space-people.length == 0 : Text {
+                    text: Tr.space-empty;
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-sm;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+                CheckRow {
+                    text: Tr.space-toggle;
+                    hint: Tr.space-toggle-hint;
+                    checked: State.space-spatial;
+                    toggled(on) => { Logic.space-toggled(on); }
+                }
+                CheckRow {
+                    text: Tr.space-auto;
+                    hint: Tr.space-auto-hint;
+                    checked: State.space-auto;
+                    toggled(on) => { Logic.space-auto-toggled(on); }
+                }
+                HorizontalLayout {
+                    spacing: Theme.gap-sm;
+                    Btn {
+                        text: Tr.space-centre;
+                        enabled: State.space-people.length > 0;
+                        clicked => { Logic.space-centre(); }
+                    }
+                    Btn {
+                        text: Tr.space-spread;
+                        enabled: State.space-people.length > 0;
+                        clicked => { Logic.space-spread(); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    Btn {
+                        text: Tr.space-done;
+                        accent: true;
+                        clicked => { Logic.space-close(); }
+                    }
+                }
+            }
+        }
+    }
+}

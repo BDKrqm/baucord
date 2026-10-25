@@ -1,7 +1,10 @@
-//! Audio output: packet buffers → decode at pull → mix → gain → limit → resample → playback.
+//! Audio output: packet buffers → decode at pull → mix (stereo: each
+//! peer from where they were placed, `spatial.rs`) → gain → limit →
+//! resample → playback.
 //!
 //! Asks the device for 48 kHz first (see [`crate::device`]); only devices
-//! that cannot do 48 kHz get a resampler on this path.
+//! that cannot do 48 kHz get a resampler on this path. The ring to the
+//! device carries interleaved left/right frames, written whole.
 
 use std::{
     sync::{
@@ -105,6 +108,7 @@ pub struct AudioOutput {
 
     ring_producer: Option<Producer<f32>>,
     ring_consumer: Option<Consumer<f32>>,
+    /// In samples: two per frame.
     ring_capacity: usize,
 
     /// Wake latch: playback callback → worker ("ring space freed").
@@ -299,7 +303,10 @@ impl AudioOutput {
             Ok(native) => {
                 let rate = native.sample_rate;
                 self.native_voice = Some(native);
-                self.spawn_worker_for(rate);
+                // The call path is mono (VPIO opens one channel; Android's
+                // communication streams play to the earpiece, a speaker
+                // or a headset in call mode): nobody spatially here.
+                self.spawn_worker_for(rate, false);
                 Ok(())
             }
             Err(err) => {
@@ -331,9 +338,10 @@ impl AudioOutput {
         ) {
             Ok(native) => {
                 let rate = native.sample_rate;
+                let stereo = native.channels > 1;
                 self.native = Some(native);
                 self.prime_ring(rate);
-                self.spawn_worker_for(rate);
+                self.spawn_worker_for(rate, stereo);
                 Ok(())
             }
             Err(err) => {
@@ -386,7 +394,7 @@ impl AudioOutput {
 
         self.prime_ring(sample_rate);
         // Start producer worker BEFORE the stream so it's ready when callbacks arrive
-        self.spawn_worker_for(sample_rate);
+        self.spawn_worker_for(sample_rate, channels > 1);
 
         let stream = match format {
             SampleFormat::I16 => self.build_stream::<i16>(sample_rate, channels)?,
@@ -404,13 +412,14 @@ impl AudioOutput {
     /// device period isn't a guaranteed underrun ("Underruns 1" forever).
     fn prime_ring(&mut self, sample_rate: u32) {
         if let Some(producer) = self.ring_producer.as_mut() {
-            let silence = vec![0.0f32; (sample_rate as usize * 20) / 1000];
+            let silence = vec![0.0f32; 2 * (sample_rate as usize * 20) / 1000];
             let _ = producer.push_partial_slice(&silence);
         }
     }
 
-    /// Spawn the mix/decode worker filling the ring at `device_sample_rate`.
-    fn spawn_worker_for(&mut self, device_sample_rate: u32) {
+    /// Spawn the mix/decode worker filling the ring at `device_sample_rate`;
+    /// `stereo` is whether the device has two ears to play spatial voice to.
+    fn spawn_worker_for(&mut self, device_sample_rate: u32, stereo: bool) {
         // Phones, when the call stream itself opened: a stream beside
         // the call would be media (wrong volume, route, no echo
         // cancellation) — ANDROID-SPEC.md D56, IOS-SPEC.md D52. The cpal
@@ -448,6 +457,7 @@ impl AudioOutput {
                 output_gain: self.output_gain.clone(),
                 deafened: self.deafened.clone(),
                 mix_streams,
+                stereo,
             });
             self.worker_thread = Some(handle);
         }
@@ -502,14 +512,16 @@ impl AudioOutput {
                     #[allow(clippy::cast_possible_truncation)]
                     crate::platform::promote_callback_thread(HOP as u32, sample_rate);
                 }
-                // The ring into the buffer, the voice on the front pair
-                // (cpal does not expose the channel mask: the standard
-                // order is assumed), the meter, and the worker woken
-                // (`pump`).
-                pump.pull_mono(data.len() / ch, |i, sample| {
-                    crate::native::pump::front_pair(
+                // The ring into the buffer, the two ears on the front
+                // pair (cpal does not expose the channel mask: the
+                // standard order is assumed), the meter, and the worker
+                // woken (`pump`).
+                pump.pull_stereo(data.len() / ch, |i, l, r| {
+                    crate::native::pump::front_stereo(
                         &mut data[i * ch..(i + 1) * ch],
-                        T::from_sample(sample),
+                        T::from_sample(l),
+                        T::from_sample(r),
+                        T::from_sample(0.5 * (l + r)),
                         T::EQUILIBRIUM,
                     );
                 });
@@ -553,6 +565,8 @@ struct WorkerParts {
     deafened: Arc<AtomicBool>,
     /// Add the watched streams' audio (`stream::mix`) to every hop.
     mix_streams: bool,
+    /// The device has two ears: placed peers are heard from their place.
+    stereo: bool,
 }
 
 #[allow(clippy::too_many_lines)] // one straight-line real-time loop
@@ -573,6 +587,7 @@ fn worker_loop(parts: WorkerParts) {
         output_gain,
         deafened,
         mix_streams,
+        stereo,
     } = parts;
 
     // While held, stream decoders play into this output (`stream::mix`).
@@ -582,6 +597,7 @@ fn worker_loop(parts: WorkerParts) {
     });
 
     let mut jitter_buffer = AdaptiveJitterBuffer::new(OPUS_SAMPLE_RATE as usize, 10, peers);
+    jitter_buffer.set_stereo(stereo);
 
     // Decoded once per engine, shared by every output it opens.
     let sound_bank = &*sounds;
@@ -597,23 +613,33 @@ fn worker_loop(parts: WorkerParts) {
 
     if needs_resample {
         let chunk = crate::resampler::frames_for_ms(device_sample_rate, 10);
-        match build_output_resampler(device_sample_rate, chunk, 1) {
+        match build_output_resampler(device_sample_rate, chunk, 2) {
             Ok(r) => {
-                resampler_input = vec![Vec::with_capacity(r.input_frames_next() + 64)];
-                resampler_output = vec![vec![0.0f32; chunk * 2]];
+                // Not `vec![…; 2]`: a clone does not keep the capacity.
+                resampler_input = (0..2)
+                    .map(|_| Vec::with_capacity(r.input_frames_next() + 64))
+                    .collect();
+                resampler_output = vec![vec![0.0f32; chunk * 2]; 2];
                 resampler = Some(r);
             }
             Err(e) => error!("Failed to create output resampler: {e}"),
         }
     }
 
-    let high_wm = ring_capacity * 85 / 100;
+    // In frames, as the device counts (the ring holds two samples each).
+    let ring_frames = ring_capacity / 2;
+    let high_wm = ring_frames * 85 / 100;
     // Ring fill to keep ahead of the device, and how many hops one pass
     // may produce; both follow the callback size (see `Cushion`).
     let mut cushion = Cushion::for_callback(0, device_sample_rate, high_wm);
     let mut known_callback = 0usize;
-    let mut hop_buf = vec![0.0f32; HOP];
-    let mut resample_accum: Vec<f32> = Vec::with_capacity(2048);
+    // One hop per ear, the stream bus's mono hop, and the two
+    // interleaved for the ring.
+    let mut hop_l = vec![0.0f32; HOP];
+    let mut hop_r = vec![0.0f32; HOP];
+    let mut stream_hop = vec![0.0f32; HOP];
+    let mut interleaved: Vec<f32> = Vec::with_capacity(4096);
+    let mut resample_accum: [Vec<f32>; 2] = [Vec::with_capacity(2048), Vec::with_capacity(2048)];
     let mut output_limiter = Limiter::new();
     let mut next_tick = Instant::now();
     // A microphone test's voice waits here on a phone (`loopback`).
@@ -625,7 +651,15 @@ fn worker_loop(parts: WorkerParts) {
     #[allow(clippy::cast_possible_truncation)]
     let _rt = crate::platform::promote_current_thread(HOP as u32, OPUS_SAMPLE_RATE);
 
-    debug!("Output worker started (device {device_sample_rate}Hz, resample={needs_resample})");
+    debug!(
+        "Output worker started (device {device_sample_rate}Hz, resample={needs_resample}, \
+         spatial voice {})",
+        if stereo {
+            "possible"
+        } else {
+            "off: mono output"
+        }
+    );
     while !should_stop.load(Ordering::Relaxed) {
         // Drain ALL inbound packets into the jitter buffer. Arrival was
         // stamped at intake; the packet buffers sort by sequence.
@@ -675,7 +709,7 @@ fn worker_loop(parts: WorkerParts) {
         let t_hop = Instant::now();
         for _ in 0..cushion.max_hops {
             // Stop if ring is sufficiently full
-            let current_fill = ring_capacity - ring_producer.slots();
+            let current_fill = (ring_capacity - ring_producer.slots()) / 2;
             if current_fill >= cushion.target_fill || current_fill >= high_wm {
                 break;
             }
@@ -683,24 +717,31 @@ fn worker_loop(parts: WorkerParts) {
             // Pull 10 ms from the jitter buffer (decoding as it goes).
             // Deafened still pulls: the buffers must keep draining and
             // the decoders must keep state; the audio is just discarded.
-            jitter_buffer.pull_mixed(HOP, &mut hop_buf);
+            jitter_buffer.pull_mixed(HOP, &mut hop_l, &mut hop_r);
             if deafened.load(Ordering::Relaxed) {
-                hop_buf.fill(0.0);
+                hop_l.fill(0.0);
+                hop_r.fill(0.0);
             }
 
             // Mix notification sound into hop buffer (at 48 kHz,
             // before gain so it respects the master volume).
             // Notifications play even when deafened — you should
-            // still hear join/leave events.
+            // still hear join/leave events. In the middle: they are
+            // the app's, not anybody's.
             let mut sound_finished = false;
             if let Some((sound, cursor)) = playing.as_mut() {
                 let samples = sound_bank.get(*sound);
                 let remaining = samples.len().saturating_sub(*cursor);
                 let to_mix = remaining.min(HOP);
-                for (slot, &s) in hop_buf[..to_mix].iter_mut().zip(&samples[*cursor..]) {
+                for ((l, r), &s) in hop_l[..to_mix]
+                    .iter_mut()
+                    .zip(hop_r[..to_mix].iter_mut())
+                    .zip(&samples[*cursor..])
+                {
                     // No clamp here: the limiter downstream is the
                     // one place that controls the summed level.
-                    *slot += s;
+                    *l += s;
+                    *r += s;
                 }
                 *cursor += to_mix;
                 sound_finished = *cursor >= samples.len();
@@ -717,31 +758,43 @@ fn worker_loop(parts: WorkerParts) {
             // clip and the "limiter" audibly does nothing.
             let gain = f32::from_bits(output_gain.load(Ordering::Relaxed));
             if (gain - 1.0).abs() > f32::EPSILON {
-                for s in &mut hop_buf {
+                for s in hop_l.iter_mut().chain(hop_r.iter_mut()) {
                     *s *= gain;
                 }
             }
             // A watched stream (phones, call path): after deafen and the
             // voice volume, which a stream ignores (it has its own), and
-            // before the limiter, which must see the sum.
+            // before the limiter, which must see the sum. The bus is
+            // mono and read once: into both ears.
             if mix_streams {
-                crate::stream::mix::BUS.mix_into(&mut hop_buf);
+                stream_hop.fill(0.0);
+                crate::stream::mix::BUS.mix_into(&mut stream_hop);
+                for ((l, r), &s) in hop_l.iter_mut().zip(hop_r.iter_mut()).zip(&stream_hop) {
+                    *l += s;
+                    *r += s;
+                }
             }
-            output_limiter.process_samples(&mut hop_buf);
+            output_limiter.process_stereo(&mut hop_l, &mut hop_r);
 
             if let Some(ref mut r) = resampler {
-                resample_accum.extend_from_slice(&hop_buf);
+                resample_accum[0].extend_from_slice(&hop_l);
+                resample_accum[1].extend_from_slice(&hop_r);
 
-                while resample_accum.len() >= r.input_frames_next() {
+                while resample_accum[0].len() >= r.input_frames_next() {
                     let needed = r.input_frames_next();
-                    resampler_input[0].clear();
-                    resampler_input[0].extend_from_slice(&resample_accum[..needed]);
-                    resample_accum.drain(..needed);
+                    for (input, accum) in resampler_input.iter_mut().zip(resample_accum.iter_mut())
+                    {
+                        input.clear();
+                        input.extend_from_slice(&accum[..needed]);
+                        accum.drain(..needed);
+                    }
 
                     let expected = r.output_frames_next();
-                    resampler_output[0].resize(expected, 0.0);
+                    for output in &mut resampler_output {
+                        output.resize(expected, 0.0);
+                    }
 
-                    let in_adapter = match SequentialSliceOfVecs::new(&resampler_input, 1, needed) {
+                    let in_adapter = match SequentialSliceOfVecs::new(&resampler_input, 2, needed) {
                         Ok(a) => a,
                         Err(e) => {
                             error!("Output resampler adapter error: {e}");
@@ -749,7 +802,7 @@ fn worker_loop(parts: WorkerParts) {
                         }
                     };
                     let mut out_adapter =
-                        match SequentialSliceOfVecs::new_mut(&mut resampler_output, 1, expected) {
+                        match SequentialSliceOfVecs::new_mut(&mut resampler_output, 2, expected) {
                             Ok(a) => a,
                             Err(e) => {
                                 error!("Output resampler output adapter error: {e}");
@@ -759,10 +812,12 @@ fn worker_loop(parts: WorkerParts) {
 
                     match r.process_into_buffer(&in_adapter, &mut out_adapter, None) {
                         Ok((_in_len, out_len)) => {
-                            // Chunked push; the ring-full remainder is dropped
-                            // (the fill gate above makes that rare).
-                            let _ =
-                                ring_producer.push_partial_slice(&resampler_output[0][..out_len]);
+                            interleave(
+                                &resampler_output[0][..out_len],
+                                &resampler_output[1][..out_len],
+                                &mut interleaved,
+                            );
+                            push_frames(&mut ring_producer, &interleaved);
                         }
                         Err(e) => {
                             error!("Output resampler error: {e}");
@@ -771,7 +826,8 @@ fn worker_loop(parts: WorkerParts) {
                     }
                 }
             } else {
-                let _ = ring_producer.push_partial_slice(&hop_buf);
+                interleave(&hop_l, &hop_r, &mut interleaved);
+                push_frames(&mut ring_producer, &interleaved);
             }
         }
         // Wall time of one refill pass (decode + mix + limit). Replaces
@@ -873,10 +929,27 @@ impl Cushion {
     }
 }
 
-/// The ring between the worker and the device: 200 ms at the device
-/// rate, mono, never under 9600 samples.
+/// The ring between the worker and the device, in samples: 200 ms at
+/// the device rate, never under 9600 frames, two samples a frame.
 fn ring_size_for(sample_rate: u32) -> usize {
-    (sample_rate as usize * 200 / 1000).max(9600)
+    2 * (sample_rate as usize * 200 / 1000).max(9600)
+}
+
+/// The two ears into `out` as interleaved frames (cleared first).
+fn interleave(left: &[f32], right: &[f32], out: &mut Vec<f32>) {
+    out.clear();
+    for (&l, &r) in left.iter().zip(right) {
+        out.push(l);
+        out.push(r);
+    }
+}
+
+/// Queue whole frames only. What does not fit is dropped (the fill gate
+/// makes that rare) — but never half a frame, or the device would play
+/// every frame after it with the ears swapped.
+fn push_frames(producer: &mut Producer<f32>, frames: &[f32]) {
+    let fit = producer.slots() & !1;
+    let _ = producer.push_partial_slice(&frames[..frames.len().min(fit)]);
 }
 
 /// cpal's device for `device_name` (`None` = the default) and the

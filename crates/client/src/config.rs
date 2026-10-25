@@ -503,6 +503,20 @@ pub struct AudioSettings {
     /// apps and where the way out is (`AEC-SPEC.md` E15).
     #[serde(default)]
     pub lowering_told: bool,
+    /// Hear the people placed in the voice space from where they were
+    /// put (`audio::PeerAudioSettings::position`); off, everyone is in
+    /// the middle again and the places are kept.
+    #[serde(default = "default_true")]
+    pub spatial_voice: bool,
+    /// Spread everyone in the voice space out again whenever someone
+    /// joins or leaves our voice channel (places set by hand last until
+    /// then).
+    #[serde(default = "default_true")]
+    pub space_auto_spread: bool,
+    /// The colour over everyone's voice: `"natural"` (the default),
+    /// `"crisp"`, `"bass_boost"` (`audio::VoiceTone`).
+    #[serde(default)]
+    pub voice_tone: audio::VoiceTone,
 }
 
 impl Default for AudioSettings {
@@ -514,6 +528,9 @@ impl Default for AudioSettings {
             push_to_talk: false,
             echo_cancellation: audio::AecMode::Auto,
             lowering_told: false,
+            spatial_voice: true,
+            space_auto_spread: true,
+            voice_tone: audio::VoiceTone::Natural,
         }
     }
 }

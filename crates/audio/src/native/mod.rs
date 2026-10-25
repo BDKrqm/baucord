@@ -13,9 +13,10 @@
 //! - **Capture** pushes device-rate mono `f32` into an `rtrb` ring and
 //!   pings a wake latch after every packet. It reports the sample rate it
 //!   actually delivers so the worker can decide whether to resample.
-//! - **Render** pops device-rate mono `f32` from an `rtrb` ring, fans it
-//!   out to the front pair (silence elsewhere), and pings the latch after
-//!   every period so the worker refills promptly.
+//! - **Render** pops device-rate interleaved stereo `f32` (the spatial
+//!   voice's two ears) from an `rtrb` ring, puts it on the front pair
+//!   (silence elsewhere; the two summed on a mono endpoint), and pings
+//!   the latch after every period so the worker refills promptly.
 //! - Both count glitches into `AudioStats`, set the `*_stream_failed` flag
 //!   when the device goes away, and stop within ~100 ms of a stop request.
 //!

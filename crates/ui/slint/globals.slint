@@ -68,6 +68,24 @@ export struct UserRow {
     // menu opens (review P1-9).
 }
 
+/// Someone in our voice room, as the voice space (spatial voice) draws
+/// them: their look from the roster row, and where they are heard from.
+/// `x`/`y` are the disc's own units — inside the unit circle, x to the
+/// right, y straight ahead; 0, 0 is the middle, which is no place.
+export struct SpacePerson {
+    client-id-lo: int,
+    client-id-hi: int,
+    name: string,
+    avatar: image,
+    has-avatar: bool,
+    initial: string,
+    tile-tint: color,
+    speaking: bool,
+    local-muted: bool,
+    x: float,
+    y: float,
+}
+
 /// A channel as the "Move to" submenu lists it (visible ones only).
 
 /// One direct-message conversation in the sidebar's Messages section.
@@ -334,6 +352,28 @@ export global State {
     /// sent); the host seeds it and applies every move.
     in-out property <float> menu-volume: 1.0;
 
+    // ── Voice space (spatial voice; main.slint's dialog, space.slint) ──
+    // Us in the middle facing up, everyone in our voice room around us;
+    // a dot dragged somewhere is heard from there. Local only.
+    in property <bool> space-open: false;
+    in property <[SpacePerson]> space-people;
+    /// Spatial voice is on (a setting): off, the places are kept and
+    /// everyone is heard in the middle.
+    in property <bool> space-spatial: true;
+    /// Everyone is spread out again as people join or leave (a setting).
+    in property <bool> space-auto: true;
+
+    // ── A person's equalizer (main.slint's dialog, equalizer.slint) ──
+    // Five bands in dB (±12): 100 Hz shelf, 300 Hz, 1 kHz, 3 kHz,
+    // 8 kHz shelf. The host seeds them and applies every move.
+    in property <bool> eq-open: false;
+    in property <string> eq-title;          // "Equalizer — alice"
+    in-out property <float> eq-b0: 0;
+    in-out property <float> eq-b1: 0;
+    in-out property <float> eq-b2: 0;
+    in-out property <float> eq-b3: 0;
+    in-out property <float> eq-b4: 0;
+
     // Channel dialog (create, or edit one we may manage; spec §5)
     in property <bool> channel-dialog-open: false;
     in property <bool> channel-dialog-editing: false;   // false = create
@@ -521,6 +561,24 @@ export global Logic {
     callback menu-volume-released(float);
     /// Escape, or a click outside the panel.
     callback menu-closed();
+    // Voice space: open it (the sidebar's button), close it; a dot is
+    // dragged (heard at once) and let go (kept), in the disc's units;
+    // spread everyone out, or all back to the middle; spatial voice on
+    // or off.
+    callback space-open();
+    callback space-close();
+    callback space-moved(index: int, x: float, y: float);
+    callback space-released(index: int, x: float, y: float);
+    callback space-spread();
+    callback space-centre();
+    callback space-toggled(bool);
+    callback space-auto-toggled(bool);
+    // A person's equalizer: a band moved (heard at once) or let go
+    // (kept), all flat again, the dialog closed.
+    callback eq-changed(band: int, db: float);
+    callback eq-released(band: int, db: float);
+    callback eq-reset();
+    callback eq-close();
     // 1.1.1 — the Messages section
     callback dm-clicked(int);                  // index into State.dms
     callback dm-closed(int);                   // hide the conversation (nothing is deleted)

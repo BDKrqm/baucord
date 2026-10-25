@@ -66,6 +66,7 @@ mod chat;
 mod commands;
 mod conversations;
 mod devices;
+mod equalizer;
 // `AppState`'s methods, by concern; each file is a child module so
 // nothing here had to become `pub` for them.
 mod events;
@@ -74,6 +75,7 @@ mod presence;
 mod profiles;
 mod safety;
 mod session;
+mod space;
 mod stats;
 
 pub(crate) use safety::reason_label;
@@ -256,6 +258,11 @@ pub(crate) struct Session {
     telemetry_notes: HashMap<u64, TelemetryNote>,
     /// The moderation dialog's subject while it is open.
     moderation: Option<Moderation>,
+    /// The equalizer dialog's subject while it is open (`equalizer.rs`).
+    eq_peer: Option<u64>,
+    /// Who was in our voice room when the voice space last spread them
+    /// out by itself (`space.rs`, `audio.space_auto_spread`).
+    space_room: Vec<u64>,
     /// Everyone's look, from the server (spec §7.1).
     profiles: HashMap<u64, client::protocol::Profile>,
     /// Names and looks by account (1.2): whoever the server introduced
@@ -315,6 +322,8 @@ impl Default for Session {
             channel_details: HashMap::new(),
             telemetry_notes: HashMap::new(),
             moderation: None,
+            eq_peer: None,
+            space_room: Vec::new(),
             profiles: HashMap::new(),
             author_looks: HashMap::new(),
             lurkers: HashMap::new(),
@@ -1282,6 +1291,46 @@ fn wire_logic(state: &Rc<RefCell<AppState>>) {
     });
     let w = Rc::downgrade(state);
     logic.on_menu_closed(move || with_app(&w, AppState::close_menu));
+
+    // ── Voice space (spatial voice) ─────────────────────────────
+    let w = Rc::downgrade(state);
+    logic.on_space_open(move || with_app(&w, AppState::open_voice_space));
+    let w = Rc::downgrade(state);
+    logic.on_space_close(move || with_app(&w, AppState::close_voice_space));
+    let w = Rc::downgrade(state);
+    logic.on_space_moved(move |index, x, y| {
+        with_app(&w, |app| app.voice_space_moved(index, x, y, false));
+    });
+    let w = Rc::downgrade(state);
+    logic.on_space_released(move |index, x, y| {
+        with_app(&w, |app| app.voice_space_moved(index, x, y, true));
+    });
+    let w = Rc::downgrade(state);
+    logic.on_space_spread(move || with_app(&w, AppState::voice_space_spread));
+    let w = Rc::downgrade(state);
+    logic.on_space_centre(move || with_app(&w, AppState::voice_space_centre));
+    let w = Rc::downgrade(state);
+    logic.on_space_toggled(move |on| {
+        with_app(&w, |app| app.set_spatial_voice(on));
+    });
+    let w = Rc::downgrade(state);
+    logic.on_space_auto_toggled(move |on| {
+        with_app(&w, |app| app.set_space_auto_spread(on));
+    });
+
+    // ── A person's equalizer ────────────────────────────────────
+    let w = Rc::downgrade(state);
+    logic.on_eq_changed(move |band, db| {
+        with_app(&w, |app| app.peer_eq_changed(band, db, false));
+    });
+    let w = Rc::downgrade(state);
+    logic.on_eq_released(move |band, db| {
+        with_app(&w, |app| app.peer_eq_changed(band, db, true));
+    });
+    let w = Rc::downgrade(state);
+    logic.on_eq_reset(move || with_app(&w, AppState::peer_eq_reset));
+    let w = Rc::downgrade(state);
+    logic.on_eq_close(move || with_app(&w, AppState::close_peer_eq));
 
     let w = Rc::downgrade(state);
     logic.on_dm_clicked(move |index| {
@@ -2391,6 +2440,8 @@ fn menu_label(label: &menu::Label) -> slint::SharedString {
         L::MuteForMe => "menu-mute-for-me",
         L::UnmuteForMe => "menu-unmute-for-me",
         L::ResetAudio => "reset-audio",
+        L::VoiceSpace => "menu-voice-space",
+        L::Equalizer => "menu-equalizer",
         L::WatchStream => "watch-stream",
         L::Message => "menu-message",
         L::Role => "menu-role",
@@ -2514,6 +2565,8 @@ fn peer_audio_from(a: &PeerAudioSettings) -> PeerAudio {
     PeerAudio {
         volume: a.volume,
         is_muted: a.is_muted,
+        position: a.position,
+        eq: a.eq,
     }
 }
 
@@ -2521,6 +2574,8 @@ fn peer_audio_to(a: PeerAudio) -> PeerAudioSettings {
     PeerAudioSettings {
         volume: a.volume,
         is_muted: a.is_muted,
+        position: a.position,
+        eq: a.eq,
     }
 }
 

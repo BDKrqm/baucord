@@ -859,6 +859,12 @@ export component Sidebar inherits Rectangle {
                     tooltip: State.deafened ? Tr.undeafen : Tr.deafen;
                     clicked => { Logic.toggle-deafen(); }
                 }
+                // The voice space: where everyone is heard from.
+                IconBtn {
+                    icon: IconSet.Radar;
+                    tooltip: Tr.space-title;
+                    clicked => { Logic.space-open(); }
+                }
                 // A phone cannot share its screen (ANDROID-SPEC.md §9.4):
                 // no button that could only fail.
                 if !State.touch-host : IconBtn {

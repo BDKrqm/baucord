@@ -159,6 +159,10 @@ impl AppState {
             .tx
             .send(VoiceControl::SetPeerAudio(client_id, saved))
             .ok();
+        // That brought back the place they had last time, over the one
+        // the voice space may have just spread them to: spread again
+        // at the end of this pass (`auto_spread_voice_space`).
+        self.session.space_room.clear();
     }
 
     pub(super) fn handle_user_joined(&mut self, client_id: u64, username: String, channel_id: u16) {

@@ -1,5 +1,23 @@
 # baucord
 
+> **This is a fork of [mpwsh/baucord](https://github.com/mpwsh/baucord)**
+> that adds, on the client only (it works with any baucord server):
+>
+> - **Spatial voice** — a voice space (the radar button beside Deafen)
+>   where you drag each person around you and hear them from that
+>   direction, so several people talking at once are easy to tell apart.
+>   *Spread out automatically* re-spreads everyone as people join or
+>   leave. (`crates/audio/src/spatial.rs`, `crates/ui/slint/space.slint`)
+> - **A five-band equalizer per person** (*Equalizer…* in their menu) and
+>   a **voice tone** over everyone's voice — Natural, Crisp or Bass
+>   boosted — in Settings → Audio. (`crates/audio/src/processor/eq.rs`)
+>
+> The voice output path is stereo for this (it was mono). Files changed
+> from upstream are listed in the fork's commit; the details are in
+> CHANGELOG.md (1.3.0, "Everyone") and ARCHITECTURE.md §7.3. Licensed,
+> like upstream, under Apache-2.0. Windows builds are on the
+> [Releases](../../releases) page.
+
 A lightweight voice, text, and screen sharing application built with Rust,
 for Windows, macOS, Linux, Android and iPhone.
 

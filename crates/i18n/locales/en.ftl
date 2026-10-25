@@ -640,6 +640,35 @@ lobby-mic-hint = Join a channel to talk
 messages-collapse = Collapse messages
 messages-expand = Expand messages
 invite-button = Invite users
+# The voice space (spatial voice): people placed around you are heard
+# from there. Local only.
+space-title = Voice space
+space-hint = You are in the middle, facing up. Drag people to where you want to hear them from — when several talk at once, each comes from their own side. Best with headphones.
+space-empty = Nobody else is in your voice channel yet.
+space-toggle = Spatial voice
+space-toggle-hint = Off: everyone is heard in the middle again; their places are kept.
+space-centre = All to the middle
+space-spread = Spread out
+space-done = Done
+space-ahead = Ahead
+space-behind = Behind
+space-left = L
+space-right = R
+space-you = You
+space-auto = Spread out automatically
+space-auto-hint = Whenever someone joins or leaves your voice channel, everyone is spread out again. Places you set by hand last until then.
+menu-voice-space = Voice space…
+# A person's own equalizer, from their menu. Local only.
+menu-equalizer = Equalizer…
+eq-title = Equalizer — { $name }
+eq-hint = Shape how this person sounds to you: more body at the low end, clearer words in the middle, less hiss at the top. Only you hear it.
+eq-flat = Flat
+# Settings → Audio → Output: one colour over everyone's voice.
+audio-voice-tone = Voice tone
+audio-voice-tone-hint = Applies to everyone's voice; notifications and streams are left as they are.
+audio-tone-natural = Natural
+audio-tone-crisp = Crisp
+audio-tone-bass = Bass boosted
 card-offline = Offline
 invite-dialog-title = Invite users
 invite-role = Joins as

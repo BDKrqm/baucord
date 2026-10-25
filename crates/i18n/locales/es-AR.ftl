@@ -641,6 +641,35 @@ lobby-mic-hint = Unite a un canal para hablar
 messages-collapse = Contraer mensajes
 messages-expand = Expandir mensajes
 invite-button = Invitar usuarios
+# El espacio de voz (voz espacial): a quien ubicás alrededor tuyo lo
+# escuchás desde ahí. Solo en este dispositivo.
+space-title = Espacio de voz
+space-hint = Estás en el medio, mirando hacia arriba. Arrastrá a cada persona hacia donde la quieras escuchar: cuando hablan varios a la vez, cada uno viene de su lado. Mejor con auriculares.
+space-empty = Todavía no hay nadie más en tu canal de voz.
+space-toggle = Voz espacial
+space-toggle-hint = Apagada: se escucha a todos en el medio otra vez; sus lugares se guardan.
+space-centre = Todos al medio
+space-spread = Repartir
+space-done = Listo
+space-ahead = Adelante
+space-behind = Atrás
+space-left = I
+space-right = D
+space-you = Vos
+space-auto = Repartir automáticamente
+space-auto-hint = Cada vez que alguien entra o sale de tu canal de voz, se reparte a todos otra vez. Los lugares que pongas a mano duran hasta entonces.
+menu-voice-space = Espacio de voz…
+# El ecualizador de cada persona, desde su menú. Solo en este dispositivo.
+menu-equalizer = Ecualizador…
+eq-title = Ecualizador — { $name }
+eq-hint = Ajustá cómo te suena esta persona: más cuerpo en los graves, palabras más claras en los medios, menos siseo en los agudos. Solo lo escuchás vos.
+eq-flat = Plano
+# Ajustes → Audio → Salida: un color sobre la voz de todos.
+audio-voice-tone = Tono de voz
+audio-voice-tone-hint = Se aplica a la voz de todos; las notificaciones y las transmisiones quedan como están.
+audio-tone-natural = Natural
+audio-tone-crisp = Nítido
+audio-tone-bass = Graves realzados
 card-offline = Desconectado
 invite-dialog-title = Invitar usuarios
 invite-role = Entra como

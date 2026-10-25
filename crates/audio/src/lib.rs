@@ -73,6 +73,7 @@ pub mod processor;
 mod resampler;
 pub mod route;
 pub mod sounds;
+mod spatial;
 pub mod stats;
 pub mod stream;
 pub mod transport;
@@ -96,6 +97,7 @@ pub use encoder::MAX_VOICE_PAYLOAD;
 use log::{debug, error, info};
 pub use loopback::LOOPBACK_DELAY;
 pub use platform::TimerResolutionGuard;
+pub use processor::eq::{VoiceTone, EQ_BANDS, EQ_BAND_HZ, EQ_MAX_DB};
 pub use sounds::SoundType;
 pub use stats::AudioStats;
 pub use transport::packet::{AudioPacket, PayloadType};
@@ -700,7 +702,11 @@ impl VoiceChat {
             sound_rx: Some(sound_rx),
             sounds: Arc::new(sounds::SoundBank::new()),
             encoder_thread: Some(encoder_thread),
-            peers: Arc::new(transport::jitter_buffer::PeerTable::default()),
+            peers: {
+                let table = transport::jitter_buffer::PeerTable::with_spatial(config.spatial_voice);
+                table.set_tone(config.voice_tone);
+                Arc::new(table)
+            },
             #[cfg(windows)]
             device_watcher: match native::wasapi::DeviceWatcher::start(
                 stats.clone(),
@@ -1689,6 +1695,17 @@ impl VoiceChat {
 
     pub fn set_peer_settings(&self, peer_id: u64, settings: PeerAudioSettings) {
         self.peers.set(peer_id, settings);
+    }
+
+    /// Spatial voice on or off (`spatial.rs`): off, every peer is heard
+    /// in the middle again, wherever they were placed.
+    pub fn set_spatial_voice(&self, on: bool) {
+        self.peers.set_spatial(on);
+    }
+
+    /// The colour over everyone's voice (`processor::eq`).
+    pub fn set_voice_tone(&self, tone: VoiceTone) {
+        self.peers.set_tone(tone);
     }
 
     pub fn add_peer(&self, peer_id: u64) {

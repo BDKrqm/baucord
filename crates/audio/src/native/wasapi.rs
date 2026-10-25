@@ -1066,6 +1066,9 @@ pub struct NativeRender {
     /// ([`ask_not_to_duck`]); false on Windows 10, which cannot be
     /// asked.
     pub keeps_others: bool,
+    /// The endpoint's channels: one (a Bluetooth headset in call mode)
+    /// plays nobody spatially.
+    pub channels: usize,
 }
 
 struct RenderParts {
@@ -1087,7 +1090,7 @@ impl NativeRender {
         stats: Arc<AudioStats>,
     ) -> Result<Self, RenderStartError> {
         let should_stop = Arc::new(AtomicBool::new(false));
-        let (setup_tx, setup_rx) = bounded::<SetupReport<(u32, String, bool)>>(1);
+        let (setup_tx, setup_rx) = bounded::<SetupReport<(u32, String, bool, usize)>>(1);
         let (parts_tx, parts_rx) = bounded::<RenderParts>(1);
         let name = device_name.map(String::from);
         let stop = should_stop.clone();
@@ -1104,7 +1107,7 @@ impl NativeRender {
         });
 
         match setup_rx.recv() {
-            Ok(Ok((sample_rate, device_name, keeps_others))) => {
+            Ok(Ok((sample_rate, device_name, keeps_others, channels))) => {
                 let parts = RenderParts {
                     consumer,
                     wake_tx,
@@ -1126,6 +1129,7 @@ impl NativeRender {
                     sample_rate,
                     device_name,
                     keeps_others,
+                    channels,
                 })
             }
             other => {
@@ -1157,7 +1161,7 @@ fn render_thread(
     device_name: Option<&str>,
     voice: bool,
     communications: bool,
-    setup_tx: &Sender<SetupReport<(u32, String, bool)>>,
+    setup_tx: &Sender<SetupReport<(u32, String, bool, usize)>>,
     parts_rx: &crossbeam_channel::Receiver<RenderParts>,
     should_stop: &AtomicBool,
 ) {
@@ -1220,6 +1224,7 @@ fn render_thread(
             negotiated.sample_rate,
             friendly.clone(),
             ducking == DUCK_REQUESTED,
+            negotiated.channels,
         )))
         .is_err()
     {
@@ -1307,14 +1312,17 @@ fn run_render(
         }
 
         // What the engine can take, from the ring (`pump`): FL and FR
-        // carry the voice, every other channel silence (zero bytes).
+        // carry the two ears, every other channel silence (zero bytes);
+        // a mono endpoint gets them summed.
         out.clear();
         out.resize(space * bpf, 0);
-        pump.pull_mono(space, |i, s| {
+        pump.pull_stereo(space, |i, l, r| {
             let base = i * bpf;
-            layout.write_sample(s, &mut out[base..base + bps]);
             if ch > 1 {
-                layout.write_sample(s, &mut out[base + bps..base + 2 * bps]);
+                layout.write_sample(l, &mut out[base..base + bps]);
+                layout.write_sample(r, &mut out[base + bps..base + 2 * bps]);
+            } else {
+                layout.write_sample(0.5 * (l + r), &mut out[base..base + bps]);
             }
         });
 

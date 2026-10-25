@@ -8,7 +8,8 @@
 //! (`aec::wants_aec`); otherwise — headphones, or the setting Off — the
 //! cpal path runs exactly as before. Both sides honour the
 //! `native/mod.rs` contract: capture pushes device-rate mono `f32` into
-//! the ring and pings the wake latch; render pops mono, fans it out,
+//! the ring and pings the wake latch; render pops stereo frames onto its
+//! channels,
 //! reports its callback size for the playout cushion (D24) and pings
 //! the latch; both raise `*_stream_failed` on a disconnect (a headset
 //! plugged in, a phone call taking the device) so `VoiceChat::service`

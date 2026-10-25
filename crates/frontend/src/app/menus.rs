@@ -423,6 +423,12 @@ impl AppState {
                     self.handle_reset_peer_audio(id, &username);
                 }
             }
+            A::VoiceSpace => self.open_voice_space(),
+            A::Equalizer => {
+                if let Some(id) = self.user_id_at(index) {
+                    self.open_peer_eq(id);
+                }
+            }
             A::Watch => {
                 if let Some(id) = self.user_id_at(index) {
                     self.handle_watch_peer(id);
@@ -627,10 +633,10 @@ impl AppState {
         s.set_moderation_reason("".into());
     }
 
-    /// File a person's volume and mute under who they are (their user
-    /// id, once `UserDetails` said it), not under what they are called
-    /// today (review P2-24).
-    fn save_peer_audio(
+    /// File a person's volume, mute and place under who they are (their
+    /// user id, once `UserDetails` said it), not under what they are
+    /// called today (review P2-24).
+    pub(super) fn save_peer_audio(
         &mut self,
         client_id: u64,
         username: &str,

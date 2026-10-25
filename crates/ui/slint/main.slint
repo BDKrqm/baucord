@@ -10,7 +10,9 @@ import { IconSet, IconDisplay } from "@lucide";
 import { Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Tr } from "tr.slint";
-import { State, Logic, Phase, UserRow, ChatRow, EmojiRow, KeybindRow, ServerRow, ModAction, ToastKind, MenuEntry } from "globals.slint";
+import { State, Logic, Phase, UserRow, ChatRow, EmojiRow, KeybindRow, ServerRow, ModAction, ToastKind, MenuEntry, SpacePerson } from "globals.slint";
+import { VoiceSpaceDialog } from "space.slint";
+import { EqBody } from "equalizer.slint";
 import { ConnectView } from "connect.slint";
 import { StartupView } from "startup.slint";
 import { Sidebar } from "sidebar.slint";
@@ -22,7 +24,7 @@ import { StreamViewerWindow, StreamViewerPanel } from "viewer.slint";
 
 import { BaucordTray, TrayPerson } from "tray.slint";
 
-export { SettingsState, SettingsLogic, StreamViewerWindow, BaucordTray, TrayPerson, State, Logic, Tr, Theme, Phase, UserRow, ChatRow, EmojiRow, KeybindRow, ServerRow, ModAction, ToastKind, MenuEntry }
+export { SettingsState, SettingsLogic, StreamViewerWindow, BaucordTray, TrayPerson, State, Logic, Tr, Theme, Phase, UserRow, ChatRow, EmojiRow, KeybindRow, ServerRow, ModAction, ToastKind, MenuEntry, SpacePerson }
 export { AdminState, AdminLogic, AdminUserRow, AdminRoleRow, AdminRestrictionRow, AdminInviteRow, AdminChannelRow, AdminBlobRow, AdminAuditRow }
 
 export component MainWindow inherits Window {
@@ -1012,6 +1014,20 @@ export component MainWindow inherits Window {
                 clicked => { Logic.channel-password-ok(); }
             }
         }
+    }
+
+    // ── Voice space (spatial voice; space.slint) ───────────────────
+    // Everyone in our voice room placed around us, heard from there.
+    if State.space-open : VoiceSpaceDialog {
+        page: root.page-rect;
+    }
+
+    // ── A person's equalizer (equalizer.slint) ─────────────────────
+    if State.eq-open : Modal {
+        page: root.page-rect;
+        card-width: 420px;
+        dismissed => { Logic.eq-close(); }
+        EqBody { }
     }
 
     // ── Invite dialog (spec §3.1) ──────────────────────────────────

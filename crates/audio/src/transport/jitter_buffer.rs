@@ -1,8 +1,10 @@
 //! Adaptive jitter buffer with per-peer playout priming and mixing.
 //!
 //! Buffers **encoded packets** per peer, decodes them at playout time
-//! (see [`crate::transport::packet_buffer`]), mixes to mono, and adapts its
-//! target depth from inter-arrival jitter and buffer-health feedback.
+//! (see [`crate::transport::packet_buffer`]), mixes to stereo — each peer
+//! from where the listener placed them (`crate::spatial`), the same in
+//! both ears when not placed — and adapts its target depth from
+//! inter-arrival jitter and buffer-health feedback.
 //!
 //! ## v0.9 changes from v0.8
 //!
@@ -34,7 +36,11 @@ use std::{
 
 use crate::{
     config::PeerAudioSettings,
-    processor::limiter::Limiter,
+    processor::{
+        eq::{PeerEq, ToneFilter, VoiceTone},
+        limiter::Limiter,
+    },
+    spatial::Spatializer,
     transport::{
         packet::{AudioPacket, PayloadType},
         packet_buffer::{PacketBuffer, Push},
@@ -196,6 +202,11 @@ struct PeerBuffer {
     /// Per-peer output limiter — protects listeners from loud transients
     /// from one peer without ducking everyone else in the mix.
     limiter: Limiter,
+    /// Where this peer is heard from (`crate::spatial`).
+    spatial: Spatializer,
+    /// This peer's own equalizer (`processor::eq`), after the volume and
+    /// before the limiter.
+    eq: PeerEq,
 }
 
 impl PeerBuffer {
@@ -220,6 +231,8 @@ impl PeerBuffer {
             drift_estimate: 0.0,
             slip_frac: 0.0,
             limiter: Limiter::new(),
+            spatial: Spatializer::new(),
+            eq: PeerEq::new(),
         })
     }
 
@@ -244,14 +257,41 @@ pub struct PeerTable {
     settings: Mutex<HashMap<u64, PeerAudioSettings>>,
     /// Removed since the worker last looked; it sweeps their state.
     removed: Mutex<HashSet<u64>>,
+    /// Spatial voice switched off: everyone in the middle, wherever
+    /// they were placed (so the default, `false`, is on).
+    flat: std::sync::atomic::AtomicBool,
+    /// The voice tone over the mix (`VoiceTone::to_u8`; 0, the
+    /// default, is natural).
+    tone: std::sync::atomic::AtomicU8,
     /// Bumped by every change.
     generation: std::sync::atomic::AtomicU64,
 }
 
 impl PeerTable {
+    /// A table with spatial voice on or off from the start.
+    #[must_use]
+    pub fn with_spatial(on: bool) -> Self {
+        let table = Self::default();
+        table.set_spatial(on);
+        table
+    }
+
     fn changed(&self) {
         self.generation
             .fetch_add(1, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Spatial voice on or off for every peer.
+    pub fn set_spatial(&self, on: bool) {
+        self.flat.store(!on, std::sync::atomic::Ordering::Release);
+        self.changed();
+    }
+
+    /// The voice tone over everyone's voice.
+    pub fn set_tone(&self, tone: VoiceTone) {
+        self.tone
+            .store(tone.to_u8(), std::sync::atomic::Ordering::Release);
+        self.changed();
     }
 
     /// Set `peer`'s volume and mute.
@@ -304,6 +344,14 @@ pub struct AdaptiveJitterBuffer {
     peers_seen: Option<u64>,
     peer_settings: HashMap<u64, PeerAudioSettings>,
     removed_scratch: Vec<u64>,
+    /// Spatial voice, as the table says (`PeerTable::set_spatial`), and
+    /// whether the output can play it: a mono device cannot
+    /// ([`Self::set_stereo`]). Both, and placed peers are heard from
+    /// their place.
+    spatial_on: bool,
+    stereo: bool,
+    /// The voice tone over the finished mix (`PeerTable::set_tone`).
+    tone: ToneFilter,
 
     /// Self-monitor PCM (mic loopback), mixed after the peers.
     loopback: VecDeque<f32>,
@@ -363,6 +411,9 @@ impl AdaptiveJitterBuffer {
             peers_seen: None,
             peer_settings: HashMap::new(),
             removed_scratch: Vec::new(),
+            spatial_on: true,
+            stereo: false,
+            tone: ToneFilter::new(),
             loopback: VecDeque::with_capacity(LOOPBACK_CAP),
             scratch: Vec::new(),
             jitter_scratch: Vec::new(),
@@ -398,6 +449,24 @@ impl AdaptiveJitterBuffer {
             .min(self.max_samples);
         if self.target_samples < self.min_samples {
             self.target_samples = self.min_samples;
+        }
+    }
+
+    /// Whether the output has two ears to play to. A mono device (a
+    /// Bluetooth headset in call mode, a phone's earpiece) hears every
+    /// peer in the middle: spatial voice summed back to one channel is
+    /// only a colouring.
+    pub fn set_stereo(&mut self, stereo: bool) {
+        self.stereo = stereo;
+        self.place_all();
+    }
+
+    /// Every peer to where its settings and the switches say.
+    fn place_all(&mut self) {
+        let spatial = self.spatial_on && self.stereo;
+        for peer in self.buffers.values_mut() {
+            peer.spatial
+                .place(spatial.then_some(peer.settings.position));
         }
     }
 
@@ -514,6 +583,10 @@ impl AdaptiveJitterBuffer {
                         .get(&peer_id)
                         .cloned()
                         .unwrap_or_default();
+                    p.spatial
+                        .place((self.spatial_on && self.stereo).then_some(p.settings.position));
+                    p.spatial.silence();
+                    p.eq.set(p.settings.eq);
                     v.insert(p)
                 }
                 // Opus init failure is near-impossible; skip this packet
@@ -660,6 +733,10 @@ impl AdaptiveJitterBuffer {
         drop(removed);
         drop(settings);
         self.peers_seen = Some(generation);
+        self.spatial_on = !self.peers.flat.load(std::sync::atomic::Ordering::Acquire);
+        self.tone.set(VoiceTone::from_u8(
+            self.peers.tone.load(std::sync::atomic::Ordering::Acquire),
+        ));
         for id in &self.removed_scratch {
             if self.buffers.remove(id).is_some() {
                 log::info!("Dropped decoder for removed peer {id}");
@@ -667,10 +744,14 @@ impl AdaptiveJitterBuffer {
         }
         for (peer_id, peer) in &mut self.buffers {
             peer.settings = self.peer_settings.get(peer_id).cloned().unwrap_or_default();
+            peer.eq.set(peer.settings.eq);
         }
+        self.place_all();
     }
 
-    /// Pull exactly `n` mixed samples, filling with silence if needed.
+    /// Pull exactly `n` mixed frames into `left` and `right`, filling
+    /// with silence if needed. Each peer is rendered from where it was
+    /// placed (`crate::spatial`); an unplaced one is the same in both.
     ///
     /// Peers that are priming (new, or recovering from an underrun)
     /// contribute silence until their buffer holds the adaptive target
@@ -679,9 +760,12 @@ impl AdaptiveJitterBuffer {
     /// that contribute meaningful audio energy to this pull, with the
     /// scale smoothed over ~80 ms to avoid level jumps when speakers
     /// join or leave the mix.
-    pub fn pull_mixed(&mut self, n: usize, out: &mut [f32]) {
-        debug_assert_eq!(out.len(), n);
-        out.fill(0.0);
+    #[allow(clippy::too_many_lines)] // one pass over the peers, in order
+    pub fn pull_mixed(&mut self, n: usize, left: &mut [f32], right: &mut [f32]) {
+        debug_assert_eq!(left.len(), n);
+        debug_assert_eq!(right.len(), n);
+        left.fill(0.0);
+        right.fill(0.0);
 
         // Volume and mute from the copy, refreshed when they changed:
         // an atomic load when they did not.
@@ -709,6 +793,7 @@ impl AdaptiveJitterBuffer {
                 peer.packets.clear();
                 peer.playing = false;
                 peer.drift_window_dirty = true;
+                peer.spatial.flush(left, right);
                 continue;
             }
 
@@ -739,10 +824,12 @@ impl AdaptiveJitterBuffer {
                         for slot in &mut self.scratch[..n] {
                             *slot *= peer_settings.volume;
                         }
+                        peer.eq.process(&mut self.scratch[..n]);
                         peer.limiter.process_samples(&mut self.scratch[..n]);
-                        for (o, s) in out.iter_mut().zip(&self.scratch[..n]) {
-                            *o += s;
-                        }
+                        // Their room's hiss comes from where they are.
+                        peer.spatial.render(&self.scratch[..n], left, right);
+                    } else {
+                        peer.spatial.flush(left, right);
                     }
                     continue;
                 }
@@ -842,6 +929,10 @@ impl AdaptiveJitterBuffer {
                     *slot *= peer_settings.volume;
                 }
 
+                // Their own equalizer, where the listener set one: before
+                // the limiter, so a boost cannot get past it.
+                peer.eq.process(&mut self.scratch[..available]);
+
                 // Apply per-peer limiter (hearing protection)
                 peer.limiter.process_samples(&mut self.scratch[..available]);
 
@@ -857,12 +948,9 @@ impl AdaptiveJitterBuffer {
                 }
                 peer.last_sample = self.scratch[available - 1];
 
-                // Sum into output mix and track energy
-                let mut peer_energy = 0.0f32;
-                for (o, s) in out[..available].iter_mut().zip(&self.scratch[..available]) {
-                    *o += *s;
-                    peer_energy += *s * *s;
-                }
+                // Track energy (the samples join the mix below, from
+                // where this peer is).
+                let peer_energy: f32 = self.scratch[..available].iter().map(|s| s * s).sum();
                 peer.playing = true;
 
                 // Only count peers with meaningful audio (not silence/DTX residue).
@@ -873,7 +961,10 @@ impl AdaptiveJitterBuffer {
                 }
             }
 
-            if available < n && peer.playing {
+            // The rest of the hop: silence, or the tail below.
+            self.scratch[available..n].fill(0.0);
+            let ran_dry = available < n && peer.playing;
+            if ran_dry {
                 // Ran dry (the PLC budget inside the packet buffer is spent).
                 // Whether this was a genuine underrun (packets late
                 // mid-stream) or a normal DTX pause can only be told by what
@@ -885,21 +976,29 @@ impl AdaptiveJitterBuffer {
                 // silence is a broadband click. Synthesize a ~2 ms
                 // exponential decay tail from where the audio stopped.
                 let mut tail = peer.last_sample;
-                for slot in out[available..].iter_mut().take(96) {
+                for slot in self.scratch[available..n].iter_mut().take(96) {
                     tail *= 0.95;
-                    *slot += tail;
+                    *slot = tail;
                 }
                 peer.last_sample = 0.0;
                 peer.mark_dry(now);
             }
+
+            // Into the mix, from where they are.
+            if available > 0 || ran_dry {
+                peer.spatial.render(&self.scratch[..n], left, right);
+            } else {
+                peer.spatial.flush(left, right);
+            }
         }
 
-        // ── Self-monitor ────────────────────────────────────────────
-        for slot in out.iter_mut() {
+        // ── Self-monitor (our own voice: in the middle) ─────────────
+        for (l, r) in left.iter_mut().zip(right.iter_mut()) {
             let Some(s) = self.loopback.pop_front() else {
                 break;
             };
-            *slot += s;
+            *l += s;
+            *r += s;
         }
 
         // Soft-knee normalization: no scaling for 1-2 speakers, gentle
@@ -917,13 +1016,18 @@ impl AdaptiveJitterBuffer {
         if (scale_start - 1.0).abs() > 1e-6 || (scale_end - 1.0).abs() > 1e-6 {
             #[allow(clippy::cast_precision_loss)]
             let inv_len = 1.0 / n.max(1) as f32;
-            for (i, s) in out.iter_mut().enumerate() {
+            for (i, (l, r)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
                 #[allow(clippy::cast_precision_loss)]
                 let t = i as f32 * inv_len;
-                *s *= scale_start + (scale_end - scale_start) * t;
+                let scale = scale_start + (scale_end - scale_start) * t;
+                *l *= scale;
+                *r *= scale;
             }
         }
         self.mix_scale = scale_end;
+
+        // The voice tone over the finished mix (natural: nothing).
+        self.tone.process(left, right);
 
         if fec + plc + lost > 0 {
             self.last_loss_at = Some(now);
@@ -1276,6 +1380,19 @@ mod tests {
             AdaptiveJitterBuffer::new(48_000, 10, Arc::new(PeerTable::default()))
         }
 
+        /// One hop as the tests below read it: nobody is placed, so both
+        /// ears carry the same mix — checked — and the left one is it.
+        fn pull(jb: &mut AdaptiveJitterBuffer, out: &mut [f32]) {
+            let mut right = vec![0.0f32; out.len()];
+            jb.pull_mixed(out.len(), out, &mut right);
+            assert!(
+                out.iter()
+                    .zip(&right)
+                    .all(|(l, r)| l.to_bits() == r.to_bits()),
+                "an unplaced mix differs between the ears"
+            );
+        }
+
         fn encoder() -> opus::Encoder {
             opus::Encoder::new(48_000, opus::Channels::Mono, opus::Application::Voip)
                 .expect("encoder")
@@ -1306,7 +1423,7 @@ mod tests {
             let mut out = vec![0.0f32; 480];
             let mut energy = 0.0f32;
             for _ in 0..10 {
-                jb.pull_mixed(480, &mut out);
+                pull(&mut jb, &mut out);
                 energy += out.iter().map(|s| s * s).sum::<f32>();
             }
             let stats = jb.drain_stats();
@@ -1315,6 +1432,87 @@ mod tests {
                 (stats.fec, stats.plc, stats.lost, stats.late, stats.red),
                 (0, 0, 0, 0, 0)
             );
+        }
+
+        /// A peer placed on the right is heard on the right — on a
+        /// stereo output with spatial voice on, and in the middle again
+        /// when either is not so.
+        #[test]
+        fn a_placed_peer_is_heard_from_their_side() {
+            let table = Arc::new(PeerTable::default());
+            let mut jb = AdaptiveJitterBuffer::new(48_000, 10, table.clone());
+            jb.set_stereo(true);
+            table.set(
+                7,
+                PeerAudioSettings {
+                    position: [1.0, 0.0],
+                    ..PeerAudioSettings::default()
+                },
+            );
+            let mut enc = encoder();
+            let t0 = Instant::now();
+            let mut ears = |jb: &mut AdaptiveJitterBuffer, first: u32| {
+                for seq in first..first + 10 {
+                    jb.push_packet(packet(&mut enc, seq, 7), t0);
+                }
+                let (mut l, mut r) = (vec![0.0f32; 480], vec![0.0f32; 480]);
+                let (mut el, mut er) = (0.0f32, 0.0f32);
+                for _ in 0..16 {
+                    jb.pull_mixed(480, &mut l, &mut r);
+                    el += l.iter().map(|s| s * s).sum::<f32>();
+                    er += r.iter().map(|s| s * s).sum::<f32>();
+                }
+                (el, er)
+            };
+            // A 300 Hz tone: the head shadows it by ~1 dB only, as a
+            // real head does (speech's harmonics above 1 kHz are where
+            // the level difference is large; `spatial`'s tests).
+            let (el, er) = ears(&mut jb, 0);
+            assert!(er > 0.0 && er > 1.1 * el, "right {er} vs left {el}");
+            // Spatial voice off: the same in both ears again (after the
+            // glide back to the middle).
+            table.set_spatial(false);
+            ears(&mut jb, 10);
+            let (el, er) = ears(&mut jb, 20);
+            assert!(
+                (el - er).abs() <= 1e-4 * er.max(1e-9),
+                "right {er} vs left {el}"
+            );
+        }
+
+        /// A peer's equalizer reaches the mix: their 300 Hz tone cut by
+        /// the 300 Hz band is ~12 dB down against the same tone flat.
+        #[test]
+        fn a_peer_equalizer_reaches_the_mix() {
+            let energy = |eq: [f32; crate::processor::eq::EQ_BANDS]| {
+                let table = Arc::new(PeerTable::default());
+                table.set(
+                    7,
+                    PeerAudioSettings {
+                        eq,
+                        ..PeerAudioSettings::default()
+                    },
+                );
+                let mut jb = AdaptiveJitterBuffer::new(48_000, 10, table);
+                let mut enc = encoder();
+                let t0 = Instant::now();
+                let mut out = vec![0.0f32; 480];
+                pull(&mut jb, &mut out); // the table's settings, read
+                for seq in 0..12 {
+                    jb.push_packet(packet(&mut enc, seq, 7), t0);
+                }
+                let mut sum = 0.0f32;
+                for _ in 0..20 {
+                    pull(&mut jb, &mut out);
+                    sum += out.iter().map(|s| s * s).sum::<f32>();
+                }
+                sum
+            };
+            let flat = energy([0.0; 5]);
+            let cut = energy([0.0, -12.0, 0.0, 0.0, 0.0]);
+            assert!(flat > 0.0);
+            let db = 10.0 * (cut / flat).log10();
+            assert!(db < -9.0, "the cut band took {db} dB");
         }
 
         /// A mute and a removal set on the table reach the worker at its
@@ -1326,7 +1524,7 @@ mod tests {
             let mut enc = encoder();
             let t0 = Instant::now();
             let mut out = vec![0.0f32; 480];
-            jb.pull_mixed(480, &mut out);
+            pull(&mut jb, &mut out);
             table.set(
                 7,
                 PeerAudioSettings {
@@ -1334,7 +1532,7 @@ mod tests {
                     ..PeerAudioSettings::default()
                 },
             );
-            jb.pull_mixed(480, &mut out);
+            pull(&mut jb, &mut out);
             for seq in 0..5 {
                 jb.push_packet(packet(&mut enc, seq, 7), t0);
             }
@@ -1343,7 +1541,7 @@ mod tests {
                 "a muted peer's packets are not kept"
             );
             table.set(7, PeerAudioSettings::default());
-            jb.pull_mixed(480, &mut out);
+            pull(&mut jb, &mut out);
             jb.push_packet(packet(&mut enc, 5, 7), t0);
             assert!(jb.buffers.contains_key(&7));
             table.remove(7);
@@ -1378,7 +1576,7 @@ mod tests {
 
             let mut out = vec![0.0f32; 480];
             for _ in 0..8 {
-                jb.pull_mixed(480, &mut out);
+                pull(&mut jb, &mut out);
             }
             let stats = jb.drain_stats();
             assert_eq!(stats.red, 1, "the copy of packet 2 is a recovery");
@@ -1417,7 +1615,7 @@ mod tests {
 
             let mut out = vec![0.0f32; 480];
             for _ in 0..8 {
-                jb.pull_mixed(480, &mut out);
+                pull(&mut jb, &mut out);
             }
             let stats = jb.drain_stats();
             assert_eq!(stats.red, 0, "both copies were of packets that arrived");
@@ -1449,7 +1647,7 @@ mod tests {
                 }
                 if t_ms % 40 == 0 {
                     for _ in 0..4 {
-                        jb.pull_mixed(480, &mut out);
+                        pull(&mut jb, &mut out);
                         let audible = out.iter().any(|s| s.abs() > 1e-3);
                         if audible {
                             started = true;
@@ -1501,7 +1699,7 @@ mod tests {
             }
             let mut out = vec![0.0f32; 480];
             for _ in 0..6 {
-                jb.pull_mixed(480, &mut out);
+                pull(&mut jb, &mut out);
             }
             jb.push_packet(packet(&mut enc, 0, 7), t0);
             assert_eq!(jb.drain_stats().late, 1);

@@ -61,6 +61,16 @@ pub struct VoiceChatConfig {
     /// Changed at runtime via
     /// [`VoiceChat::set_echo_cancellation`](crate::VoiceChat::set_echo_cancellation).
     pub echo_cancellation: crate::aec::AecMode,
+    /// Play each placed peer from where the listener put them
+    /// ([`PeerAudioSettings::position`], `spatial.rs`). Default: on.
+    /// Changed at runtime via
+    /// [`VoiceChat::set_spatial_voice`](crate::VoiceChat::set_spatial_voice).
+    pub spatial_voice: bool,
+    /// The colour over everyone's voice (`processor::eq`). Default:
+    /// [`VoiceTone::Natural`](crate::VoiceTone::Natural), no equalizer.
+    /// Changed at runtime via
+    /// [`VoiceChat::set_voice_tone`](crate::VoiceChat::set_voice_tone).
+    pub voice_tone: crate::VoiceTone,
 }
 
 impl Default for VoiceChatConfig {
@@ -72,11 +82,14 @@ impl Default for VoiceChatConfig {
             output_gain: 0.4,
             gate_threshold: 0.012,
             echo_cancellation: crate::aec::AecMode::Auto,
+            spatial_voice: true,
+            voice_tone: crate::VoiceTone::Natural,
         }
     }
 }
 
-/// Per-peer audio settings (volume, mute).
+/// Per-peer audio settings (volume, mute, where they are heard from,
+/// their equalizer).
 ///
 /// Used by the jitter buffer / mixer on the output side.
 // Saved in the client's settings file; the feature that gated these
@@ -87,6 +100,19 @@ pub struct PeerAudioSettings {
     pub volume: f32,
     /// Whether this peer is muted locally.
     pub is_muted: bool,
+    /// Where the listener placed this peer on the plane around them:
+    /// `[x, y]` inside the unit disc, x to the right, y straight ahead.
+    /// The centre (the default) is no place at all — heard as before,
+    /// the same in both ears; the further out, the more the voice comes
+    /// from that side (`spatial.rs`). Local only, never on the wire:
+    /// files from before 1.3 have no such key.
+    #[serde(default)]
+    pub position: [f32; 2],
+    /// This peer's five-band equalizer, in dB per band (±12; the bands
+    /// are `processor::eq::EQ_BAND_HZ`). All 0 (the default): none.
+    /// Local only, like the place.
+    #[serde(default)]
+    pub eq: [f32; crate::processor::eq::EQ_BANDS],
 }
 
 impl Default for PeerAudioSettings {
@@ -94,6 +120,8 @@ impl Default for PeerAudioSettings {
         Self {
             volume: 1.0,
             is_muted: false,
+            position: [0.0, 0.0],
+            eq: [0.0; crate::processor::eq::EQ_BANDS],
         }
     }
 }

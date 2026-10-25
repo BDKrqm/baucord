@@ -151,6 +151,24 @@ and the release pipeline.
 
 ### Everyone
 
+- **Spatial voice.** The new voice space (the radar button beside
+  Deafen, or *Voice space…* in a person's menu) puts you in the middle
+  of a disc with everyone in your voice channel around you: drag a
+  person somewhere and their voice comes from there, so two or three
+  people talking at once are told apart by direction. *Spread out*
+  places everyone as far apart as ears can tell; *All to the middle*
+  undoes it; the *Spatial voice* switch turns it off without losing the
+  places. Places are kept per person on this device with their volume,
+  and nothing of it goes to the server — it works on any server, old
+  or new. Best with headphones; a mono output (a Bluetooth headset in
+  call mode, a phone's call path) hears everyone in the middle.
+  *Spread out automatically* (on by default) spreads everyone out again
+  whenever someone joins or leaves your voice channel.
+- **Equalizers.** *Equalizer…* in a person's menu gives that person five
+  bands of their own (100 Hz, 300 Hz, 1 kHz, 3 kHz, 8 kHz, ±12 dB), kept
+  with their volume; *Flat* undoes it. Settings → Audio → *Voice tone*
+  colours everyone's voice at once: *Natural* (as before), *Crisp* or
+  *Bass boosted*. Like the places, both stay on your device.
 - Pictures you send have their EXIF data removed (camera, GPS
   location) and are turned the right way up first; a portrait photo no
   longer arrives sideways.

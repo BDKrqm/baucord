@@ -1,7 +1,7 @@
 //! The real-time halves every voice backend shares: one capture
 //! buffer's samples, downmixed, into the ring; one render buffer filled
-//! from the ring with the voice on the front pair — the `native/mod.rs`
-//! contract. The callback backends (`aaudio` on Android, `vpio` on
+//! from the ring — interleaved stereo, the spatial voice's two ears
+//! (`spatial.rs`) — on the front pair: the `native/mod.rs` contract. The callback backends (`aaudio` on Android, `vpio` on
 //! iOS), Windows' `wasapi` loops and the cpal fallbacks in `input.rs`
 //! and `output.rs` all go through here; the downmix and the fan-out
 //! existed three times, and had drifted (review 2026-10, P2-49). They
@@ -18,7 +18,7 @@ use rtrb::{Consumer, Producer};
 use crate::{input_config::InputConfig, latch::Ring, stats::AudioStats};
 
 /// Largest render callback served in one piece from the scratch
-/// buffer; bigger ones are served in pieces.
+/// buffer (frames); bigger ones are served in pieces.
 const RENDER_SCRATCH: usize = 8192;
 
 /// What a capture callback needs: the ring to the capture worker and
@@ -68,7 +68,8 @@ impl CapturePump {
     }
 }
 
-/// What a render callback needs: the ring from the output worker, its
+/// What a render callback needs: the ring from the output worker
+/// (interleaved left/right; the worker writes whole frames only), its
 /// wake latch, the stats, and where to report the callback size (the
 /// worker keeps one callback + margin queued, D24).
 pub struct RenderPump {
@@ -101,16 +102,16 @@ impl RenderPump {
             stats,
             callback_frames,
             largest_callback,
-            scratch: vec![0.0; RENDER_SCRATCH],
+            scratch: vec![0.0; RENDER_SCRATCH * 2],
         }
     }
 
-    /// `frames` samples from the mono ring, each handed to `write` with
-    /// its frame index — what the ring cannot supply is an underrun and
-    /// plays as silence — then the output meter, and a ping for the
+    /// `frames` frames from the stereo ring, each pair handed to `write`
+    /// with its frame index — what the ring cannot supply is an underrun
+    /// and plays as silence — then the output meter, and a ping for the
     /// worker to refill. The signal was limited to ±0.99 upstream: no
     /// clamp here.
-    pub fn pull_mono(&mut self, frames: usize, mut write: impl FnMut(usize, f32)) {
+    pub fn pull_stereo(&mut self, frames: usize, mut write: impl FnMut(usize, f32, f32)) {
         // Tell the worker when the device starts asking for more.
         if let Some(callback_frames) = &self.callback_frames
             && frames > self.largest_callback
@@ -121,16 +122,19 @@ impl RenderPump {
         let mut rms_acc = 0.0f32;
         let mut done = 0usize;
         while done < frames {
-            let want = (frames - done).min(self.scratch.len());
-            let mono = &mut self.scratch[..want];
-            let (_, missing) = self.consumer.pop_partial_slice(mono);
+            let want = (frames - done).min(RENDER_SCRATCH);
+            let pairs = &mut self.scratch[..want * 2];
+            // The worker only ever queues whole frames, so what is
+            // there is whole frames too.
+            let (_, missing) = self.consumer.pop_partial_slice(pairs);
             if !missing.is_empty() {
                 self.stats.output_underruns.fetch_add(1, Ordering::Relaxed);
                 missing.fill(0.0);
             }
-            for (i, &s) in mono.iter().enumerate() {
-                rms_acc += s * s;
-                write(done + i, s);
+            for (i, pair) in pairs.chunks_exact(2).enumerate() {
+                let (l, r) = (pair[0], pair[1]);
+                rms_acc += (l * l + r * r) * 0.5;
+                write(done + i, l, r);
             }
             done += want;
         }
@@ -145,7 +149,7 @@ impl RenderPump {
     }
 
     /// Fill one callback's interleaved `f32` buffer (`channels` per
-    /// frame) from the mono ring, then ping the worker (the phones'
+    /// frame) from the stereo ring, then ping the worker (the phones'
     /// backends).
     #[cfg_attr(
         not(any(target_os = "android", target_os = "ios", test)),
@@ -153,22 +157,29 @@ impl RenderPump {
     )]
     pub fn pull(&mut self, out: &mut [f32], channels: usize) {
         let ch = channels.max(1);
-        self.pull_mono(out.len() / ch, |i, s| {
-            front_pair(&mut out[i * ch..(i + 1) * ch], s, 0.0);
+        self.pull_stereo(out.len() / ch, |i, l, r| {
+            front_stereo(&mut out[i * ch..(i + 1) * ch], l, r, 0.5 * (l + r), 0.0);
         });
     }
 }
 
-/// One mono sample onto one output frame: front left and right carry
-/// it, every other channel `silence`. On 5.1/7.1 endpoints (gaming
-/// headsets with virtual surround report 8 channels) the others are
-/// centre, LFE, rear and side, and a copy of the voice there makes the
-/// driver's binaural fold-down bass-heavy and smeared. Standard channel
-/// order puts FL, FR first on WASAPI, Core Audio, ALSA and the phones.
-pub fn front_pair<T: Copy>(frame: &mut [T], sample: T, silence: T) {
-    let (front, rest) = frame.split_at_mut(frame.len().min(2));
-    front.fill(sample);
-    rest.fill(silence);
+/// One stereo frame onto one output frame: front left and right carry
+/// the two ears, every other channel `silence`; a mono endpoint gets
+/// `mid` (the two summed). On 5.1/7.1 endpoints (gaming headsets with
+/// virtual surround report 8 channels) the others are centre, LFE, rear
+/// and side, and a copy of the voice there makes the driver's binaural
+/// fold-down bass-heavy and smeared. Standard channel order puts FL, FR
+/// first on WASAPI, Core Audio, ALSA and the phones.
+pub fn front_stereo<T: Copy>(frame: &mut [T], left: T, right: T, mid: T, silence: T) {
+    match frame {
+        [] => {}
+        [only] => *only = mid,
+        [l, r, rest @ ..] => {
+            *l = left;
+            *r = right;
+            rest.fill(silence);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -190,20 +201,42 @@ mod tests {
     }
 
     #[test]
-    fn a_stereo_capture_is_averaged_and_played_on_the_front_pair() {
-        let (mut capture, mut render, stats) = pumps(16);
+    fn a_stereo_capture_is_averaged() {
+        let (mut capture, mut render, _) = pumps(16);
         capture.push(&[0.2, 0.4, -0.6, -0.2], 2);
-        // Five channels out: the voice on the first two, silence after;
+        // What the capture queued, read back as one stereo frame: the
+        // two mono samples.
+        let mut out = [9.0f32; 2];
+        render.pull(&mut out, 2);
+        assert!(
+            (out[0] - 0.3).abs() < 1e-6 && (out[1] + 0.4).abs() < 1e-6,
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn the_two_ears_play_on_the_front_pair() {
+        let (mut producer, consumer) = rtrb::RingBuffer::new(16);
+        let stats = Arc::new(AudioStats::new());
+        let (wake_tx, _wake_rx) = crate::latch::latch();
+        let mut render = RenderPump::new(consumer, wake_tx, stats.clone(), None);
+        let _ = producer.push_partial_slice(&[0.2, 0.4, -0.6, -0.2]);
+        // Five channels out: the ears on the first two, silence after;
         // the third frame is missing.
         let mut out = [9.0f32; 15];
         render.pull(&mut out, 5);
         let expected = [
-            0.3, 0.3, 0.0, 0.0, 0.0, -0.4, -0.4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.2, 0.4, 0.0, 0.0, 0.0, -0.6, -0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         ];
         for (got, want) in out.iter().zip(expected) {
             assert!((got - want).abs() < 1e-6, "{out:?}");
         }
         assert_eq!(stats.output_underruns.load(Ordering::Relaxed), 1);
+        // A mono output gets the two summed.
+        let _ = producer.push_partial_slice(&[0.2, 0.4]);
+        let mut mono = [9.0f32; 1];
+        render.pull(&mut mono, 1);
+        assert!((mono[0] - 0.3).abs() < 1e-6, "{mono:?}");
     }
 
     #[test]
@@ -219,9 +252,9 @@ mod tests {
     }
 
     #[test]
-    fn a_mono_output_takes_the_sample() {
+    fn a_mono_output_takes_the_mid() {
         let mut frame = [0i16; 1];
-        front_pair(&mut frame, 7, 0);
+        front_stereo(&mut frame, 6, 8, 7, 0);
         assert_eq!(frame, [7]);
     }
 }

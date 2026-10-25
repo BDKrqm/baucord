@@ -21,6 +21,10 @@ pub enum Label {
     MuteForMe,
     UnmuteForMe,
     ResetAudio,
+    /// Open the voice space, to put them somewhere around us.
+    VoiceSpace,
+    /// Their own five-band equalizer.
+    Equalizer,
     WatchStream,
     Message,
     Role,
@@ -77,6 +81,10 @@ pub enum Action {
     Volume,
     MuteForMe,
     ResetAudio,
+    /// The voice space (spatial voice): where everyone is heard from.
+    VoiceSpace,
+    /// Their equalizer's dialog.
+    Equalizer,
     Watch,
     Message,
     /// Make this the user's one role (the built-ins nest; a custom
@@ -277,6 +285,8 @@ pub fn user_menu(
                 Action::MuteForMe,
             ),
             Entry::new(Label::ResetAudio, Action::ResetAudio),
+            Entry::new(Label::VoiceSpace, Action::VoiceSpace),
+            Entry::new(Label::Equalizer, Action::Equalizer),
         ]);
         if user.sharing {
             entries.push(Entry::new(Label::WatchStream, Action::Watch));
@@ -598,13 +608,19 @@ mod tests {
                 Label::Volume,
                 Label::MuteForMe,
                 Label::ResetAudio,
+                Label::VoiceSpace,
+                Label::Equalizer,
                 Label::Message,
                 Label::Block,
                 Label::Report
             ]
         );
-        assert!(entries[4].separator && !entries[5].separator);
+        assert!(entries[AUDIO_ITEMS + 1].separator && !entries[AUDIO_ITEMS + 2].separator);
     }
+
+    /// The audio entries every unblocked person's menu opens with
+    /// (volume, mute for me, reset, voice space, equalizer).
+    const AUDIO_ITEMS: usize = 5;
 
     #[test]
     fn a_blocked_person_offers_unblock_and_nothing_to_hear_or_write() {
@@ -661,8 +677,15 @@ mod tests {
         let entries = user_menu(&Session::default(), &member(), &[], &[]);
         assert_eq!(
             labels(&entries),
-            [Label::Volume, Label::MuteForMe, Label::ResetAudio]
+            [
+                Label::Volume,
+                Label::MuteForMe,
+                Label::ResetAudio,
+                Label::VoiceSpace,
+                Label::Equalizer
+            ]
         );
+        assert_eq!(entries.len(), AUDIO_ITEMS);
     }
 
     #[test]
@@ -722,30 +745,30 @@ mod tests {
         };
         assert_eq!(
             user_menu(&Session::default(), &outranked, &[], &[]).len(),
-            3
+            AUDIO_ITEMS
         );
         // Permission on an equal: mutes need rank; disconnect, kick and
         // ban do not.
         let entries = user_menu(&mod_, &member(), &[], &[]);
         assert_eq!(
-            labels(&entries[3..]),
+            labels(&entries[AUDIO_ITEMS..]),
             [Label::Disconnect, Label::Kick, Label::Ban]
         );
-        assert!(entries[3].separator && !entries[4].separator);
+        assert!(entries[AUDIO_ITEMS].separator && !entries[AUDIO_ITEMS + 1].separator);
         // Outranked: the mute submenu joins them.
         let entries = user_menu(&mod_, &outranked, &[], &[]);
         assert_eq!(
-            labels(&entries[3..]),
+            labels(&entries[AUDIO_ITEMS..]),
             [Label::Mute, Label::Disconnect, Label::Kick, Label::Ban]
         );
-        assert!(entries[5].danger && entries[6].danger);
+        assert!(entries[AUDIO_ITEMS + 2].danger && entries[AUDIO_ITEMS + 3].danger);
         // An administrator: disconnect only.
         let admin = UserFacts {
             is_admin: true,
             ..member()
         };
         assert_eq!(
-            labels(&user_menu(&mod_, &admin, &[], &[])[3..]),
+            labels(&user_menu(&mod_, &admin, &[], &[])[AUDIO_ITEMS..]),
             [Label::Disconnect]
         );
     }

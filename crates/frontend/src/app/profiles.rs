@@ -70,6 +70,8 @@ impl AppState {
     /// back (`host_shown` on a phone, the window revealed on a desktop).
     pub(crate) fn flush_roster(&mut self) {
         self.roster_sync.queued = false;
+        // Whether or not the roster shows: the voice is heard anyway.
+        self.auto_spread_voice_space();
         if std::mem::take(&mut self.roster_sync.tray) {
             self.sync_tray();
         }
@@ -121,6 +123,8 @@ impl AppState {
         self.main
             .global::<State>()
             .set_users_count_label(t!("users-count", "count" => self.session.users.len()).into());
+        // The voice space shows the room from these rows.
+        self.sync_voice_space();
     }
 
     /// A speaking or audio-state edge: rewrite that one row, no re-sort
@@ -162,6 +166,8 @@ impl AppState {
         row.self_muted = muted;
         row.self_deafened = deafened;
         self.users_model.set_row_data(index, row);
+        // Who speaks lights up in the voice space too.
+        self.sync_voice_space();
     }
 
     /// What the row and its card show beyond the view model: the look,

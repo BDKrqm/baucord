@@ -137,6 +137,30 @@ built-in speakers is the machine that matters most.
 - [ ] **new [8]** — the bars are smooth, and with a silent microphone
   Task Manager shows the client idle with the Audio tab open (a bar
   that did not move is not drawn).
+- [ ] **new (spatial voice)** — headphones, a room with two others.
+  Nobody placed: everyone sounds exactly as before. Radar button →
+  *Spread out*: one comes from the left, the other from the right, and
+  when both talk at once each stays on their side. Drag one round the
+  disc while they talk: the voice glides, no clicks. *Spatial voice*
+  off: both in the middle again; on: back where they were. Close and
+  restart the app: the places are still there. log at join: `Output
+  worker started (… spatial voice possible)`.
+- [ ] **new (spatial voice)** — *Spread out automatically* on, two
+  others placed: a third joins → all three are spread out again (left,
+  front, right); one leaves → the other two go hard left and right.
+  Off: a join leaves everyone where they were.
+- [ ] **new (equalizers)** — a person's *Equalizer…*: 300 Hz at −12 dB
+  thins their voice at once, 3 kHz at +6 dB brings it forward; restart
+  the app, the bands are still there; *Flat* gives the voice back
+  unchanged. Settings → Audio → *Voice tone*: *Crisp* clearer, *Bass
+  boosted* fuller, *Natural* as before; *Close* without saving puts the
+  old tone back. Neither touches the join/leave chimes or a stream.
+- [ ] **new (spatial voice)** — a Bluetooth headset in call mode (mono):
+  log `spatial voice off: mono output`, and voices sound as before (no
+  hollow, phasey colour). A 7.1 gaming headset: the voice is on the
+  front pair only, still placed. Echo cancellation *Automatic* on
+  laptop speakers with people placed: the others hear no echo of
+  themselves.
 
 ### 1.2 Ducking — other apps getting quieter [CLI-11, AEC-SPEC E14, E15]
 

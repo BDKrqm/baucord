@@ -289,6 +289,9 @@ impl AppState {
         if now.echo_cancellation != was.echo_cancellation {
             controls.push(VoiceControl::SetEchoCancellation(now.echo_cancellation));
         }
+        if now.voice_tone != was.voice_tone {
+            controls.push(VoiceControl::SetVoiceTone(now.voice_tone));
+        }
         for control in controls {
             self.voice.tx.send(control).ok();
         }

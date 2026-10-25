@@ -12,6 +12,11 @@ pub type ClientId = u64;
 pub struct PeerAudio {
     pub volume: f32,
     pub is_muted: bool,
+    /// Where they are heard from in the voice space: `[x, y]` in the
+    /// unit disc, x right, y ahead; the centre is no place.
+    pub position: [f32; 2],
+    /// Their five-band equalizer, dB per band (all 0: none).
+    pub eq: [f32; 5],
 }
 
 impl Default for PeerAudio {
@@ -19,6 +24,8 @@ impl Default for PeerAudio {
         Self {
             volume: 1.0,
             is_muted: false,
+            position: [0.0, 0.0],
+            eq: [0.0; 5],
         }
     }
 }
