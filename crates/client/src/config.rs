@@ -1313,7 +1313,9 @@ mod tests {
         assert!(inside_app_bundle(Path::new(
             "/Applications/baucord.app/Contents/MacOS"
         )));
-        assert!(!inside_app_bundle(Path::new("/Users/a/baucord-v1.3.0-macos-arm64")));
+        assert!(!inside_app_bundle(Path::new(
+            "/Users/a/baucord-v1.3.0-macos-arm64"
+        )));
         assert!(!inside_app_bundle(Path::new("/opt/x/Contents/MacOS")));
         assert!(!inside_app_bundle(Path::new("MacOS")));
     }
