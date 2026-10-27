@@ -1266,6 +1266,10 @@
         // before its files were up gave a dead button (review
         // 2026-10-27, P1-3). A failed request hides nothing.
         var missing = {}; // id -> true
+        // The hero button names the detected platform only once its
+        // file's HEAD has answered: shown at once and taken back on a
+        // 404, it read "Download for macOS" for a blink, then "Download".
+        var checked = {}; // id -> true
 
         function formatSize(bytes) {
           var mb = bytes / 1048576;
@@ -1281,13 +1285,15 @@
                 var len = r.ok && r.headers.get("content-length");
                 if (len) {
                   sizes[p.id] = formatSize(parseInt(len, 10));
-                  store.sizesVersion++;
                 } else if (r.status === 404 || r.status === 403) {
                   missing[p.id] = true;
-                  store.sizesVersion++;
                 }
               })
-              .catch(function () {});
+              .catch(function () {})
+              .then(function () {
+                checked[p.id] = true;
+                store.sizesVersion++;
+              });
           });
         }
 
@@ -1329,7 +1335,11 @@
               shared.sizesVersion;
               return (
                 PLATFORMS.filter(function (p) {
-                  return p.id === shared.selected && !missing[p.id];
+                  return (
+                    p.id === shared.selected &&
+                    (!window.fetch || checked[p.id]) &&
+                    !missing[p.id]
+                  );
                 })[0] || null
               );
             },
@@ -1339,11 +1349,14 @@
             get mobile() {
               return shared.mobile;
             },
+            // The install hints go with the button that names the
+            // platform, not with the detection alone: on a missing file
+            // the Mac hint sat under a plain "Download".
             get android() {
-              return shared.selected === "android-arm64";
+              return this.ready && shared.selected === "android-arm64";
             },
             get macos() {
-              return shared.selected === "macos";
+              return this.ready && shared.selected === "macos";
             },
             get href() {
               return this.current ? this.current.file : "#download";
