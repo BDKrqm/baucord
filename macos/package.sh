@@ -9,6 +9,10 @@
 #
 # Usage: macos/package.sh VERSION ARM64_BINARY INTEL_BINARY OUT_DIR
 #
+# INTEL_BINARY "-" makes an Apple-silicon-only app, for trying the
+# packaging on a Mac without an Intel build (macos/README.md §5).
+# Releases are always universal: release.yml passes both.
+#
 # Signing, from the environment:
 #   SIGN_IDENTITY  a "Developer ID Application" identity (its SHA-1 or
 #                  name): the app and the disk image are signed with it,
@@ -22,6 +26,7 @@ set -euo pipefail
 
 if [ "$#" -ne 4 ]; then
   echo "usage: $0 VERSION ARM64_BINARY INTEL_BINARY OUT_DIR" >&2
+  echo "       (INTEL_BINARY - : an Apple-silicon-only app, to try locally)" >&2
   exit 2
 fi
 VERSION="$1"
@@ -53,17 +58,24 @@ CONTENTS="$APP/Contents"
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources" "$OUT_DIR"
 
 # ── The bundle ────────────────────────────────────────────────────────
-lipo -create -output "$CONTENTS/MacOS/baucord" "$ARM64_BIN" "$INTEL_BIN"
+if [ "$INTEL_BIN" = "-" ]; then
+  echo "::warning::no Intel binary: an Apple-silicon-only app, for trying locally (releases are universal)"
+  cp "$ARM64_BIN" "$CONTENTS/MacOS/baucord"
+else
+  lipo -create -output "$CONTENTS/MacOS/baucord" "$ARM64_BIN" "$INTEL_BIN"
+fi
 chmod 755 "$CONTENTS/MacOS/baucord"
 ARCHS="$(lipo -archs "$CONTENTS/MacOS/baucord")"
 case " $ARCHS " in
   *" arm64 "*) ;;
-  *) fail "the universal binary has no arm64 slice ($ARCHS)" ;;
+  *) fail "the app's binary has no arm64 slice ($ARCHS)" ;;
 esac
-case " $ARCHS " in
-  *" x86_64 "*) ;;
-  *) fail "the universal binary has no x86_64 slice ($ARCHS)" ;;
-esac
+if [ "$INTEL_BIN" != "-" ]; then
+  case " $ARCHS " in
+    *" x86_64 "*) ;;
+    *) fail "the universal binary has no x86_64 slice ($ARCHS)" ;;
+  esac
+fi
 echo "baucord: $ARCHS"
 
 sed "s/__VERSION__/$VERSION/g" "$HERE/Info.plist" > "$CONTENTS/Info.plist"

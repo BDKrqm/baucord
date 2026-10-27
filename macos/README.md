@@ -47,7 +47,7 @@ copy them before the app's first start:
 
 ```sh
 mkdir -p ~/Library/Application\ Support/baucord
-cd ~/path/to/baucord-v1.3.0-macos-arm64     # where the old baucord binary is
+cd ~/path/to/the/old/zip/folder             # where the old baucord binary is
 cp settings.json identity.key ~/Library/Application\ Support/baucord/
 cp avatar.png ~/Library/Application\ Support/baucord/ 2>/dev/null || true
 ```
@@ -110,9 +110,10 @@ is not notarized: the first open needs **Open Anyway**, as above.
 
 ## 5. Building it on your Mac
 
-`package.sh` wants both architectures (it refuses a one-slice app).
-Build the Apple-silicon binary and borrow the Intel one from a release
-zip to fill its slot — enough to try the packaging:
+Two steps: `cargo build` makes the program, `package.sh` makes
+`baucord.app` and the disk image from it. Passing `-` for the Intel
+binary makes an Apple-silicon-only app — enough to try it (releases are
+always universal):
 
 ```sh
 brew install cmake opus pkg-config nasm ffmpeg@7
@@ -121,12 +122,14 @@ export CMAKE_POLICY_VERSION_MINIMUM=3.5         # CMake 4 and libopus' old CMake
 MACOSX_DEPLOYMENT_TARGET=11.0 cargo build --locked --profile deploy \
   --target aarch64-apple-darwin -p desktop --features desktop/tray
 
-mkdir -p /tmp/intel && (cd /tmp/intel && \
-  curl -LO https://baucord.com/baucord-v1.3.0-macos-intel.zip && unzip -o baucord-v1.3.0-macos-intel.zip)
-
-bash macos/package.sh 1.3.0 target/aarch64-apple-darwin/deploy/baucord /tmp/intel/baucord /tmp/baucord-out
-open /tmp/baucord-out/baucord-v1.3.0-macos.dmg
+VERSION="$(awk -F'"' '/^version = "/ { print $2; exit }' Cargo.toml)"   # the workspace's
+bash macos/package.sh "$VERSION" target/aarch64-apple-darwin/deploy/baucord - dist
+open "dist/baucord-v$VERSION-macos.dmg"
 ```
+
+The disk image and the updater's zip land in `dist/` (any folder you
+name last). For a universal one, pass an Intel `baucord` in place of
+`-` — the one in a release's `baucord-v<v>-macos-intel.zip` will do.
 
 - Leave it **signed ad hoc** (no `SIGN_IDENTITY`): a local build links
   Homebrew's FFmpeg dynamically, and the hardened runtime of a

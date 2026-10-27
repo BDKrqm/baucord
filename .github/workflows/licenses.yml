@@ -23,18 +23,51 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
 
+      # The notices depend on these files and nothing else: the crates
+      # (Cargo.lock, the workspace's Cargo.toml), which license to take
+      # (about.toml), the script and its templates, the native license
+      # texts and ours, our own crate names (left out of the list) and
+      # the patched third_party crates with their license files. While they are
+      # unchanged, the last run's output is reused and the steps below
+      # are skipped — they take minutes, nearly all of it cargo-about
+      # downloading every crate for six targets and looking up online
+      # the license texts some crates do not carry. Bump `v1` to force
+      # a fresh run (licenses/README.md).
+      - name: Restore the notices for these inputs
+        id: cached
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            crates/frontend/licenses.json
+            web/licenses.html
+          key: licenses-v1-cargo-about-0.9.2-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'about.toml', 'scripts/licenses.py', 'licenses/**', 'LICENSE', 'crates/*/Cargo.toml', 'third_party/*/Cargo.toml', 'third_party/*/LICENSE*') }}
+
       - name: Install Rust toolchain
+        if: steps.cached.outputs.cache-hit != 'true'
         run: |
           CHANNEL=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
           rustup toolchain install "$CHANNEL" --profile minimal
 
       - name: Install cargo-about
+        if: steps.cached.outputs.cache-hit != 'true'
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-about@0.9.2
 
       - name: Generate license files
+        if: steps.cached.outputs.cache-hit != 'true'
         run: python3 scripts/licenses.py
+
+      # Every release calls this from several workflows at once; the
+      # first to finish saves, and the others' save only warns.
+      - name: Save the notices for these inputs
+        if: steps.cached.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            crates/frontend/licenses.json
+            web/licenses.html
+          key: ${{ steps.cached.outputs.cache-primary-key }}
 
       - name: Upload license files
         uses: actions/upload-artifact@v7

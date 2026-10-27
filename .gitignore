@@ -11,3 +11,5 @@ baucord.db-shm
 baucord.db-wal
 /tools/*/target
 /assets/icons/*~
+# macos/package.sh output when built locally (macos/README.md §5).
+/dist

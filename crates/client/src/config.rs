@@ -1310,12 +1310,16 @@ mod tests {
 
     #[test]
     fn an_app_bundle_is_never_the_config_dir() {
+        // The app, wherever it was put and whatever it is called.
         assert!(inside_app_bundle(Path::new(
             "/Applications/baucord.app/Contents/MacOS"
         )));
-        assert!(!inside_app_bundle(Path::new(
-            "/Users/a/baucord-v1.3.0-macos-arm64"
+        assert!(inside_app_bundle(Path::new(
+            "/Users/a/Apps/Baucord 2.app/Contents/MacOS"
         )));
+        // A zip install's folder: portable, its own config folder.
+        assert!(!inside_app_bundle(Path::new("/Users/a/apps/baucord")));
+        // Looks like a bundle, is not one.
         assert!(!inside_app_bundle(Path::new("/opt/x/Contents/MacOS")));
         assert!(!inside_app_bundle(Path::new("MacOS")));
     }
