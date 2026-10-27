@@ -47,7 +47,7 @@ env:
   # push's build prints the digest and goes on, a release's refuses.
   # Pin it from that line; re-pin when build-ffmpeg-windows.yml makes a
   # new zip.
-  FFMPEG_WIN_SHA256: ""
+  FFMPEG_WIN_SHA256: "ea0f35adcfc3dfa863c4c0691c6b7b6b9deaa372b26b4e16877b1013ca6dcf5d"
   # Must match the x264 entry in scripts/licenses.py.
   X264_COMMIT: 31e19f92f00c7003fa115047ce50978bc98c3a0d
 
