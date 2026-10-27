@@ -361,6 +361,22 @@ Memory-mode servers (persistence off) still use the legacy
 
 ## 4. Rules learned the hard way
 
+- **Nothing is written inside `baucord.app`** (2026-10-26): a release
+  build keeps its config beside the executable when that folder is
+  writable, and a bundle dragged into `/Applications` is — so the
+  settings, the identity key and the log went into
+  `Contents/MacOS/`, where they break the bundle's signature and the
+  updater's bundle swap would discard them. `client::config` skips the
+  executable's folder inside an app bundle (`inside_app_bundle`). Any
+  new per-install file goes through `config_base_dir()`.
+- **A Mac build wants FFmpeg 7 and CMake's old-policy switch**
+  (2026-10-26): Homebrew's `ffmpeg` is 8, which `ffmpeg-next` 8.1 does
+  not build against (`AV_CODEC_ID_V410`, `supported_framerates`
+  missing) — `brew install ffmpeg@7` and `FFMPEG_DIR="$(brew --prefix
+  ffmpeg@7)"`, which bypasses pkg-config; then delete
+  `target/**/build/ffmpeg-sys-next-*` and the `ffmpeg-*` fingerprints,
+  or the old bindings stay. CMake 4 refuses libopus' CMakeLists without
+  `CMAKE_POLICY_VERSION_MINIMUM=3.5` (CI sets it too). macos/README §5.
 - `wait_for` closures must not borrow the client being pumped: copy
   `x.id` first. And `wait_for` does not consume the message it found.
 - **A control message is at most 17 KiB, both ways**

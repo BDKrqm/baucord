@@ -1011,8 +1011,15 @@ bundle code of the updater unit-tested on Linux. Nothing ran on a Mac.
   above were not asked again (Developer ID).
 - [ ] **a zip install still updates** — the bare binary from the old
   `-macos-arm64.zip` updates from the same kind of zip, as before.
-- [ ] **settings carry over** — the app opened after the zip install
-  shows the same servers and nickname.
+- [ ] **settings stay out of the bundle** — after using the app,
+  `ls /Applications/baucord.app/Contents/MacOS` shows only `baucord`;
+  `settings.json`, `identity.key` and `baucord.log` are in
+  `~/Library/Application Support/baucord` (Settings → About shows the
+  path).
+- [ ] **moving from the zip** — with `settings.json` and `identity.key`
+  copied there from the zip's folder (macos/README.md §1) before the
+  first start, the app shows the same servers and nickname, and a
+  server knows it as the same user.
 
 ## 5. A server host
 

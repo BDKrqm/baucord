@@ -1008,8 +1008,8 @@ impl Settings {
 /// Release builds prefer the executable's directory so users can find
 /// their config next to the app (baucord installs are portable-style;
 /// the platform config dir is invisible to most users). When the exe
-/// directory isn't writable — Program Files, /usr/bin, a macOS app
-/// bundle — fall back to the platform config dir (`%APPDATA%\baucord`,
+/// directory isn't writable — Program Files, /usr/bin — or is inside
+/// a macOS app bundle, fall back to the platform config dir (`%APPDATA%\baucord`,
 /// `~/.config/baucord`, `~/Library/Application Support/baucord`) so
 /// settings still persist instead of erroring on every save. Debug
 /// builds always use the platform config dir, keeping state out of
@@ -1081,12 +1081,35 @@ fn writable_exe_dir() -> Option<PathBuf> {
     WRITABLE
         .get_or_init(|| {
             let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+            // Never inside baucord.app, writable or not: the bundle is
+            // signed as one piece, and an update replaces it whole
+            // (macos/README.md) — settings and the identity key kept in
+            // it would go with the old one.
+            if inside_app_bundle(&dir) {
+                return None;
+            }
             let probe = dir.join(".baucord-write-probe");
             fs::write(&probe, b"").ok()?;
             let _ = fs::remove_file(&probe);
             Some(dir)
         })
         .clone()
+}
+
+/// Whether `exe_dir` is a macOS app bundle's `Contents/MacOS`
+/// (`…/baucord.app/Contents/MacOS`). A plain path test, so it is the
+/// same on every platform and in tests.
+#[cfg_attr(debug_assertions, allow(dead_code))] // only release builds ask
+fn inside_app_bundle(exe_dir: &Path) -> bool {
+    let Some(contents) = exe_dir.parent() else {
+        return false;
+    };
+    exe_dir.file_name().is_some_and(|name| name == "MacOS")
+        && contents.file_name().is_some_and(|name| name == "Contents")
+        && contents
+            .parent()
+            .and_then(Path::extension)
+            .is_some_and(|ext| ext == "app")
 }
 
 /// Absolute path of the live settings file (shown on the About tab;
@@ -1283,6 +1306,16 @@ mod tests {
         ));
         fs::create_dir_all(&dir).expect("dir");
         dir
+    }
+
+    #[test]
+    fn an_app_bundle_is_never_the_config_dir() {
+        assert!(inside_app_bundle(Path::new(
+            "/Applications/baucord.app/Contents/MacOS"
+        )));
+        assert!(!inside_app_bundle(Path::new("/Users/a/baucord-v1.3.0-macos-arm64")));
+        assert!(!inside_app_bundle(Path::new("/opt/x/Contents/MacOS")));
+        assert!(!inside_app_bundle(Path::new("MacOS")));
     }
 
     fn named(name: &str) -> Settings {

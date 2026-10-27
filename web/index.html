@@ -706,9 +706,10 @@
             install the new version over the old one: your servers and
             identity stay.
           </p>
-          <p class="dl-mobile" x-show="mobile" x-cloak x-i18n="dl-ios">
-            There is no iPhone version to download yet. Open this page on a
-            computer or an Android phone.
+          <p class="dl-mobile" x-show="mobile" x-cloak x-i18n.html="dl-ios">
+            The iPhone app is in beta on TestFlight: install Apple's
+            TestFlight app, then
+            <a href="https://testflight.apple.com/join/9aU3gcTy">join the baucord beta</a>.
           </p>
         </div>
       </div>
@@ -1051,7 +1052,8 @@
         <p class="dl-after" x-i18n.html="dl-after">
           Free and open source. The desktop app checks for updates on start and
           replaces itself in place; the server is updated by unzipping the new
-          one over it; on Android, install the new APK over the old one. Older
+          one over it; on Android, install the new APK over the old one. On
+          iPhone, <a href="https://testflight.apple.com/join/9aU3gcTy">join the beta on TestFlight</a>. Older
           versions and checksums are on the
           <a href="https://github.com/mpwsh/baucord/releases">releases page</a>.
         </p>
@@ -1221,7 +1223,7 @@
       //                       with a drag-to-Applications hint
       //   Android          -> the APK (arm64; every Android 10+ phone that
       //                       is not 32-bit-only), with an install hint
-      //   iPhone/iPad      -> a "not yet" note, no button
+      //   iPhone/iPad      -> the TestFlight beta's public link, no button
       // Sizes come from a HEAD request to each file (same origin), so the
       // page never has to be edited when a build changes size. The APK
       // reaches R2 from android-release.yml, the zips and the disk image

@@ -207,12 +207,21 @@ After the upload, in App Store Connect → the app → **TestFlight**:
   not on the App Store in France. Before France is ever added to the
   app's countries, that answer has to change (D68).
 - **Internal testing**: up to 100 people with a role on the App Store
-  Connect team; no review.
+  Connect team; no review. Someone outside the team can be one too:
+  invite them under Users and Access with a low role (Customer
+  Support), limited to this app, then add them to the internal group.
 - **External testing** (anyone with an email or a public link): Beta App
   Review first, which wants a description, a feedback email, a privacy
   policy URL (`web/privacy.html`'s page) and, in the review notes, a
   server and an invite code to get in with. The lobby's background
   audio is an open question for that review (PRODUCTION-PLAN §6, 2).
+  An external group sees no build until the review approves one (its
+  testers show *No Builds Available*); submit from the group's Builds
+  tab. The first build of a version is reviewed, usually within a day;
+  later builds of it mostly are not. Each build's **What to Test** is
+  what testers read in the TestFlight app (what is new, what to try,
+  known limits, how to send a log); the reviewer's way in belongs in
+  the review notes, which testers never see.
 
 The build number is the workflow's run number, which only grows, and
 App Store Connect wants each upload of a version to carry a higher one.

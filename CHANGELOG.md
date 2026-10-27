@@ -14,9 +14,19 @@ file are summed up in SESSION-GUIDE.md §3 ("Shipped").
   window first, has its icon in the Dock, and asks for the microphone
   as baucord. Signed with a Developer ID and notarized by Apple once
   those are set up (macos/README.md).
-- An installed `baucord.app` updates itself whole. Copies still running
-  from the old zip go on updating from it; to move to the app, install
-  it from the disk image: your servers and identity carry over.
+- An installed `baucord.app` updates itself whole, and keeps its
+  settings and identity in `~/Library/Application Support/baucord`,
+  never inside the app. Copies still running from the old zip go on
+  updating from it. **Moving from the zip to the app:** before the
+  app's first start, copy `settings.json` and `identity.key` from the
+  zip's folder into `~/Library/Application Support/baucord`; otherwise
+  the app starts as a new user with a new identity (macos/README.md §1).
+
+### Phones
+
+- **iPhone: a TestFlight beta.** The release workflow uploads each
+  build to TestFlight; testers install it from the TestFlight app, no
+  cable or registered device needed.
 
 ## 1.3.0
 

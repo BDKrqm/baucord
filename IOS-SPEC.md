@@ -1,7 +1,8 @@
 # baucord — iOS technical spec
 
-> **Status (2026-10-09):** 1.2.0, Ad Hoc builds on users' iPhones
-> (from CI, D37, or `run.sh --device`). §0–§13 describe the client as
+> **Status (2026-10-26):** 1.3.0 on TestFlight from CI (D67, D68):
+> internal testers since 2026-10-24, external ones after Beta App
+> Review; Ad Hoc builds (D37) and `run.sh --device` still work. §0–§13 describe the client as
 > it is now; §14 holds every decision taken since the first draft
 > (D14…D68, in order), each with its reason. What is left:
 > `PRODUCTION-PLAN.md` (MOB-9, 10, 19). Start from

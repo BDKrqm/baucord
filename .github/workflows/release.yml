@@ -396,8 +396,143 @@ jobs:
           name: baucord-v${{ steps.version.outputs.version }}-${{ matrix.suffix }}
           path: baucord-v${{ steps.version.outputs.version }}-${{ matrix.suffix }}.zip
 
-  release:
+      # The macOS binary on every run, for the macos-app job's universal
+      # baucord.app (macos/README.md). Artifacts drop the executable bit;
+      # macos/package.sh sets it again.
+      - name: Upload binary for the app bundle (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-bin-${{ matrix.suffix }}
+          path: target/${{ matrix.target }}/deploy/baucord
+          retention-days: 7
+          if-no-files-found: error
+
+  # baucord.app: one universal bundle from the two macOS builds, in a
+  # disk image to drag into Applications, and zipped for the updater of
+  # an installed copy (macos/package.sh, macos/README.md). With the
+  # Developer ID secrets it is signed, and on a release also notarized;
+  # without them it is signed ad hoc. On a push the result is a workflow
+  # artifact to try; on a release the release job publishes it.
+  # Secrets (optional): MACOS_DEVELOPER_ID_P12_BASE64,
+  #   MACOS_DEVELOPER_ID_PASSWORD; notarizing uses the App Store Connect
+  #   API key of ios-release.yml (ASC_API_KEY_P8_BASE64, ASC_API_KEY_ID,
+  #   ASC_API_ISSUER_ID).
+  macos-app:
     needs: build
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      DEVID_P12_B64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
+      # Notarized on a release only: it waits on Apple, and a push's
+      # build is for trying, not for handing out.
+      NOTARIZE: ${{ github.event_name == 'release' && '1' || '' }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Download the macOS binaries
+        uses: actions/download-artifact@v8
+        with:
+          path: bins
+          pattern: macos-bin-*
+
+      - name: Read version
+        id: version
+        run: echo "version=$(awk -F'"' '/^version = "/ { print $2; exit }' Cargo.toml)" >> "$GITHUB_OUTPUT"
+
+      - name: Install the Developer ID certificate
+        if: ${{ env.DEVID_P12_B64 != '' }}
+        env:
+          P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/baucord-devid.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
+          echo "$DEVID_P12_B64" | base64 --decode > "$RUNNER_TEMP/devid.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/devid.p12" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/devid.p12"
+          # The identity by its SHA-1: a name could match more than one.
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | awk '/"Developer ID Application: / { print $2; exit }')"
+          if [ -z "$IDENTITY" ]; then
+            security find-identity -v -p codesigning "$KEYCHAIN"
+            echo "::error::the .p12 holds no \"Developer ID Application\" identity with its key — export the certificate *with* its private key (Keychain Access → My Certificates)"
+            exit 1
+          fi
+          security find-identity -v -p codesigning "$KEYCHAIN" | grep "$IDENTITY"
+          {
+            echo "KEYCHAIN=$KEYCHAIN"
+            echo "SIGN_IDENTITY=$IDENTITY"
+          } >> "$GITHUB_ENV"
+
+      - name: Install the App Store Connect API key
+        if: ${{ env.NOTARIZE == '1' && env.SIGN_IDENTITY != '' }}
+        env:
+          ASC_KEY_B64: ${{ secrets.ASC_API_KEY_P8_BASE64 }}
+          ASC_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          for NAME in ASC_KEY_B64 ASC_KEY_ID ASC_ISSUER_ID; do
+            if [ -z "${!NAME}" ]; then
+              echo "::error::notarizing needs the App Store Connect API key: ASC_API_KEY_P8_BASE64, ASC_API_KEY_ID and ASC_API_ISSUER_ID (ios/README.md §3c)"
+              exit 1
+            fi
+          done
+          KEY="$RUNNER_TEMP/AuthKey_${ASC_KEY_ID}.p8"
+          (umask 077 && echo "$ASC_KEY_B64" | base64 --decode > "$KEY")
+          {
+            echo "ASC_KEY_PATH=$KEY"
+            echo "ASC_KEY_ID=$ASC_KEY_ID"
+            echo "ASC_ISSUER_ID=$ASC_ISSUER_ID"
+          } >> "$GITHUB_ENV"
+
+      - name: Build baucord.app, the disk image and the updater's zip
+        run: |
+          set -euo pipefail
+          # Unsigned builds are not notarized: there is nothing to vouch for.
+          if [ -z "${SIGN_IDENTITY:-}" ]; then
+            NOTARIZE=""
+          fi
+          NOTARIZE="$NOTARIZE" bash macos/package.sh "${{ steps.version.outputs.version }}" \
+            bins/macos-bin-macos-arm64/baucord bins/macos-bin-macos-intel/baucord out
+
+      - name: Upload the disk image and zip (release)
+        if: github.event_name == 'release'
+        uses: actions/upload-artifact@v7
+        with:
+          name: baucord-v${{ steps.version.outputs.version }}-macos
+          path: |
+            out/baucord-v${{ steps.version.outputs.version }}-macos.dmg
+            out/baucord-v${{ steps.version.outputs.version }}-macos.zip
+          if-no-files-found: error
+
+      - name: Upload the disk image to try (push)
+        if: github.event_name != 'release'
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-dmg-${{ github.sha }}
+          path: out/baucord-v${{ steps.version.outputs.version }}-macos.dmg
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Delete the keychain and the key
+        if: always()
+        run: |
+          if [ -n "${KEYCHAIN:-}" ]; then security delete-keychain "$KEYCHAIN" || true; fi
+          if [ -n "${ASC_KEY_PATH:-}" ]; then rm -f "$ASC_KEY_PATH"; fi
+
+  release:
+    # macos-app too: its disk image and the updater's zip go up with the
+    # rest, before the version file names them.
+    needs: [build, macos-app]
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
     permissions:
@@ -405,17 +540,19 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v7
-      - name: Download build zips
+      - name: Download build zips and the macOS disk image
         uses: actions/download-artifact@v8
         with:
           path: artifacts
           pattern: baucord-v*
           merge-multiple: true
-      - name: Attach zips to release
+      - name: Attach zips and disk image to release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.release.tag_name }}
-          files: artifacts/*.zip
+          files: |
+            artifacts/*.zip
+            artifacts/*.dmg
       # The version file tells every client what to update to, and the
       # site which version to offer: only the newest stable release
       # writes it, never a backport or a rebuilt older tag (review
@@ -440,7 +577,7 @@ jobs:
         run: |
           VERSION=$(awk -F'"' '/^version = "/ { print $2; exit }' Cargo.toml)
           mkdir -p r2-upload r2-version
-          cp artifacts/*.zip r2-upload/
+          cp artifacts/*.zip artifacts/*.dmg r2-upload/
           echo "$VERSION" > r2-version/version
       - name: Upload zips to R2
         uses: jakejarvis/s3-sync-action@v0.5.1

@@ -32,8 +32,28 @@ microphone, screen recording, Accessibility — would be asked for again
 after every update. Anywhere else it updates the bare binary, as it
 always has.
 
-Settings and the identity key live in the same folder for both, so
-moving from the zip to the app keeps your servers and identity.
+**Where the app keeps its settings:** always
+`~/Library/Application Support/baucord` (settings, `identity.key`, the
+avatar, `baucord.log`). Never inside `baucord.app`, even when the user
+could write there: the bundle is signed as one piece, and an update
+replaces it whole, which would take anything kept in it along
+(`client::config`, `inside_app_bundle`).
+
+**Moving from a zip install** keeps nothing by itself: a zip install
+keeps its settings beside its binary (a "portable" install), where the
+app does not look. To bring the servers, nickname and — above all —
+the identity (a server knows you by it: your roles, your DMs) across,
+copy them before the app's first start:
+
+```sh
+mkdir -p ~/Library/Application\ Support/baucord
+cd ~/path/to/baucord-v1.3.0-macos-arm64     # where the old baucord binary is
+cp settings.json identity.key ~/Library/Application\ Support/baucord/
+cp avatar.png ~/Library/Application\ Support/baucord/ 2>/dev/null || true
+```
+
+If the app was already started once, quit it and copy them over its
+fresh ones.
 
 ## 2. Signing and notarizing (once, needs the paid Developer Program)
 
@@ -87,3 +107,40 @@ is not notarized: the first open needs **Open Anyway**, as above.
   (Accessibility) do not fit it as they are (PRODUCTION-PLAN.md, the
   2026-10-24 entry in §7).
 - **Minimum:** macOS 11, as the binaries are built for.
+
+## 5. Building it on your Mac
+
+`package.sh` wants both architectures (it refuses a one-slice app).
+Build the Apple-silicon binary and borrow the Intel one from a release
+zip to fill its slot — enough to try the packaging:
+
+```sh
+brew install cmake opus pkg-config nasm ffmpeg@7
+export FFMPEG_DIR="$(brew --prefix ffmpeg@7)"   # FFmpeg 7: ffmpeg-next 8 does not build against 8
+export CMAKE_POLICY_VERSION_MINIMUM=3.5         # CMake 4 and libopus' old CMakeLists
+MACOSX_DEPLOYMENT_TARGET=11.0 cargo build --locked --profile deploy \
+  --target aarch64-apple-darwin -p desktop --features desktop/tray
+
+mkdir -p /tmp/intel && (cd /tmp/intel && \
+  curl -LO https://baucord.com/baucord-v1.3.0-macos-intel.zip && unzip -o baucord-v1.3.0-macos-intel.zip)
+
+bash macos/package.sh 1.3.0 target/aarch64-apple-darwin/deploy/baucord /tmp/intel/baucord /tmp/baucord-out
+open /tmp/baucord-out/baucord-v1.3.0-macos.dmg
+```
+
+- Leave it **signed ad hoc** (no `SIGN_IDENTITY`): a local build links
+  Homebrew's FFmpeg dynamically, and the hardened runtime of a
+  Developer ID signature refuses to load those libraries — the app
+  would quit at launch. CI links FFmpeg statically and has no such
+  problem.
+- A build that already picked up FFmpeg 8 (errors about
+  `AV_CODEC_ID_V410` or `supported_framerates`) keeps its bindings:
+  `rm -rf target/aarch64-apple-darwin/deploy/build/ffmpeg-sys-next-*
+  target/aarch64-apple-darwin/deploy/.fingerprint/ffmpeg-*` and build
+  again.
+- A disk image fetched with `gh run download`, or built here, carries no
+  quarantine flag, so macOS does not warn on the first open as it would
+  for a download. To see what users see:
+  `xattr -w com.apple.quarantine "0081;$(printf %x "$(date +%s)");Safari;" file.dmg`.
+- What cannot be tried locally: the update swap, which needs a newer
+  release on baucord.com (DEVICE-CHECKLIST §4.4).

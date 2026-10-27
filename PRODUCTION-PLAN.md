@@ -1700,7 +1700,12 @@ One line each; the spec decision named holds the detail.
   when the secrets are there, ad hoc otherwise (macos/README.md). An
   installed bundle updates whole from `baucord-v<v>-macos.zip`
   (`frontend/src/bundle.rs`); bare binaries keep their per-architecture
-  zips. The website offers the disk image. Considered and set aside: a
+  zips. Settings never live inside the bundle (`client::config`,
+  `inside_app_bundle`: a writable `/Applications` made the bundle a
+  "portable" config folder, which the swap would have thrown away);
+  moving from a zip install is by hand (macos/README.md §1) — an
+  importer that offers to bring a zip install's settings over is the
+  natural follow-up. The website offers the disk image. Considered and set aside: a
   Mac App Store build — its sandbox is mandatory, and the desktop's
   video (FFmpeg + x264, GPL-3.0, LEG-1) and keybinds (Accessibility)
   would need VideoToolbox encoding and Input Monitoring first. Not yet

@@ -5,8 +5,9 @@ relay server (QUIC, no media mixing), a desktop client for Windows,
 macOS and Linux, and clients for Android and iPhone that run the same
 Rust engine and the same Slint UI. It is in daily use: 1.2.1 is the
 latest release (2026-10-13; 1.3.0, with the 2026-10 review's fixes, is
-next, CHANGELOG.md), desktop users on the in-app updater, Android as a
-sideloaded APK and on Play's internal test, iPhone as an Ad Hoc build,
+next, CHANGELOG.md), desktop users on the in-app updater (macOS as
+`baucord.app` in a disk image from the next release), Android as a
+sideloaded APK and on Play's internal test, iPhone on TestFlight,
 the official server in Docker.
 
 This file is the way in. Read it first, then follow the reading order
@@ -159,12 +160,16 @@ The full list is SESSION-GUIDE §4; these break things when forgotten:
   Android's foreground service typed for Play (ANDROID-SPEC D63), the
   third-party notices (Settings → Licenses) — and the chat's
   stickiness by input (D66) and General's Activity view (D65).
-- **Desktop**: in production (Windows mostly), self-updating.
+- **Desktop**: in production (Windows mostly), self-updating. macOS
+  ships as a universal `baucord.app` in a disk image, Developer ID
+  signed and notarized when the secrets are set (macos/README.md).
 - **Android**: voice with the platform echo canceller, chat, DMs,
   files, stream viewing (MediaCodec), Settings → Debug, notifications
   while connected. Sideloaded.
 - **iPhone**: the same, with VPIO echo cancellation written but not yet
-  confirmed on a device. Ad Hoc builds.
+  confirmed on a device. TestFlight from CI (IOS-SPEC D67, D68):
+  internal testers now, external ones after Beta App Review; Ad Hoc
+  builds still possible.
 - **Vocabulary**: an *invite code* is what the server mints and a new
   device key needs to get in; an *invite string* (`host:port#SHA256:…`)
   is an address plus the server's fingerprint, which the client still

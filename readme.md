@@ -101,18 +101,44 @@ Working on the code? Start with [`START-HERE.md`](START-HERE.md).
 - **Stays out of the way** — closes to the tray with the call running;
   the client idles around 40 MB of RAM on Windows (more on macOS and
   Linux, where the figure counts shared pages)
-- **Cross-platform** — Windows, Linux and macOS, plus Android (a
-  sideloaded APK) and iPhone with the same engine and UI: voice in the
-  background, stream viewing, and notifications for DMs and a call
-  starting while the app stays connected
+- **Cross-platform** — Windows, Linux and macOS (a universal
+  `baucord.app` in a disk image, signed and notarized), plus Android (a
+  sideloaded APK) and iPhone (a TestFlight beta) with the same engine
+  and UI: voice in the background, stream viewing, and notifications
+  for DMs and a call starting while the app stays connected
 
 ## Building and Running
 
 ### Prerequisites
 
 - Rust 1.95+ (`rust-toolchain.toml` pins it; edition 2024)
-- FFmpeg shared libraries (for screen share encode/decode)
+- FFmpeg **7.1** libraries (for screen share encode/decode): the
+  `ffmpeg-next` 8 bindings do not build against FFmpeg 8
+- CMake (the Opus codec is built from source); with CMake 4, set
+  `CMAKE_POLICY_VERSION_MINIMUM=3.5`, as CI does
 - Formatting uses nightly-only options: `cargo +nightly fmt --all`
+
+#### macOS: FFmpeg 7 from Homebrew
+
+Homebrew's `ffmpeg` is FFmpeg 8 now; `ffmpeg@7` installs beside it.
+Point the build at it with `FFMPEG_DIR` (it then skips pkg-config, and
+with it the FFmpeg 8 that pkg-config would find):
+
+```bash
+brew install cmake opus pkg-config nasm ffmpeg@7
+export FFMPEG_DIR="$(brew --prefix ffmpeg@7)"
+export CMAKE_POLICY_VERSION_MINIMUM=3.5
+cargo run -p desktop --release
+```
+
+If a build already picked up FFmpeg 8 (errors about `AV_CODEC_ID_V410`
+or `supported_framerates` in `ffmpeg-next`), delete the cached
+bindings and build again: `rm -rf target/*/build/ffmpeg-sys-next-*
+target/*/.fingerprint/ffmpeg-*` (with `--target`, under
+`target/<triple>/<profile>/`). A local build links Homebrew's FFmpeg
+dynamically; release builds link FFmpeg statically. To build the app
+and its disk image on your Mac, see
+[`macos/README.md`](macos/README.md) §5.
 
 #### Windows: building FFmpeg with vcpkg
 
@@ -234,9 +260,17 @@ cargo run -p desktop --release   # binary is named `baucord`
 
 Pick a nickname, pick a server, connect. Settings persist to
 `settings.json` — next to the executable when that directory is
-writable (portable installs), otherwise in the platform config dir
-(`%APPDATA%\baucord`, `~/.config/baucord`, `~/Library/Application
-Support/baucord`). The client's own identity key (`identity.key`) lives
+writable (portable installs: the Windows and Linux zips), otherwise in
+the platform config dir (`%APPDATA%\baucord`, `~/.config/baucord`,
+`~/Library/Application Support/baucord`). The macOS app always uses the
+latter: nothing is ever written inside `baucord.app`, which is signed
+as one piece and replaced whole when it updates
+([`macos/README.md`](macos/README.md)).
+
+Releases: Windows and Linux are zips; macOS is `baucord.app` in a disk
+image (drag it to Applications); Android an APK; iPhone a TestFlight
+beta ([`ios/README.md`](ios/README.md)). The desktop apps update
+themselves. The client's own identity key (`identity.key`) lives
 next to it; it signs the handshake so the server can derive a stable
 user id, and never leaves the machine.
 

@@ -100,7 +100,7 @@ jobs:
       - name: Upload website to R2
         uses: jakejarvis/s3-sync-action@v0.5.1
         with:
-          args: --exclude '*.zip' --exclude '*.apk' --exclude 'version' --exclude 'deploy/*'
+          args: --exclude '*.zip' --exclude '*.dmg' --exclude '*.apk' --exclude 'version' --exclude 'deploy/*'
         env:
           AWS_S3_BUCKET: baucord
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
