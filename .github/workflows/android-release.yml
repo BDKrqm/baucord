@@ -190,10 +190,12 @@ jobs:
 
       # A week: the release carries the APK; a bundle for Play is
       # rebuilt from its tag (a dispatch with the tag) if it is missed.
+      # `archive: false` uploads the file as it is, and the artifact is
+      # then NAMED AFTER THE FILE (`name:` would be ignored): the
+      # publish job downloads it by that name.
       - name: Upload APK artifact
         uses: actions/upload-artifact@v7
         with:
-          name: android-apk
           path: ${{ steps.apk.outputs.name }}
           archive: false
           if-no-files-found: error
@@ -236,7 +238,7 @@ jobs:
       - name: Upload app bundle artifact
         uses: actions/upload-artifact@v7
         with:
-          name: android-aab
+          # Named after the file, as above.
           path: ${{ steps.aab.outputs.name }}
           archive: false
           if-no-files-found: error
@@ -270,15 +272,18 @@ jobs:
           sparse-checkout: android/play
           sparse-checkout-cone-mode: false
 
+      # Raw uploads (`archive: false`) are named after their file, so
+      # the names are the file names the build job printed. The first
+      # v1.4.0 run asked for `android-apk` and found nothing.
       - name: Download the signed APK
         uses: actions/download-artifact@v8
         with:
-          name: android-apk
+          name: ${{ env.APK }}
           path: .
       - name: Download the signed bundle
         uses: actions/download-artifact@v8
         with:
-          name: android-aab
+          name: ${{ env.AAB }}
           path: .
 
       - name: Attach APK to release
