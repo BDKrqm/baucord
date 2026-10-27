@@ -1,10 +1,19 @@
 # Builds the desktop app (Windows, macOS, Linux) with the bundled server on
 # release, attaches the zips to the release and uploads them to R2 with the
 # version file. Pushes to the default branch only build, to warm the caches.
+# *Run workflow* with a release's tag does what the release event did,
+# for a release whose run failed or was cancelled (the tag's commit is
+# built, checked and published to that release, which has to exist);
+# with anything else it is a dry run, like a push.
 name: Build and Release
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "A release tag (v1.4.0) to rebuild and publish to that release (zips, disk image, R2, the version file); anything else is a dry run (workflow artifacts only)"
+        default: "manual"
   push:
     branches:
       # The default branch: a tag build can only restore caches saved on
@@ -27,12 +36,22 @@ on:
       - "Dockerfile"
 
 # A newer push to main supersedes a cache-warming build still running;
-# a release always runs to the end.
+# a release always runs to the end. A manual run for a tag is grouped
+# by the tag, not by the branch it was started from, so a push to main
+# meanwhile does not cancel it.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'push' }}
 
 env:
+  # The tag being published: the release's, or the one a manual run
+  # names. Empty on a push and on a dry run — every step that packages,
+  # notarizes, attaches or uploads looks at this, never at the event.
+  # (Jobs cannot read `env` in their `if:`; those spell the same test.)
+  PUBLISH_TAG: ${{ github.event.release.tag_name || (startsWith(github.event.inputs.tag, 'v') && github.event.inputs.tag || '') }}
+  # What to check out: the tag on a manual run, the triggering commit
+  # otherwise (a release event already runs on its tag).
+  CHECKOUT_REF: ${{ github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.tag, 'v') && github.event.inputs.tag || '' }}
   # FFmpeg stays on 7.1.x: ffmpeg-next 8.1 does not build against FFmpeg 8+.
   VCPKG_COMMIT: 34823ada10080ddca99b60e85f80f55e18a44eea # ffmpeg 7.1.2
   # The Linux and macOS builds take the same release as vcpkg, checked
@@ -54,13 +73,17 @@ env:
 jobs:
   licenses:
     uses: ./.github/workflows/licenses.yml
+    with:
+      ref: ${{ github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.tag, 'v') && github.event.inputs.tag || '' }}
 
   # The checks (format, lints, tests) on the tagged commit, beside the
   # builds: nothing is attached to the release until they passed. A push
   # to main is checked by pr-check's own run (review 2026-10-27, P1-4).
   check:
-    if: github.event_name == 'release'
+    if: ${{ github.event_name == 'release' || startsWith(github.event.inputs.tag, 'v') }}
     uses: ./.github/workflows/pr-check.yaml
+    with:
+      ref: ${{ github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.tag, 'v') && github.event.inputs.tag || '' }}
 
   # A release's tag has to be the workspace's version. Checked first:
   # it used to be the last job's business, after an hour of builds.
@@ -69,12 +92,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Check out source
-        if: github.event_name == 'release'
+        if: env.PUBLISH_TAG != ''
         uses: actions/checkout@v7
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
       - name: Check tag matches crate version
-        if: github.event_name == 'release'
+        if: env.PUBLISH_TAG != ''
         env:
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ env.PUBLISH_TAG }}
         run: |
           VERSION=$(awk -F'"' '/^version = "/ { print $2; exit }' Cargo.toml)
           if [ "$TAG" != "v$VERSION" ]; then
@@ -112,6 +137,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v7
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
 
       - name: Download license files
         uses: actions/download-artifact@v8
@@ -156,7 +183,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-          save-if: ${{ github.event_name != 'release' }}
+          save-if: ${{ env.PUBLISH_TAG == '' }}
 
       # Restored everywhere, saved only from main: a release's cache is
       # scoped to its tag, where no later run can read it, and it could
@@ -188,7 +215,7 @@ jobs:
           meson install -C build
 
       - name: Save PipeWire headers (Linux)
-        if: runner.os == 'Linux' && steps.pipewire-cache.outputs.cache-hit != 'true' && github.event_name != 'release'
+        if: runner.os == 'Linux' && steps.pipewire-cache.outputs.cache-hit != 'true' && env.PUBLISH_TAG == ''
         uses: actions/cache/save@v6
         with:
           path: ~/pw
@@ -231,7 +258,7 @@ jobs:
           make install
 
       - name: Save static FFmpeg (Linux)
-        if: runner.os == 'Linux' && steps.ffmpeg-static-linux-cache.outputs.cache-hit != 'true' && github.event_name != 'release'
+        if: runner.os == 'Linux' && steps.ffmpeg-static-linux-cache.outputs.cache-hit != 'true' && env.PUBLISH_TAG == ''
         uses: actions/cache/save@v6
         with:
           path: ~/ffmpeg-static
@@ -289,7 +316,7 @@ jobs:
           make install
 
       - name: Save static FFmpeg (macOS)
-        if: runner.os == 'macOS' && steps.ffmpeg-static-cache.outputs.cache-hit != 'true' && github.event_name != 'release'
+        if: runner.os == 'macOS' && steps.ffmpeg-static-cache.outputs.cache-hit != 'true' && env.PUBLISH_TAG == ''
         uses: actions/cache/save@v6
         with:
           path: ~/ffmpeg-static
@@ -318,7 +345,7 @@ jobs:
           $want = "$env:FFMPEG_WIN_SHA256".Trim().ToLowerInvariant()
           Write-Host "ffmpeg-prebuilt.zip SHA-256: $hash ($obj)"
           if ($want -eq "") {
-            if ($env:GITHUB_EVENT_NAME -eq "release") {
+            if ("$env:PUBLISH_TAG" -ne "") {
               Write-Host "::error::FFMPEG_WIN_SHA256 is not pinned in release.yml; the zip's digest is $hash — pin it and release again"
               exit 1
             }
@@ -404,7 +431,7 @@ jobs:
         run: echo "version=$(awk -F'"' '/^version = "/ { print $2; exit }' Cargo.toml)" >> "$GITHUB_OUTPUT"
 
       - name: Package zip (Linux/macOS)
-        if: runner.os != 'Windows' && github.event_name == 'release'
+        if: runner.os != 'Windows' && env.PUBLISH_TAG != ''
         run: |
           mkdir -p staging
           cp target/${{ matrix.target }}/deploy/baucord staging/baucord
@@ -413,7 +440,7 @@ jobs:
           zip -r ../baucord-v${{ steps.version.outputs.version }}-${{ matrix.suffix }}.zip baucord dedicated-server
 
       - name: Package zip (Windows)
-        if: runner.os == 'Windows' && github.event_name == 'release'
+        if: runner.os == 'Windows' && env.PUBLISH_TAG != ''
         shell: pwsh
         run: |
           mkdir staging
@@ -423,7 +450,7 @@ jobs:
           Compress-Archive -Path baucord.exe,dedicated-server.exe -DestinationPath ..\baucord-v${{ steps.version.outputs.version }}-${{ matrix.suffix }}.zip
 
       - name: Upload zip artifact
-        if: github.event_name == 'release'
+        if: env.PUBLISH_TAG != ''
         uses: actions/upload-artifact@v7
         with:
           name: baucord-v${{ steps.version.outputs.version }}-${{ matrix.suffix }}
@@ -459,10 +486,12 @@ jobs:
       DEVID_P12_B64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
       # Notarized on a release only: it waits on Apple, and a push's
       # build is for trying, not for handing out.
-      NOTARIZE: ${{ github.event_name == 'release' && '1' || '' }}
+      NOTARIZE: ${{ (github.event_name == 'release' || startsWith(github.event.inputs.tag, 'v')) && '1' || '' }}
     steps:
       - name: Check out source
         uses: actions/checkout@v7
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
 
       - name: Download the macOS binaries
         uses: actions/download-artifact@v8
@@ -538,7 +567,7 @@ jobs:
             bins/macos-bin-macos-arm64/baucord bins/macos-bin-macos-intel/baucord out
 
       - name: Upload the disk image and zip (release)
-        if: github.event_name == 'release'
+        if: env.PUBLISH_TAG != ''
         uses: actions/upload-artifact@v7
         with:
           name: baucord-v${{ steps.version.outputs.version }}-macos
@@ -547,8 +576,8 @@ jobs:
             out/baucord-v${{ steps.version.outputs.version }}-macos.zip
           if-no-files-found: error
 
-      - name: Upload the disk image to try (push)
-        if: github.event_name != 'release'
+      - name: Upload the disk image to try (push, dry run)
+        if: env.PUBLISH_TAG == ''
         uses: actions/upload-artifact@v7
         with:
           name: macos-dmg-${{ github.sha }}
@@ -567,13 +596,30 @@ jobs:
     # rest, before the version file names them. And the checks: a build
     # that passed them is the only one handed out (P1-4).
     needs: [build, macos-app, check]
-    if: github.event_name == 'release'
+    if: ${{ github.event_name == 'release' || startsWith(github.event.inputs.tag, 'v') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - name: Check out source
         uses: actions/checkout@v7
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
+      # A manual run publishes to a release that exists: attaching to a
+      # tag without one would create a release unannounced. (The release
+      # event is its own proof.)
+      - name: The release exists, and is it a pre-release?
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ env.PUBLISH_TAG }}
+        run: |
+          set -euo pipefail
+          if ! PRERELEASE=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq '.isPrerelease'); then
+            echo "::error::no release $TAG on GitHub — create the release for the tag first, then run this again"
+            exit 1
+          fi
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
       - name: Download build zips and the macOS disk image
         uses: actions/download-artifact@v8
         with:
@@ -583,7 +629,7 @@ jobs:
       - name: Attach zips and disk image to release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ github.event.release.tag_name }}
+          tag_name: ${{ env.PUBLISH_TAG }}
           files: |
             artifacts/*.zip
             artifacts/*.dmg
@@ -595,8 +641,8 @@ jobs:
         id: newest
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name }}
-          PRERELEASE: ${{ github.event.release.prerelease }}
+          TAG: ${{ env.PUBLISH_TAG }}
+          PRERELEASE: ${{ steps.release.outputs.prerelease }}
         run: |
           set -euo pipefail
           NEWEST=$(gh api "repos/$GITHUB_REPOSITORY/tags" --paginate --jq '.[].name' \
