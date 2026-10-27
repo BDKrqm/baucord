@@ -60,7 +60,7 @@
   "step-2-d": "A primeira execução imprime um código de admin de uso único: conecte com ele. Depois digite <code>/invite</code> no chat para gerar um código e mande para os seus amigos junto com o endereço do servidor.",
   "step-3-t": "Todo mundo conecta",
   "step-3-d": "Eles adicionam o endereço e o código no baucord uma vez, escolhem um apelido e conectam. Daí em diante o dispositivo é o login deles.",
-  "host-note": "Docker num host Linux, configuração, backups e atualizações: está tudo no <a href=\"deploy.html\">guia de hospedagem</a>.",
+  "host-note": "Docker num host Linux, configuração, backups e atualizações: está tudo no <a href=\"deploy.html\">guia de hospedagem</a>. Um bot de música, ou um bot seu em trinta linhas de Python: o <a href=\"bots.html\">guia de bots</a>.",
   "dl-title": "Baixar",
   "dl-lede": "Cada zip traz o app e o servidor dedicado para aquela plataforma, então quem hospeda não precisa de mais nada. O app de Android é um único APK para celulares com Android 10 ou mais recente.",
   "dl-th-platform": "Plataforma",

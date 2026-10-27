@@ -22,6 +22,8 @@ Working on the code? Start with [`START-HERE.md`](START-HERE.md).
 | `protocol`  | wire format: messages, lanes, framing, voice/video packing          |
 | `transport` | QUIC without a runtime: driver, identity + pinning, UDP, simulator  |
 | `server`    | the dedicated relay (lib + bin, so integration tests can drive it)  |
+| `gateway`   | bots: `baucord-gateway` (a WebSocket door for bots in any language) |
+|             | and the `Bot` library a Rust bot links; `examples/music.rs`         |
 | `client`    | networking, settings, and the voice/screen worker threads           |
 | `app-core`  | platform-agnostic app logic: roster/chat view models, image pipes   |
 | `frontend`  | the UI logic every host shares: `AppState`, the Slint models, the   |
@@ -29,11 +31,13 @@ Working on the code? Start with [`START-HERE.md`](START-HERE.md).
 | `desktop`   | the desktop host (binary: `baucord`): `main.rs` and nothing else    |
 | `ui`        | the Slint UI and its Rust glue                                      |
 | `i18n`      | Fluent translations — English, Español (AR), Português (BR)         |
+| `keywatch`  | global hotkeys watched, not grabbed: push-to-talk without eating    |
+|             | the key in other programs (Windows, macOS, X11)                     |
 | `audio`     | capture/playback, Opus, VAD, denoise, jitter buffer, rate ladder,   |
 |             | echo cancellation, the AAudio/VPIO/WASAPI backends                  |
 | `video`     | H.264 encode/decode (FFmpeg, MediaCodec, VideoToolbox), capture     |
-| `android`   | the Android host (a cdylib; the Gradle project is `android/`)      |
-| `ios`       | the iPhone host (a binary; the Xcode project is `ios/`)            |
+| `android`   | the Android host (a cdylib; the Gradle project is `android/`)       |
+| `ios`       | the iPhone host (a binary; the Xcode project is `ios/`)             |
 
 ## Features
 
@@ -97,6 +101,12 @@ Working on the code? Start with [`START-HERE.md`](START-HERE.md).
 - **Echo cancellation** — the platform's own canceller, verified on the
   stream that was opened (Windows and Android; written for iPhone and
   awaiting confirmation on a device)
+- **Bots** — a program with a key of its own joins as a member and
+  reads the chat, answers, and plays audio in a voice channel. A music
+  bot with nothing to install (`!play`, files and audio links,
+  decoded in-process), or your own in any language through
+  `baucord-gateway`: JSON events and actions over a WebSocket, PCM in
+  to play. [baucord.com/bots.html](https://baucord.com/bots.html)
 - **Three languages** — English, Español (Argentina), Português (Brasil)
 - **Stays out of the way** — closes to the tray with the call running;
   the client idles around 40 MB of RAM on Windows (more on macOS and
@@ -288,6 +298,25 @@ Client and server must speak the same protocol: the QUIC ALPN string
 are refused at the handshake with an "update baucord" message instead
 of misbehaving mid-call. Non-breaking capabilities are negotiated as
 feature bits in `Hello`/`Welcome`.
+
+### Bots
+
+```bash
+cargo run -p gateway --release -- --server 127.0.0.1:51000 --name HelloBot \
+    --key hellobot.key --invite ABCD-EFGH-IJKL          # baucord-gateway
+cargo run -p gateway --release --example music -- --server 127.0.0.1:51000 \
+    --key musicbot.key --invite ABCD-EFGH-IJKL --library ~/Music
+```
+
+The gateway joins the server as a member (an invite code on the first
+run, the key alone after; the server's identity pinned on first use)
+and serves `ws://127.0.0.1:8765` to a bot in any language — the
+Python echo bot in `crates/gateway/examples` is thirty lines. The
+music bot is the same code as a library, `gateway::bot::Bot`, in one
+binary. Neither is in the downloads yet. The guide is
+[baucord.com/bots.html](https://baucord.com/bots.html)
+(`web/bots.html`); the wire, flag by flag and field by field, is
+`crates/gateway/README.md`.
 
 ## Deploying a server
 

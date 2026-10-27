@@ -44,6 +44,7 @@ viewer on an 8 Mbit/s share or a 20-second blackout, run as an ordinary
 | `protocol`  | bytes, serde                  | wire types, lanes, framing, voice/video/system-audio packing            |
 | `transport` | protocol, quinn-proto, rustls | `Driver`, `UdpIo`, identity/pinning, budgets, the simulator             |
 | `server`    | protocol, transport           | `ChatServer` (lib) + binary; relay, admission, config, hot reload       |
+| `gateway`   | protocol, transport, tungstenite, opus | `baucord-gateway` (a bot's WebSocket door: session, wire, voice sink) + the `Bot` library; `examples/music.rs` |
 | `client`    | protocol, transport, audio, video | network/voice/screen threads, settings, invites, client key         |
 | `app-core`  | —                             | UI-agnostic view models: roster, chat, composer, images, emoji, stats   |
 | `frontend`  | client, app-core, ui, i18n    | the UI logic every host runs: `AppState`, the models, settings/admin/viewer, the host seams |
@@ -52,11 +53,16 @@ viewer on an 8 Mbit/s share or a 20-second blackout, run as an ordinary
 | `ios`       | frontend                      | the iPhone host: a binary on UIKit through `objc2`, the `Hooks`        |
 | `ui`        | slint, app-core               | `.slint` files and the generated Rust                                   |
 | `i18n`      | fluent                        | `t!()` and the three `.ftl` locales                                     |
+| `keywatch`  | windows, x11rb; CoreGraphics by hand | global hotkeys read, not grabbed: per-binding edges for push-to-talk |
 | `audio`     | cpal, opus, …                 | devices, capture/playback, encoder + rate ladder, jitter buffer, PLC/FEC/RED, AEC, native backends |
 | `video`     | ffmpeg-next, ndk, objc2       | capture backends, H.264 encode/decode (FFmpeg, MediaCodec, VideoToolbox), frame chunk buffer |
 
 `server` is a library with a thin binary, so tests can drive it;
-`client` is a library the hosts (`desktop`, `android`, `ios`) run. `protocol` and `transport` have no platform dependencies
+`client` is a library the hosts (`desktop`, `android`, `ios`) run;
+`gateway` is a library (`Bot`) with a thin binary too, and knows
+nothing of `client` — it is a second, smaller client of the same
+protocol; its design (the session thread, the wire, the voice sink's
+pacing) is in `crates/gateway/README.md`. `protocol` and `transport` have no platform dependencies
 and build anywhere.
 
 Lints: workspace-wide `clippy::all = deny`, `pedantic = warn`. Keep new

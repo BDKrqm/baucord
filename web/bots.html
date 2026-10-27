@@ -1,0 +1,795 @@
+<!doctype html>
+<!--
+  The bots guide (crates/gateway/README.md, for people who will never
+  open the repository): the music bot that needs nothing installed, a
+  bot of your own through the gateway, and the wire in short. When the
+  gateway's flags, event or action names, or the music bot's commands
+  change, change this page with that README. Same palette and layout
+  as deploy.html; no web fonts, like privacy.html.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/x-icon" href="/img/favicon.ico" />
+    <title>baucord — making a bot</title>
+    <meta
+      name="description"
+      content="Add a bot to your baucord server: a music bot with nothing to install, or one you write in thirty lines of Python. Events, actions, voice, and keeping it running."
+    />
+    <meta name="theme-color" content="#1a1d21" />
+    <style>
+      /* The site's "workbench" palette (index.html). */
+      :root {
+        --paper: #1a1d21;
+        --mist: #222529;
+        --well: #15171a;
+        --ink: #d1d2d3;
+        --slate: #abadb0;
+        --line: rgba(209, 210, 211, 0.12);
+        --cobalt-text: #1d9bd1;
+        --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        --mono: ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
+      }
+      body {
+        background: var(--paper);
+        color: var(--ink);
+        font-family: var(--sans);
+        font-size: 17px;
+        line-height: 1.6;
+        -webkit-text-size-adjust: 100%;
+      }
+      .wrap {
+        max-width: 780px;
+        margin: 0 auto;
+        padding: 0 16px;
+      }
+      header {
+        border-bottom: 1px solid var(--line);
+        padding: 18px 0;
+      }
+      header .wrap {
+        display: flex;
+        gap: 20px;
+        align-items: baseline;
+        flex-wrap: wrap;
+      }
+      header a {
+        color: var(--ink);
+        text-decoration: none;
+      }
+      header .home {
+        font-weight: 700;
+      }
+      header .crumb {
+        color: var(--slate);
+      }
+      main {
+        padding: 40px 0 64px;
+      }
+      h1 {
+        font-size: 2rem;
+        line-height: 1.2;
+        margin-bottom: 12px;
+      }
+      .lede {
+        color: var(--slate);
+        font-size: 1.1rem;
+        margin-bottom: 24px;
+      }
+      h2 {
+        font-size: 1.35rem;
+        margin: 48px 0 12px;
+        padding-top: 8px;
+        scroll-margin-top: 16px;
+      }
+      h3 {
+        font-size: 1.05rem;
+        margin: 26px 0 8px;
+        scroll-margin-top: 16px;
+      }
+      p,
+      ul,
+      ol {
+        margin-bottom: 12px;
+      }
+      ul,
+      ol {
+        padding-left: 24px;
+      }
+      li {
+        margin-bottom: 6px;
+      }
+      li > ul,
+      li > pre {
+        margin-top: 8px;
+      }
+      a {
+        color: var(--cobalt-text);
+      }
+      code {
+        font-family: var(--mono);
+        font-size: 0.88em;
+        background: var(--mist);
+        padding: 1px 5px;
+        border-radius: 4px;
+        overflow-wrap: anywhere;
+      }
+      pre {
+        background: var(--well);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 12px 14px;
+        margin: 8px 0 16px;
+        overflow-x: auto;
+        line-height: 1.5;
+      }
+      pre code {
+        background: none;
+        padding: 0;
+        font-size: 0.85rem;
+        overflow-wrap: normal;
+        white-space: pre;
+      }
+      .toc {
+        background: var(--mist);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 16px 20px 8px;
+        margin-bottom: 8px;
+      }
+      .toc strong {
+        display: block;
+        margin-bottom: 6px;
+      }
+      .toc ol {
+        columns: 2;
+        column-gap: 32px;
+      }
+      @media (max-width: 560px) {
+        .toc ol {
+          columns: 1;
+        }
+      }
+      .note {
+        border-left: 3px solid var(--cobalt-text);
+        padding: 4px 0 4px 14px;
+        margin: 12px 0 16px;
+        color: var(--slate);
+      }
+      .table-scroll {
+        overflow-x: auto;
+        margin: 8px 0 16px;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        min-width: 520px;
+        font-size: 0.95rem;
+      }
+      th,
+      td {
+        text-align: left;
+        vertical-align: top;
+        padding: 9px 10px;
+        border-bottom: 1px solid var(--line);
+      }
+      th {
+        color: var(--slate);
+        font-weight: 600;
+      }
+      footer {
+        border-top: 1px solid var(--line);
+        padding: 20px 0 32px;
+        color: var(--slate);
+        font-size: 0.95rem;
+      }
+      footer a {
+        margin-right: 16px;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="wrap">
+        <a class="home" href="/">baucord</a>
+        <span class="crumb">Making a bot</span>
+      </div>
+    </header>
+
+    <main class="wrap">
+      <h1>Making a bot</h1>
+      <p class="lede">
+        A bot is a program that joins your server as a member of its own:
+        it reads the chat, answers, and plays audio in a voice channel.
+        There is a music bot you can run as it is, and a door for writing
+        your own in any language — thirty lines of Python is a bot.
+      </p>
+
+      <nav class="toc" aria-label="On this page">
+        <strong>On this page</strong>
+        <ol>
+          <li><a href="#what">What a bot is</a></li>
+          <li><a href="#need">What you need</a></li>
+          <li><a href="#music">The music bot</a></li>
+          <li><a href="#own">A bot of your own, in Python</a></li>
+          <li><a href="#wire">What a bot sees and does</a></li>
+          <li><a href="#voice">Playing audio</a></li>
+          <li><a href="#youtube">YouTube and the sites yt-dlp knows</a></li>
+          <li><a href="#rust">In Rust, as one program</a></li>
+          <li><a href="#running">Keeping it running</a></li>
+          <li><a href="#limits">Rules and limits</a></li>
+          <li><a href="#next">What is coming</a></li>
+        </ol>
+      </nav>
+
+      <h2 id="what">What a bot is</h2>
+      <p>
+        To the server a bot is a person with a device: it has its own key,
+        its own name in the roster, and the role its invite code gave it.
+        It can do what that role allows and nothing else — a guest can
+        join channels, speak and write in General, a member can also
+        answer direct messages. There is no bot flag yet
+        (<a href="#next">what is coming</a>), so it shows up like anyone
+        else, and you kick, ban or mute it like anyone else.
+      </p>
+      <p>Two shapes, pick by what you want to do:</p>
+      <ul>
+        <li>
+          <strong>Run the music bot.</strong> One program, nothing to
+          install: it decodes files and audio links itself. People type
+          <code>!play</code> in the chat; it joins their channel and
+          plays.
+        </li>
+        <li>
+          <strong>Write your own.</strong> The server speaks QUIC, a binary
+          format and Ed25519 keys, which is a tax in every language but
+          Rust — so a small program, the <em>gateway</em>, does that part
+          once and hands your bot a WebSocket on the same machine: JSON
+          events in, JSON actions out, raw audio to play. Your bot can be
+          in Python, JavaScript, Go, a shell script with a WebSocket tool
+          — anything.
+        </li>
+      </ul>
+
+      <h2 id="need">What you need</h2>
+      <ul>
+        <li>
+          <strong>A server you can invite to.</strong> Yours, or one whose
+          admin mints you a code (<a href="deploy.html#invites">hosting
+          guide</a>). A guest code is enough for a music bot;
+          <code>--grants member</code> if the bot should answer direct
+          messages.
+        </li>
+        <li>
+          <strong>A computer to run the bot on</strong>, left on: the
+          server's own machine is the usual place, any other works (it
+          connects out to the server's UDP port, like the app).
+        </li>
+        <li>
+          <strong>For now, Rust to build with.</strong> The gateway and the
+          music bot are not in the downloads yet; they build from the
+          <a href="https://github.com/mpwsh/baucord">source</a> with the
+          Rust toolchain (<a href="https://rustup.rs">rustup.rs</a>) and
+          CMake, which the Opus codec needs:
+          <pre><code>git clone https://github.com/mpwsh/baucord
+cd baucord
+cargo build --release -p gateway                   # target/release/baucord-gateway
+cargo build --release -p gateway --example music   # target/release/examples/music</code></pre>
+          <span class="note" style="display: block">
+            With CMake 4 (Homebrew's), set
+            <code>CMAKE_POLICY_VERSION_MINIMUM=3.5</code> in the
+            environment, or the Opus build stops at its old CMakeLists.
+          </span>
+        </li>
+      </ul>
+
+      <h2 id="music">The music bot</h2>
+      <p>
+        The bot is the program <code>music</code> built above. It needs
+        the server's address, a name, a file to keep its key in, and an
+        invite code the first time:
+      </p>
+      <pre><code>./target/release/examples/music --server 203.0.113.5:51000 --name MusicBot \
+    --key musicbot.key --invite K7FQ-2MX9-ABCD --library ~/Music</code></pre>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Flag (environment variable)</th>
+              <th>What</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>--server</code> (<code>BAUCORD_SERVER</code>)</td>
+              <td>The server's address and port, as people type it in the app.</td>
+            </tr>
+            <tr>
+              <td><code>--name</code> (<code>BAUCORD_BOT_NAME</code>, default <code>MusicBot</code>)</td>
+              <td>The bot's name in the roster.</td>
+            </tr>
+            <tr>
+              <td><code>--key</code> (<code>BAUCORD_KEY</code>, default <code>musicbot.key</code>; the gateway's is <code>bot.key</code>)</td>
+              <td>
+                Its identity, created on the first run. <strong>Whoever has
+                this file is the bot</strong>: keep it like a password, and
+                keep it — a new key is a new member needing a new invite.
+              </td>
+            </tr>
+            <tr>
+              <td><code>--invite</code> (<code>BAUCORD_INVITE</code>)</td>
+              <td>
+                An invite code. Needed on the first run only: it links the
+                key, and from then on the key alone logs in. Leaving the
+                flag in place afterwards is harmless.
+              </td>
+            </tr>
+            <tr>
+              <td><code>--pin</code> (<code>BAUCORD_PIN</code>)</td>
+              <td>
+                The server's identity (<code>SHA256:…</code>, printed by
+                the server at start; Settings → Servers in the app).
+                Without it the first connection's identity is trusted and
+                written to a <code>.pin</code> file beside the key
+                (<code>musicbot.key</code> → <code>musicbot.pin</code>),
+                and every later run insists on it — what the app does.
+              </td>
+            </tr>
+            <tr>
+              <td><code>--library</code> (<code>BAUCORD_LIBRARY</code>)</td>
+              <td>
+                The folder <code>!play &lt;file&gt;</code> may read from,
+                and never outside it. Without the flag, links only.
+              </td>
+            </tr>
+            <tr>
+              <td><code>--voice-kbps</code> (<code>BAUCORD_VOICE_KBPS</code>, default 64)</td>
+              <td>Opus bitrate of what it plays, 16–128.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        Its log says who it is, which identity it pinned, when it was
+        admitted, and what it is playing. Then, in the server's chat:
+      </p>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>In General</th>
+              <th>What happens</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>!play song.mp3</code></td>
+              <td>
+                Joins the voice channel you are in and plays the file from
+                the library (a path under it: <code>!play albums/x/03.flac</code>).
+                You have to be in a voice channel; it says so otherwise.
+              </td>
+            </tr>
+            <tr>
+              <td><code>!play https://…/track.mp3</code></td>
+              <td>
+                Plays a <em>direct link to an audio file or stream</em>: an
+                mp3, ogg, flac, m4a or wav somewhere on the web, or an
+                internet radio stream, which plays until <code>!stop</code>.
+                It is fetched as it plays, so there is no waiting for a
+                download.
+              </td>
+            </tr>
+            <tr>
+              <td><code>!play …</code> while something plays</td>
+              <td>Queues it; the bot answers with its place in the line.</td>
+            </tr>
+            <tr>
+              <td><code>!skip</code>, <code>!stop</code>, <code>!queue</code>, <code>!help</code></td>
+              <td>
+                Next track; stop and drop the queue; how many are waiting;
+                the list of commands.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note">
+        A YouTube, Spotify, SoundCloud or Bandcamp link is the <em>page
+        about</em> a track, not the track; the bot says so and plays
+        nothing. Those sites need an extractor that changes monthly, which
+        is <code>yt-dlp</code>'s job — see
+        <a href="#youtube">YouTube and the sites yt-dlp knows</a>.
+      </p>
+      <p>
+        It says little in chat on purpose: the server's chat limit (five
+        lines in five seconds) applies to a bot as to anyone, and a chatty
+        bot loses the lines that matter.
+      </p>
+
+      <h2 id="own">A bot of your own, in Python</h2>
+      <p>
+        Two programs: the gateway, which is the member of the server, and
+        your bot, which talks to the gateway. Start the gateway with the
+        same flags as the music bot (no <code>--library</code>):
+      </p>
+      <pre><code>./target/release/baucord-gateway --server 203.0.113.5:51000 --name HelloBot \
+    --key hellobot.key --invite K7FQ-2MX9-ABCD</code></pre>
+      <p>
+        It listens for your bot on <code>127.0.0.1:8765</code>
+        (<code>--listen</code> to change it; see
+        <a href="#running">keeping it running</a> before you listen on
+        anything but the loopback). Then the bot — this one answers
+        <code>!ping</code> and greets whoever joins. <code>pip install
+        websockets</code>, save it as <code>echo_bot.py</code>, run it:
+      </p>
+      <pre><code>import json
+from websockets.sync.client import connect
+
+with connect("ws://127.0.0.1:8765/") as ws:
+    hello = json.loads(ws.recv())
+    print("gateway", hello["d"]["gateway"], "connected", hello["d"]["connected"])
+    while True:
+        f = json.loads(ws.recv())
+        if f["op"] != "dispatch":
+            continue
+        if f["t"] == "MESSAGE_CREATE" and not f["d"]["own"] and f["d"]["text"] == "!ping":
+            ws.send(json.dumps({"op": "action", "t": "CREATE_MESSAGE", "d": {"text": "pong"}}))
+        if f["t"] == "MEMBER_ADD":
+            ws.send(json.dumps({"op": "action", "t": "CREATE_MESSAGE",
+                                "d": {"text": "hi " + f["d"]["name"]}}))</code></pre>
+      <p>
+        That is the whole shape of a bot: read frames, act on the ones you
+        care about, send actions. Type <code>!ping</code> in the server's
+        chat and the bot answers <code>pong</code>. The bot's own lines
+        come back to it too, marked <code>own</code> — that check is what
+        keeps it from answering itself.
+      </p>
+      <p>
+        The gateway can be left running while you restart the bot as often
+        as you like; the bot's connection to it is the only thing that
+        drops. Several bots may connect to one gateway; they share its one
+        identity and all see every event. One bot per gateway is the
+        normal shape.
+      </p>
+
+      <h2 id="wire">What a bot sees and does</h2>
+      <p>
+        One WebSocket; text frames carry JSON, binary frames carry audio.
+        Every JSON frame is <code>{"op": …, "t": …, "d": {…}}</code>:
+        <code>op</code> is the kind of frame, <code>t</code> its name,
+        <code>d</code> its fields. Numbers that are 64-bit
+        (<code>client_id</code>) travel as strings of digits and user ids
+        as hex strings, so JavaScript keeps every bit; message ids,
+        timestamps (milliseconds) and channel ids are plain numbers.
+      </p>
+      <h3>From the gateway</h3>
+      <p>
+        The first frame is <code>{"op":"hello"}</code>, with the gateway's
+        version, whether it is connected, and the <code>READY</code>
+        fields (below) if it is. Then, as its session comes and goes,
+        <code>{"op":"status"}</code> frames: <code>CONNECTED</code>,
+        <code>DISCONNECTED</code> (with <code>reconnecting</code>),
+        <code>REFUSED</code> (a bad code, a ban),
+        <code>REMOVED</code> (a kick). A frame it could not use comes
+        back as <code>{"op":"error","d":{"message":…}}</code>: unknown
+        JSON, a missing field, an action sent before the session is
+        ready, or a refusal the server answered with words.
+      </p>
+      <h3>Events: <code>{"op":"dispatch","t":…}</code></h3>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th><code>t</code></th>
+              <th>Fields in <code>d</code></th>
+              <th>When</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>READY</code></td>
+              <td>
+                <code>client_id</code>, <code>user_id</code>,
+                <code>permissions</code>, <code>server_name</code>,
+                <code>greeting</code>, <code>channels</code>
+                (<code>id</code>, <code>name</code>,
+                <code>has_password</code>, <code>user_limit</code>),
+                <code>members</code> (<code>client_id</code>,
+                <code>name</code>, <code>channel_id</code>,
+                <code>user_id</code>, <code>roles</code>,
+                <code>level</code>)
+              </td>
+              <td>Admitted, roster received. <code>channel_id</code> is <code>null</code> in the lobby.</td>
+            </tr>
+            <tr>
+              <td><code>MESSAGE_CREATE</code></td>
+              <td>
+                <code>id</code>, <code>ts</code>, <code>client_id</code>,
+                <code>user_id</code>, <code>name</code>,
+                <code>text</code>, <code>conv</code>
+                (<code>"general"</code> or <code>{"dm": user_id}</code>),
+                <code>own</code>, <code>attachment</code> when it is a file
+              </td>
+              <td>A line in General, a direct message to the bot, a file.</td>
+            </tr>
+            <tr>
+              <td><code>MESSAGE_UPDATE</code>, <code>MESSAGE_DELETE</code></td>
+              <td><code>id</code>, <code>text</code> / <code>id</code></td>
+              <td>An edit, a deletion.</td>
+            </tr>
+            <tr>
+              <td><code>MEMBER_ADD</code>, <code>MEMBER_REMOVE</code>, <code>MEMBER_UPDATE</code></td>
+              <td><code>client_id</code>, <code>name</code>, <code>channel_id</code>; what changed</td>
+              <td>Someone connected, left, was renamed or given a role.</td>
+            </tr>
+            <tr>
+              <td><code>VOICE_STATE</code></td>
+              <td><code>client_id</code>, <code>channel_id</code></td>
+              <td>Someone moved channel — the bot too, after <code>JOIN_CHANNEL</code>.</td>
+            </tr>
+            <tr>
+              <td><code>CHANNELS</code>, <code>JOIN_DENIED</code></td>
+              <td><code>channels</code>, <code>memberships</code> / <code>channel_id</code>, <code>reason</code></td>
+              <td>The channel list changed; a join the server refused.</td>
+            </tr>
+            <tr>
+              <td><code>SPEAKING</code>, <code>AUDIO_STATE</code></td>
+              <td><code>client_id</code>, <code>speaking</code> / <code>muted</code>, <code>deafened</code></td>
+              <td>The lights in the roster.</td>
+            </tr>
+            <tr>
+              <td><code>RATE_LIMITED</code></td>
+              <td><code>retry_ms</code></td>
+              <td>The bot wrote too fast; that line was dropped.</td>
+            </tr>
+            <tr>
+              <td><code>HISTORY</code></td>
+              <td><code>conv</code>, <code>messages</code>, <code>more</code></td>
+              <td>The answer to <code>FETCH_HISTORY</code>.</td>
+            </tr>
+            <tr>
+              <td><code>VOICE_REPORT</code></td>
+              <td><code>received</code>, <code>expected</code>, <code>lost</code>, <code>late</code>, <code>rtt_ms</code></td>
+              <td>Every 2 s while the bot plays: what the server got of it.</td>
+            </tr>
+            <tr>
+              <td><code>RESTRICTED</code>, <code>ROLES</code>, <code>MOVED_IDLE</code>, <code>SHARE_START</code>, <code>SHARE_STOP</code></td>
+              <td>…</td>
+              <td>A mute on the bot; the role table; moved to the AFK channel; screen shares (it cannot watch them).</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <h3>Actions: <code>{"op":"action","t":…}</code></h3>
+      <p>
+        Each becomes the message a person's app would send, and the server
+        checks the bot's permissions as it would anyone's.
+      </p>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th><code>t</code></th>
+              <th>Fields in <code>d</code></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>CREATE_MESSAGE</code></td>
+              <td><code>text</code> — a line in General.</td>
+            </tr>
+            <tr>
+              <td><code>CREATE_DM</code></td>
+              <td><code>user_id</code>, <code>text</code>, <code>client_ref</code> (optional; comes back in <code>MESSAGE_ACK</code> or <code>MESSAGE_FAILED</code>).</td>
+            </tr>
+            <tr>
+              <td><code>EDIT_MESSAGE</code>, <code>DELETE_MESSAGE</code></td>
+              <td><code>id</code>, <code>text</code> / <code>id</code> — its own messages.</td>
+            </tr>
+            <tr>
+              <td><code>JOIN_CHANNEL</code></td>
+              <td>
+                <code>channel_id</code>, <code>password</code> (optional).
+                <strong>Audio goes to the channel the bot is in</strong>:
+                join one before playing; the lobby's audio is dropped.
+              </td>
+            </tr>
+            <tr>
+              <td><code>SET_NICKNAME</code>, <code>AUDIO_STATE</code>, <code>SPEAKING</code></td>
+              <td><code>name</code>; <code>muted</code>, <code>deafened</code>; <code>speaking</code> (the light; playing sets it by itself).</td>
+            </tr>
+            <tr>
+              <td><code>FETCH_HISTORY</code>, <code>MARK_READ</code></td>
+              <td><code>conv</code>, <code>before</code>, <code>limit</code> (50, at most 200); <code>conv</code>, <code>id</code>.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        The complete list, with every field, is in the gateway's
+        <a href="https://github.com/mpwsh/baucord/blob/main/crates/gateway/README.md">README</a>.
+        The names follow Discord's where the thing is the same, so a bot
+        written for Discord ports without relearning them.
+      </p>
+
+      <h2 id="voice">Playing audio</h2>
+      <p>
+        A binary frame is sound: 32-bit little-endian floats, 48 kHz,
+        mono, between −1 and 1, any length. The gateway cuts it into 20 ms
+        pieces, encodes them as Opus and sends one every 20 ms, so the bot
+        may push a whole song at once: up to ten seconds ahead, after
+        which its socket waits. That back-pressure is how a decoder's
+        output paces itself to the room — <code>ffmpeg … | bot</code>
+        works out on its own. The speaking light goes on with the first
+        frame and off 200 ms after the last.
+        <code>{"op":"voice","t":"STOP"}</code> drops what is queued.
+      </p>
+      <p>
+        From anything ffmpeg can read, this is the whole conversion;
+        stereo is the bot's to mix down (<code>-ac 1</code>), the apps
+        play mono:
+      </p>
+      <pre><code>ffmpeg -loglevel error -i song.flac -f f32le -ar 48000 -ac 1 -</code></pre>
+      <p>
+        Join the asker's channel first: their <code>channel_id</code> is
+        in <code>READY</code>'s roster, and <code>VOICE_STATE</code>
+        events keep it current. A bot hears nothing yet
+        (<a href="#next">what is coming</a>).
+      </p>
+
+      <h2 id="youtube">YouTube and the sites yt-dlp knows</h2>
+      <p>
+        <code>music_bot.py</code>, next to the echo bot in the
+        <a href="https://github.com/mpwsh/baucord/tree/main/crates/gateway/examples">examples</a>,
+        is the music bot for links the Rust one refuses: <code>!play
+        &lt;url&gt;</code> runs <code>yt-dlp</code>, pipes it through
+        <code>ffmpeg</code> into the gateway, and joins the asker's
+        channel; <code>!stop</code> stops. It needs <code>pip install
+        websockets</code>, <code>yt-dlp</code> and <code>ffmpeg</code>
+        on the path, and a gateway running as above. Its ninety lines
+        are a fair template for any bot that plays something.
+      </p>
+      <p class="note">
+        Why two music bots: an extractor for those sites changes monthly
+        and is a project of its own, which <code>yt-dlp</code> is. The
+        Rust bot stays small and needs nothing installed; the Python one
+        knows every site <code>yt-dlp</code> does, at the price of two
+        more programs to keep updated.
+      </p>
+
+      <h2 id="rust">In Rust, as one program</h2>
+      <p>
+        The gateway is also a library, and the music bot is built on it:
+        no second process, the bot <em>is</em> the member. With the
+        <code>gateway</code> crate as a dependency:
+      </p>
+      <pre><code>use gateway::{bot::Bot, net::Config, wire::{Action, Outbound}};
+
+let bot = Bot::connect(config, 64)?;          // threads of its own; returns at once
+for event in bot.events() {                   // Outbound::Status / Dispatch / Error
+    if let Outbound::Dispatch { t: "MESSAGE_CREATE", d } = &amp;event
+        &amp;&amp; d["text"] == "!ping"
+    {
+        bot.act(Action::CreateMessage { text: "pong".into() });
+    }
+}</code></pre>
+      <p>
+        <code>bot.play(&amp;samples)</code> plays 48 kHz mono floats in the
+        bot's channel and blocks while ten seconds are queued, so a
+        decoder calling it runs at the room's pace;
+        <code>bot.stop_playing()</code> cuts it within a frame;
+        <code>bot.shutdown()</code> says goodbye to the server. Admission,
+        the pin and reconnecting are the gateway's, shared. The music
+        bot's source, <code>crates/gateway/examples/music.rs</code>, is
+        the worked example: decoding with symphonia, resampling with
+        rubato, a queue, and the chat thread.
+      </p>
+
+      <h2 id="running">Keeping it running</h2>
+      <ul>
+        <li>
+          <strong>The key file is the bot.</strong> The gateway writes it
+          readable by its owner only; a bot through the gateway never sees
+          it (it has the WebSocket, not the key). Back it up with the
+          server's; never commit it.
+        </li>
+        <li>
+          <strong>It reconnects by itself</strong> when the link drops,
+          after one second, then doubling up to thirty, and
+          <strong>exits with status 1 when the server says no</strong>: a
+          bad code, a kick, a ban, a server identity that changed without
+          proof. A service manager should not restart it in a loop then —
+          nothing changes until someone acts. Ctrl-C closes the session
+          properly (the server sees a goodbye, not a 30 s timeout).
+        </li>
+        <li>
+          <strong>On the loopback no token is needed</strong>: whoever runs
+          programs on that machine already owns the bot. To listen
+          anywhere else, <code>--token</code> is mandatory (the bot sends
+          <code>Authorization: Bearer …</code> or <code>?token=…</code>),
+          and put TLS in front — the gateway speaks plain
+          <code>ws://</code>. Anyone who reaches the socket <em>is</em>
+          the bot.
+        </li>
+        <li>
+          <strong>With Docker</strong>, the gateway's
+          <code>Dockerfile</code> in <code>crates/gateway</code> builds the
+          same binary on the server image's base; run it beside the server
+          with the key on a volume:
+          <pre><code>docker run -v musicbot:/data -e BAUCORD_SERVER=server:51000 \
+    -e BAUCORD_BOT_NAME=MusicBot -e BAUCORD_KEY=/data/musicbot.key \
+    -e BAUCORD_INVITE=K7FQ-2MX9-ABCD -e BAUCORD_GATEWAY_LISTEN=0.0.0.0:8765 \
+    -e BAUCORD_GATEWAY_TOKEN=… -p 127.0.0.1:8765:8765 baucord-gateway</code></pre>
+        </li>
+      </ul>
+
+      <h2 id="limits">Rules and limits</h2>
+      <ul>
+        <li>
+          <strong>Its permissions are its roles</strong>, checked on the
+          server; nothing the gateway or the bot says changes them. Change
+          them from the admin panel like anyone's.
+        </li>
+        <li>
+          <strong>Chat limits apply</strong>: five lines in five seconds,
+          after which lines are dropped and the bot gets
+          <code>RATE_LIMITED</code>. Answer what matters, not everything.
+        </li>
+        <li>
+          <strong>Audio out only.</strong> A bot plays; it does not hear
+          the room, and it cannot watch a screen share.
+        </li>
+        <li>
+          <strong>Join a channel before playing</strong>; audio sent from
+          the lobby is dropped.
+        </li>
+        <li>
+          <strong>A bot that stops reading its frames is dropped</strong>
+          after 4,096 queued ones rather than buffered without bound; a
+          bot pushing audio faster than the room plays waits on its
+          socket.
+        </li>
+        <li>
+          <strong>No slash commands yet</strong>: a bot reacts to lines in
+          the chat (<code>!play</code>), and everyone sees them.
+        </li>
+      </ul>
+
+      <h2 id="next">What is coming</h2>
+      <p>
+        In this order: a <em>bot</em> role and <code>/bot create</code>,
+        so a bot is marked as one and its code is minted from the app;
+        slash commands with replies only the asker sees; audio in (what
+        the room says, for a recorder or a soundboard that reacts); a way
+        for a bot to opt out of the roster's lights; and the gateway and
+        the music bot in the downloads and the Docker image, so nothing
+        has to be built.
+      </p>
+    </main>
+
+    <footer>
+      <div class="wrap">
+        <a href="/">baucord</a>
+        <a href="deploy.html">Hosting a server</a>
+        <a href="privacy.html">Privacy</a>
+        <a href="terms.html">Terms</a>
+        <a href="https://github.com/mpwsh/baucord">Source</a>
+      </div>
+    </footer>
+  </body>
+</html>

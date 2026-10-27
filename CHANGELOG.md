@@ -40,6 +40,15 @@ The 1.3.0 that was next became this.
   Run live against a real server: a 6 s file lights the bot's speaking
   light for 6.2 s, a queued track follows by itself, `!skip` starts
   the next within 30 ms, `!stop` goes quiet within 0.2 s.
+  A link to a YouTube, Spotify, SoundCloud or Bandcamp page — the
+  page about a track, not the track — gets a line saying so and what
+  the bot does play, instead of a decoder error after a megabyte of
+  HTML (the first live test tried all four).
+- **A bots guide on the website**, `baucord.com/bots.html`, in the
+  hosting guide's shape: the music bot and its commands, a bot of your
+  own in thirty lines of Python, what a bot sees and does, playing
+  audio, keeping it running, the rules, and what is coming. Linked
+  from the front page in all three languages.
 
 ### Before you update a server
 
