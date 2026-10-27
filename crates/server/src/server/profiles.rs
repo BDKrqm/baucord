@@ -11,7 +11,8 @@
 //! and in memory for the run when it is off. Files as cards ride the
 //! same messages later.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use log::{debug, info, warn};
 use protocol::{
@@ -20,10 +21,8 @@ use protocol::{
 };
 
 use super::{fold_upload, ChatServer, Folded, Waiting};
-use crate::{
-    persistence::{Answer, BlobRecord, Command, Outcome, Query},
-    policy::{BlobMeta, Restriction},
-};
+use crate::persistence::{Answer, BlobRecord, Command, Outcome, Query};
+use crate::policy::{BlobMeta, Restriction};
 
 /// One profile change (and one rename) per this long, per user.
 pub(super) const PROFILE_RATE: Duration = Duration::from_secs(30);
@@ -224,7 +223,7 @@ impl ChatServer {
     fn deny_profile(&mut self, client: ClientId, reason: ProfileDenyReason) {
         info!(
             "{} ({client:#x}) profile refused: {}",
-            self.get_username(client),
+            self.username_of(client),
             reason.describe()
         );
         self.send_msg(client, &ServerMessage::ProfileDenied { reason });
@@ -340,7 +339,7 @@ impl ChatServer {
             );
             return;
         }
-        let old = self.get_username(client);
+        let old = self.username_of(client);
         info!("[{old}] is now [{name}]");
         for c in &own_sessions {
             self.usernames.insert(*c, name.clone());
@@ -530,7 +529,7 @@ impl ChatServer {
         } else {
             info!(
                 "[{}] uploaded a {} blob ({} KB)",
-                self.get_username(client),
+                self.username_of(client),
                 sniffed,
                 bytes.len() / 1024
             );
@@ -560,7 +559,7 @@ impl ChatServer {
     fn reject_upload(&mut self, client: ClientId, upload_id: u32, reason: UploadRejectReason) {
         debug!(
             "upload {upload_id} from {} rejected: {}",
-            self.get_username(client),
+            self.username_of(client),
             reason.describe()
         );
         self.send_msg(client, &ServerMessage::UploadRejected { upload_id, reason });

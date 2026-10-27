@@ -15,17 +15,14 @@
 
 use std::time::Instant;
 
-use x11rb::{
-    connection::{Connection as _, RequestConnection as _},
-    protocol::{
-        damage::{self, ConnectionExt as _, ReportLevel},
-        xproto::{ConnectionExt as _, ImageFormat, ImageOrder, Window},
-        Event,
-    },
-    rust_connection::RustConnection,
-};
+use x11rb::connection::{Connection as _, RequestConnection as _};
+use x11rb::protocol::damage::{self, ConnectionExt as _, ReportLevel};
+use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat, ImageOrder, Window};
+use x11rb::protocol::Event;
+use x11rb::rust_connection::RustConnection;
 
-use crate::{capture::CaptureStatus, CaptureError, Frame, PixelFormat};
+use crate::capture::CaptureStatus;
+use crate::{CaptureError, Frame, PixelFormat};
 
 /// Is this an X11 session (and not Wayland, whose `XWayland` root window
 /// shows only X clients)? Mirrors xcap's own test, which decides
@@ -221,10 +218,8 @@ impl Drop for X11Capturer {
 
 #[cfg(test)]
 mod tests {
-    use x11rb::{
-        protocol::xproto::{ChangeGCAux, CreateGCAux, Rectangle},
-        wrapper::ConnectionExt as _,
-    };
+    use x11rb::protocol::xproto::{ChangeGCAux, CreateGCAux, Rectangle};
+    use x11rb::wrapper::ConnectionExt as _;
 
     use super::*;
 

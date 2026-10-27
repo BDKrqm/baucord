@@ -12,21 +12,17 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use log::{info, warn};
-use protocol::{
-    admin::{
-        AdminCommand, AdminError, AdminOutcome, AdminTarget, InviteSummary, KeySummary,
-        RestrictionSummary, UserSummary,
-    },
-    permissions::{self, RoleId},
-    ClientId, RemovedKind, RestrictionKind, RoleInfo, ServerMessage, UserId,
+use protocol::admin::{
+    AdminCommand, AdminError, AdminOutcome, AdminTarget, InviteSummary, KeySummary,
+    RestrictionSummary, UserSummary,
 };
+use protocol::permissions::{self, RoleId};
+use protocol::{ClientId, RemovedKind, RestrictionKind, RoleInfo, ServerMessage, UserId};
 
 use super::{hex, ChatServer};
-use crate::{
-    clock::WallMs,
-    persistence::Command,
-    policy::{KeyRecord, Policy, Restriction},
-};
+use crate::clock::WallMs;
+use crate::persistence::Command;
+use crate::policy::{KeyRecord, Policy, Restriction};
 
 /// What a restriction of each kind subtracts (spec §4.2).
 fn permission_removed_by(kind: RestrictionKind) -> u64 {
@@ -96,7 +92,7 @@ impl ChatServer {
             .map_or((None, String::new()), |r| (r.until, r.reason.clone()));
         info!(
             "{} ({client:#x}) refused: no {} ({})",
-            self.get_username(client),
+            self.username_of(client),
             kind.name(),
             if reason.is_empty() {
                 "not in their roles"
@@ -407,7 +403,7 @@ impl ChatServer {
             .and_then(|a| {
                 self.sessions_of(&a)
                     .first()
-                    .map(|c| self.get_username(*c))
+                    .map(|c| self.username_of(*c))
                     .or_else(|| self.policy.users.get(&a).map(|u| u.name.clone()))
             })
             .unwrap_or_else(|| "server".to_string())
@@ -437,7 +433,7 @@ impl ChatServer {
                 Err(AdminError::NoPermission)
             }
         };
-        let actor_name = self.get_username(client);
+        let actor_name = self.username_of(client);
         info!("{actor_name} ({client:#x}) admin: {command:?}");
         if let Some(result) = self.handle_panel_command(actor, perms, &command) {
             return result;

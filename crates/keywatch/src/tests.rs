@@ -1,7 +1,8 @@
 //! The watch loop against a scripted keyboard: what it reports, and
 //! how long it asks to sleep before it reads again.
 
-use std::{cell::RefCell, collections::VecDeque};
+use std::cell::RefCell;
+use std::collections::VecDeque;
 
 use super::*;
 

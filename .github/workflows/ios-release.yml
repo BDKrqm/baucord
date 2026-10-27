@@ -33,8 +33,20 @@ jobs:
   licenses:
     uses: ./.github/workflows/licenses.yml
 
+  # The checks (format, lints, tests) before the Mac runner starts:
+  # nothing is attached or sent to TestFlight from a commit that failed
+  # them (review 2026-10-27, P1-4). The upload needs the archive, so
+  # the build waits for the checks rather than running beside them; a
+  # dry run (no tag, no TestFlight) skips them.
+  check:
+    if: ${{ github.event_name == 'release' || startsWith(github.event.inputs.tag, 'v') || github.event.inputs.testflight == 'true' }}
+    uses: ./.github/workflows/pr-check.yaml
+
   ipa:
-    needs: licenses
+    # `!cancelled()`: a dry run skips the check and still builds; a
+    # failed check stops the build.
+    needs: [licenses, check]
+    if: ${{ !cancelled() && needs.licenses.result == 'success' && (needs.check.result == 'success' || needs.check.result == 'skipped') }}
     runs-on: macos-26
     timeout-minutes: 120
     env:

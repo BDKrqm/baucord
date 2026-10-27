@@ -9,24 +9,16 @@
 //! No display (Wayland without Xwayland) and [`open`] fails. No
 //! `XInput2` and the state is read on a clock.
 
-use std::{
-    io::{Read as _, Write as _},
-    os::{
-        fd::{AsRawFd as _, RawFd},
-        unix::net::UnixStream,
-    },
-    time::{Duration, Instant},
-};
+use std::io::{Read as _, Write as _};
+use std::os::fd::{AsRawFd as _, RawFd};
+use std::os::unix::net::UnixStream;
+use std::time::{Duration, Instant};
 
-use x11rb::{
-    connection::Connection as _,
-    protocol::{
-        xinput::{ConnectionExt as _, EventMask, XIEventMask},
-        xproto::ConnectionExt as _,
-        Event,
-    },
-    rust_connection::RustConnection,
-};
+use x11rb::connection::Connection as _;
+use x11rb::protocol::xinput::{ConnectionExt as _, EventMask, XIEventMask};
+use x11rb::protocol::xproto::ConnectionExt as _;
+use x11rb::protocol::Event;
+use x11rb::rust_connection::RustConnection;
 
 use crate::{Interest, Kick, Modifier, Source, Woke};
 

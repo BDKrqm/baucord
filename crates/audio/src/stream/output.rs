@@ -43,25 +43,19 @@
 //! (review P1-4), and on a device not at 48 kHz it held a backlog for
 //! good (PRODUCTION-PLAN.md CLI-14).
 
-use std::sync::{
-    atomic::{AtomicBool, AtomicU32, Ordering},
-    Arc,
-};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
 
 use audioadapter_buffers::direct::SequentialSliceOfVecs;
-use cpal::{
-    traits::{DeviceTrait, HostTrait, StreamTrait},
-    Device, SampleFormat, Stream, SupportedStreamConfig,
-};
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{Device, SampleFormat, Stream, SupportedStreamConfig};
 use dasp_sample::{FromSample, Sample as DaspSample, ToSample};
 use log::{error, info};
 use rtrb::{Consumer, Producer, RingBuffer};
 use rubato::{Async, FixedAsync, Resampler};
 
-use crate::{
-    stream::pace::{PacedReader, Pacing},
-    OPUS_SAMPLE_RATE,
-};
+use crate::stream::pace::{PacedReader, Pacing};
+use crate::OPUS_SAMPLE_RATE;
 
 /// Stereo.
 const CHANNELS: usize = 2;

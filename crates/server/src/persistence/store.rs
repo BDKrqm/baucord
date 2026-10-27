@@ -5,28 +5,25 @@
 //! Everything here is called from the persistence thread or from a CLI
 //! subcommand — never from the relay tick (spec §0, rule 1).
 
-use std::{
-    collections::{BTreeSet, HashMap},
-    fs::{self, File},
-    io,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::collections::{BTreeSet, HashMap};
+use std::fs::{self, File};
+use std::io;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use log::{info, warn};
-use protocol::{permissions::BUILTIN_ROLES, UserId};
+use protocol::permissions::BUILTIN_ROLES;
+use protocol::UserId;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, MAIN_DB};
 
 use super::{
     AuditRow, BlobRecord, ConvKey, MessageRow, PersistError, ProgressDelta, ReportRow,
     ReportedMessage, TelemetryEventRow, TelemetryRow,
 };
-use crate::{
-    clock::WallMs,
-    policy::{
-        BlobMeta, InviteRecord, KeyRecord, Policy, Restriction, RestrictionKind, RoleRecord,
-        UserChannelRecord, UserRecord,
-    },
+use crate::clock::WallMs;
+use crate::policy::{
+    BlobMeta, InviteRecord, KeyRecord, Policy, Restriction, RestrictionKind, RoleRecord,
+    UserChannelRecord, UserRecord,
 };
 
 /// The general chat is conversation 1 (spec §6).

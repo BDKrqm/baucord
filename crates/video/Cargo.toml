@@ -15,16 +15,22 @@ thiserror.workspace = true
 # whose constructors fail cleanly (see src/capture.rs, src/codec_stub.rs);
 # the pure types, traits and jitter buffer compile on every target.
 # Vendored DXGI capture (src/dxgi.rs). Same windows-crate version as
-# xcap so the two coexist without duplicate windows-sys trees.
+# xcap so the two coexist without duplicate windows-sys trees. The
+# `Wdk`, `Security` and `Threading` features are the GPU scheduling
+# priority's (src/gpu_priority.rs, 1.4.0): the D3DKMT call, and the
+# token privilege its realtime class needs.
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true, features = [
+    "Wdk_Graphics_Direct3D",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
+    "Win32_Security",
     "Win32_System_Com",
+    "Win32_System_Threading",
 ] }
 
 # Android decodes through the platform's MediaCodec (src/mediacodec.rs,

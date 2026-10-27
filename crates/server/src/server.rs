@@ -17,24 +17,21 @@
 //! deadline. Wall time comes from a [`Clock`] anchored to the tick's
 //! `Instant`, so the simulator's fake clock advances it too.
 
-use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    net::{IpAddr, SocketAddr},
-    path::PathBuf,
-    time::{Duration, Instant, SystemTime},
-};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
+use std::time::{Duration, Instant, SystemTime};
 
 use log::{debug, info, warn};
+use protocol::permissions::{self, RoleId, RANK_ADMIN, RANK_GUEST, ROLE_ADMIN};
 use protocol::{
-    features,
-    permissions::{self, RoleId, RANK_ADMIN, RANK_GUEST, ROLE_ADMIN},
-    AdminCommand, Auth, ChannelDenyReason, ChannelInfo, ChatMessage, ClientId, ClientKeyProof,
-    ClientMessage, DenyReason, InviteDenyReason, InviteInvalidReason, Lane, NeedInviteReason,
-    RefusedReason, RemovedKind, RestrictionKind, ServerMessage, ShareScope, TelemetryEvent,
-    TelemetrySample, UserId,
+    features, AdminCommand, Auth, ChannelDenyReason, ChannelInfo, ChatMessage, ClientId,
+    ClientKeyProof, ClientMessage, DenyReason, InviteDenyReason, InviteInvalidReason, Lane,
+    NeedInviteReason, RefusedReason, RemovedKind, RestrictionKind, ServerMessage, ShareScope,
+    TelemetryEvent, TelemetrySample, UserId,
 };
+use transport::identity::{verify_ed25519, CLIENT_AUTH_EXPORTER_BYTES, CLIENT_AUTH_EXPORTER_LABEL};
 use transport::{
-    identity::{verify_ed25519, CLIENT_AUTH_EXPORTER_BYTES, CLIENT_AUTH_EXPORTER_LABEL},
     Budget, DisconnectReason, Driver, DriverHost, Event, Fingerprint, LinkStats, ServerIdentity,
     Shared, WaitingRoom,
 };
@@ -48,21 +45,20 @@ mod moderation;
 mod profiles;
 mod safety;
 
-use crate::{
-    clock::{Clock, WallMs},
-    config::{channel_infos_of, validate_channel_list, ChannelSettings, Config},
-    link_stats::VoiceWindow,
-    persistence::{
-        AskId, AuditRow, Command, MessageRow, Notice, Persist, ProgressDelta, TelemetryEventRow,
-        TelemetryRow, GENERAL_CONV,
-    },
-    policy::{
-        self, InviteRecord, KeyHash, KeyLookup, Policy, Restriction, BOOTSTRAP_INVITE_TTL_MS,
-        DEFAULT_INVITE_TTL_MS,
-    },
-    relay::{ShareInfo, VideoRelay, VoiceRelay},
-    server::{dms::PendingDm, profiles::AnnouncedUpload},
+use crate::clock::{Clock, WallMs};
+use crate::config::{channel_infos_of, validate_channel_list, ChannelSettings, Config};
+use crate::link_stats::VoiceWindow;
+use crate::persistence::{
+    AskId, AuditRow, Command, MessageRow, Notice, Persist, ProgressDelta, TelemetryEventRow,
+    TelemetryRow, GENERAL_CONV,
 };
+use crate::policy::{
+    self, InviteRecord, KeyHash, KeyLookup, Policy, Restriction, BOOTSTRAP_INVITE_TTL_MS,
+    DEFAULT_INVITE_TTL_MS,
+};
+use crate::relay::{ShareInfo, VideoRelay, VoiceRelay};
+use crate::server::dms::PendingDm;
+use crate::server::profiles::AnnouncedUpload;
 
 /// Announced share dimensions must fall in this range (per-chunk
 /// dimensions are additionally validated by the shared header parser).
@@ -1412,7 +1408,7 @@ impl ChatServer {
         }
         info!(
             "{} ({client:#x}) removed ({kind:?}) by {by}: {reason}",
-            self.get_username(client)
+            self.username_of(client)
         );
         self.send_msg(
             client,
@@ -1740,14 +1736,14 @@ impl ChatServer {
             Folded::Malformed => {
                 warn!(
                     "Dropping malformed image chunk from {} (count {count}, index {index})",
-                    self.get_username(client_id),
+                    self.username_of(client_id),
                 );
                 return;
             }
             Folded::Oversized(bytes) => {
                 warn!(
                     "Dropping oversized image upload from {} ({} KB and counting)",
-                    self.get_username(client_id),
+                    self.username_of(client_id),
                     bytes / 1024,
                 );
                 return;
@@ -1766,7 +1762,7 @@ impl ChatServer {
             warn!(
                 "Dropping non-PNG/JPEG/GIF chat image ({} bytes) from {}",
                 image.len(),
-                self.get_username(client_id),
+                self.username_of(client_id),
             );
             return;
         }
@@ -1781,7 +1777,7 @@ impl ChatServer {
             seen => {
                 warn!(
                     "Dropping a chat image from {} that no client would show: {seen:?}",
-                    self.get_username(client_id),
+                    self.username_of(client_id),
                 );
                 return;
             }
@@ -1791,7 +1787,7 @@ impl ChatServer {
         }
         info!(
             "[{}] sent an image ({} KB)",
-            self.get_username(client_id),
+            self.username_of(client_id),
             image.len() / 1024,
         );
         self.stats.messages_count += 1;
@@ -1955,7 +1951,7 @@ impl ChatServer {
         {
             debug!(
                 "Ignoring log upload from {}: one per {} minutes",
-                self.get_username(client_id),
+                self.username_of(client_id),
                 LOG_UPLOAD_MIN_INTERVAL.as_secs() / 60
             );
             self.log_uploads.remove(&client_id);
@@ -1979,13 +1975,13 @@ impl ChatServer {
             Folded::Malformed | Folded::Oversized(_) => {
                 warn!(
                     "Dropping malformed or oversized log upload from {}",
-                    self.get_username(client_id)
+                    self.username_of(client_id)
                 );
                 return;
             }
         };
         self.last_log_upload.insert(client_id, self.now);
-        let username = self.get_username(client_id);
+        let username = self.username_of(client_id);
         let dir = PathBuf::from(&self.config.identity.dir).join("logs");
         let stamp = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -2127,7 +2123,7 @@ impl ChatServer {
     /// `UserMovedChannel` still goes to it alone: the others have the
     /// room from the join.
     fn announce(&mut self, client_id: ClientId, channel_id: u16) {
-        let username = self.get_username(client_id);
+        let username = self.username_of(client_id);
         self.broadcast_msg_except(
             client_id,
             &ServerMessage::UserJoined {
@@ -2365,7 +2361,7 @@ impl ChatServer {
                 }
                 let text =
                     protocol::truncate_on_char_boundary(&text, self.config.limits.max_chat_bytes);
-                let username = self.get_username(client_id);
+                let username = self.username_of(client_id);
                 info!("[{username}]: {text}");
                 self.stats.messages_count += 1;
                 self.note_activity(client_id);
@@ -2540,7 +2536,7 @@ impl ChatServer {
                 if !self.video.is_sharing(client_id) {
                     return;
                 }
-                let username = self.get_username(client_id);
+                let username = self.username_of(client_id);
                 info!("{username} stopped screen share");
                 self.video
                     .stop_sharing(&mut self.driver, self.now, client_id);
@@ -2611,7 +2607,7 @@ impl ChatServer {
                     Ok((code, invite)) => {
                         info!(
                             "{} ({client_id:#x}) created invite {code} (role {role})",
-                            self.get_username(client_id)
+                            self.username_of(client_id)
                         );
                         ServerMessage::InviteCreated {
                             code,
@@ -2665,7 +2661,7 @@ impl ChatServer {
                 if self.config.logging.telemetry {
                     info!(
                         "telemetry: {} ({client_id:#x}): {}",
-                        self.get_username(client_id),
+                        self.username_of(client_id),
                         summarize_telemetry(&sample)
                     );
                 }
@@ -2693,7 +2689,7 @@ impl ChatServer {
                 }
                 info!(
                     "telemetry event: {} ({client_id:#x}): {}",
-                    self.get_username(client_id),
+                    self.username_of(client_id),
                     describe_event(&event)
                 );
                 if self.persist.is_persistent()
@@ -2793,7 +2789,7 @@ impl ChatServer {
         // evict out-of-channel viewers, exactly like a channel move.
         let previous_scope = self.video.share_info(client_id).map(|info| info.scope);
 
-        let username = self.get_username(client_id);
+        let username = self.username_of(client_id);
         info!("{username} started screen share ({width}x{height}, {scope:?})");
         self.video.start_sharing(
             client_id,
@@ -3108,7 +3104,7 @@ impl ChatServer {
         {
             info!(
                 "{} denied joining '{}': bad or missing password",
-                self.get_username(client_id),
+                self.username_of(client_id),
                 target.name,
             );
             self.deny_join(client_id, channel_id, ChannelDenyReason::WrongPassword);
@@ -3133,7 +3129,7 @@ impl ChatServer {
         }
         info!(
             "{} moved to channel '{}'",
-            self.get_username(client_id),
+            self.username_of(client_id),
             self.channel_infos
                 .get(usize::from(channel_id))
                 .map_or("?", |c| c.name.as_str()),
@@ -3407,7 +3403,7 @@ impl ChatServer {
                     .get(&client_id)
                     .copied()
                     .unwrap_or_default();
-                let username = self.get_username(client_id);
+                let username = self.username_of(client_id);
                 let tx_kbit = (stats.bytes_tx.saturating_sub(base.bytes_tx)) as f64 * 8.0
                     / 1000.0
                     / interval_secs;
@@ -3470,7 +3466,7 @@ impl ChatServer {
 
     // ── Utilities ───────────────────────────────────────────────────
 
-    fn get_username(&self, client_id: ClientId) -> String {
+    fn username_of(&self, client_id: ClientId) -> String {
         self.usernames
             .get(&client_id)
             .cloned()
@@ -3503,7 +3499,7 @@ impl ChatServer {
 
         for client_id in self.clients() {
             if let Some(stats) = self.driver.stats(client_id) {
-                let username = self.get_username(client_id);
+                let username = self.username_of(client_id);
                 info!(
                     "  {username} ({client_id:#x}): rtt {} ms, cwnd {} KB, lost {}/{} pkt, tx {:.2} MB, rx {:.2} MB, groups behind {}/{} (superseded {}, deadline {}, unacked {}, upstream {})",
                     stats.rtt.as_millis(),
@@ -3774,7 +3770,8 @@ mod wake_tests {
     use transport::ServerIdentity;
 
     use super::{ChatServer, ASK_POLL, MAX_IDLE_WAIT};
-    use crate::{config::Config, persistence::Query};
+    use crate::config::Config;
+    use crate::persistence::Query;
 
     /// An idle server sleeps until its next periodic job, not on a
     /// millisecond tick; a database read out shortens the sleep to the

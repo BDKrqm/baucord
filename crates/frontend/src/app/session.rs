@@ -411,8 +411,34 @@ impl AppState {
                 } else {
                     client::ShareScope::Channel
                 },
+                encoder: self.share_encoder(),
+                gpu_priority: self.settings.share.gpu_priority,
             })
             .ok();
+    }
+
+    /// The Stream tab's encoder choice; a key this version does not
+    /// know is automatic.
+    pub(crate) fn share_encoder(&self) -> video::EncoderPreference {
+        video::EncoderPreference::from_key(&self.settings.share.encoder).unwrap_or_default()
+    }
+
+    /// A Stream tab control changed (1.4.0): the running share follows
+    /// what it can, and the page's Close knows to put the share
+    /// settings back.
+    pub(crate) fn stream_edited(&mut self) {
+        crate::settingsui::note_stream_edited(self);
+        self.apply_share_live();
+    }
+
+    /// What a running share follows at once from Settings → Stream:
+    /// the pointer (from its next frame) and the GPU priority. The
+    /// picture and the encoder are the next share's.
+    pub(crate) fn apply_share_live(&mut self) {
+        video::capture::set_pointer_shown(self.settings.share.pointer);
+        if self.screen.shared.is_sharing.load(Ordering::Relaxed) {
+            video::gpu_priority::request(self.settings.share.gpu_priority);
+        }
     }
 
     /// Open the share picker, pre-filled with the last-used settings.

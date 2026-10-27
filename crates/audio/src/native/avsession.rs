@@ -14,14 +14,14 @@
 //!   resetting — turned into the stream-failed flags `VoiceChat::service`
 //!   already reopens on. cpal's own streams handle these themselves.
 
-use std::{
-    ptr::NonNull,
-    sync::{atomic::Ordering, Arc},
-};
+use std::ptr::NonNull;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use block2::RcBlock;
 use log::{debug, info, warn};
-use objc2::{rc::Retained, runtime::ProtocolObject};
+use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
 use objc2_avf_audio::{
     AVAudioSession, AVAudioSessionCategoryOptions, AVAudioSessionCategoryPlayAndRecord,
     AVAudioSessionInterruptionNotification, AVAudioSessionInterruptionType,
@@ -36,10 +36,8 @@ use objc2_foundation::{
     NSNotification, NSNotificationCenter, NSNumber, NSObjectProtocol, NSString,
 };
 
-use crate::{
-    aec::{self, ApplePort, OutputKind},
-    stats::AudioStats,
-};
+use crate::aec::{self, ApplePort, OutputKind};
+use crate::stats::AudioStats;
 
 /// The host's category options (`crates/ios/src/session.rs`), set again
 /// with the mode: the loudspeaker rather than the earpiece, a Bluetooth
@@ -94,12 +92,14 @@ pub fn set_voice_mode(voice: bool) {
 pub fn prefer_voice_io() {
     // SAFETY: the shared session; plain setters.
     let session = unsafe { AVAudioSession::sharedInstance() };
+    // SAFETY: a setter on the shared session obtained above; a plain value.
     if let Err(e) = unsafe { session.setPreferredSampleRate_error(48_000.0) } {
         debug!(
             "audio session: preferred rate: {}",
             e.localizedDescription()
         );
     }
+    // SAFETY: as above, a plain setter on the shared session.
     if let Err(e) = unsafe { session.setPreferredIOBufferDuration_error(0.01) } {
         debug!(
             "audio session: preferred buffer: {}",
@@ -115,6 +115,7 @@ pub fn prefer_voice_io() {
 pub fn prefer_quiet_io() {
     // SAFETY: the shared session; a plain setter.
     let session = unsafe { AVAudioSession::sharedInstance() };
+    // SAFETY: a plain setter on the shared session obtained above.
     if let Err(e) = unsafe { session.setPreferredIOBufferDuration_error(0.1) } {
         debug!(
             "audio session: preferred buffer: {}",
@@ -130,6 +131,8 @@ pub fn prefer_quiet_io() {
 pub fn end_call() {
     // SAFETY: the shared session; no stream of ours is running.
     let session = unsafe { AVAudioSession::sharedInstance() };
+    // SAFETY: deactivating the shared session obtained above, with a
+    // documented option; no stream of ours is running.
     if let Err(e) = unsafe {
         session.setActive_withOptions_error(
             false,
@@ -145,6 +148,7 @@ pub fn end_call() {
 pub fn activate() {
     // SAFETY: the shared session.
     let session = unsafe { AVAudioSession::sharedInstance() };
+    // SAFETY: activating the shared session obtained above.
     if let Err(e) = unsafe { session.setActive_error(true) } {
         warn!("audio session: activate: {}", e.localizedDescription());
     }
@@ -183,6 +187,8 @@ fn port_of(kind: &NSString) -> ApplePort {
 fn outputs() -> Vec<(ApplePort, String)> {
     // SAFETY: the shared session; reading its current route.
     let route = unsafe { AVAudioSession::sharedInstance().currentRoute() };
+    // SAFETY: `route` is the description the session just returned; its
+    // outputs are read, not changed.
     let outputs = unsafe { route.outputs() };
     outputs
         .iter()
@@ -224,6 +230,8 @@ pub fn keep_loudspeaker() {
     // SAFETY: the shared session; a documented override for
     // `PlayAndRecord`.
     let session = unsafe { AVAudioSession::sharedInstance() };
+    // SAFETY: a documented override on the shared session obtained above,
+    // with a framework constant.
     match unsafe { session.overrideOutputAudioPort_error(AVAudioSessionPortOverride::Speaker) } {
         Ok(()) => info!("audio session: the call went to the earpiece; back to the loudspeaker"),
         Err(e) => warn!(

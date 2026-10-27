@@ -6,7 +6,9 @@
 //! a deployment to disagree with every client. What remains configurable
 //! is genuinely deployment-specific: addresses, capacity, limits, auth.
 
-use std::{fs, net::SocketAddr, path::Path};
+use std::fs;
+use std::net::SocketAddr;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 

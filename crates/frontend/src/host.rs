@@ -14,10 +14,8 @@
 //! thread and calls `on_pick` there; callers hop back to the UI with
 //! `slint::invoke_from_event_loop` themselves.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::OnceLock,
-};
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use i18n::t;
 

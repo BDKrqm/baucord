@@ -18,20 +18,19 @@
 //! directly. (The audio route lives with the audio engine:
 //! `audio/src/native/android.rs`.)
 
-use std::{ffi::c_void, sync::OnceLock};
+use std::ffi::c_void;
+use std::sync::OnceLock;
 
+use jni::errors::Result as JniResult;
+use jni::objects::{JObject, JObjectArray, JString};
+use jni::sys::jobject;
 #[cfg(feature = "app")]
 use jni::{
     errors::LogErrorAndDefault,
     objects::{JClass, JValue},
     refs::Reference,
 };
-use jni::{
-    errors::Result as JniResult,
-    objects::{JObject, JObjectArray, JString},
-    sys::jobject,
-    Env, JavaVM,
-};
+use jni::{Env, JavaVM};
 
 /// `PackageManager.PERMISSION_GRANTED`.
 const PERMISSION_GRANTED: i32 = 0;
@@ -461,11 +460,9 @@ pub fn pick_file(mime: &str, max_bytes: u64) -> Result<(), String> {
 /// What `MediaStore` or the write said, or any JNI failure, as text.
 #[cfg(feature = "app")]
 pub fn save_download(name: &str, mime: &str, bytes: &[u8]) -> Result<(String, String), String> {
-    use std::{
-        fs::File,
-        io::Write as _,
-        os::fd::{FromRawFd as _, RawFd},
-    };
+    use std::fs::File;
+    use std::io::Write as _;
+    use std::os::fd::{FromRawFd as _, RawFd};
 
     let reply = with_activity(|env, activity| {
         let jname = env.new_string(name)?;

@@ -10,6 +10,8 @@
 /// Codes are 12 characters from an alphabet without `0/O/1/l/I`, so
 /// they survive being read out loud on voice. 31¹² ≈ 2⁵⁹.
 pub const CODE_LEN: usize = 12;
+/// The characters a code is made of: no `0`/`O`, `1`/`l`/`I`, so a code
+/// read out loud is typed back right.
 pub const ALPHABET: &[u8; 31] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 
 /// Canonical form of a code as a person typed or read it: uppercase,

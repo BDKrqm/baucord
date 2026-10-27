@@ -30,13 +30,9 @@
 //! first callbacks before that play or drop silence), so a refusal at
 //! either step hands the ring back untouched for the cpal fallback.
 
-use std::{
-    slice,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-};
+use std::slice;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use crossbeam_channel::{bounded, Receiver};
 use log::{info, warn};
@@ -47,14 +43,14 @@ use ndk::audio::{
 };
 use rtrb::{Consumer, Producer};
 
-use super::{
-    android::{self, EchoCanceller, EchoEffect},
-    pump::{CapturePump, RenderPump},
-    CaptureStartError, RenderStartError,
-};
-use crate::{
-    aec::reasons, input_config::InputConfig, latch::Ring, stats::AudioStats, OPUS_SAMPLE_RATE,
-};
+use super::android::{self, EchoCanceller, EchoEffect};
+use super::pump::{CapturePump, RenderPump};
+use super::{CaptureStartError, RenderStartError};
+use crate::aec::reasons;
+use crate::input_config::InputConfig;
+use crate::latch::Ring;
+use crate::stats::AudioStats;
+use crate::OPUS_SAMPLE_RATE;
 
 /// An open, started `AAudio` stream; stops and closes on drop.
 struct Running(AudioStream);

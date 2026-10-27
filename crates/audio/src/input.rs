@@ -23,40 +23,30 @@
 //! capture → encoder and capture → self-monitor hand-offs allocate nothing
 //! per frame, and the ring buffer is read in chunks, not sample by sample.
 
-use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    thread,
-    time::Duration,
-};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 use audioadapter_buffers::direct::SequentialSliceOfVecs;
-use cpal::{
-    traits::{DeviceTrait, HostTrait, StreamTrait},
-    Device, SampleFormat, Stream, StreamConfig, SupportedStreamConfig,
-};
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{Device, SampleFormat, Stream, StreamConfig, SupportedStreamConfig};
 use crossbeam_channel::{Sender, TrySendError};
 use dasp_sample::{FromSample, Sample as DaspSample, ToSample};
 use log::{error, info};
 use rtrb::{Consumer, Producer, RingBuffer};
 use rubato::{Async, Resampler};
 
-use crate::{
-    input_config::InputConfig,
-    latch::{Ring, Wait},
-    processor::{
-        agc::AutoGainControl,
-        compressor::Compressor,
-        gate::NoiseGate,
-        speaking::{SpeakingFlag, SpeakingIndicator},
-        FrameContext, InputChain,
-    },
-    resampler::build_input_resampler,
-    stats::AudioStats,
-    PcmFrame, FRAME_SIZE, OPUS_SAMPLE_RATE,
-};
+use crate::input_config::InputConfig;
+use crate::latch::{Ring, Wait};
+use crate::processor::agc::AutoGainControl;
+use crate::processor::compressor::Compressor;
+use crate::processor::gate::NoiseGate;
+use crate::processor::speaking::{SpeakingFlag, SpeakingIndicator};
+use crate::processor::{FrameContext, InputChain};
+use crate::resampler::build_input_resampler;
+use crate::stats::AudioStats;
+use crate::{PcmFrame, FRAME_SIZE, OPUS_SAMPLE_RATE};
 
 pub struct AudioInput {
     /// cpal's device and the config it opens at: asked in `start_cpal`,

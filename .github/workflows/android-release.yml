@@ -1,8 +1,12 @@
 # Builds the Android APK and Play bundle on release, or on a manual run with a
-# release tag. The signed APK is attached to the release and uploaded to R2;
-# the bundle is a workflow artifact for Play Console.
+# release tag. Once the checks have passed, the signed APK is attached to
+# the release and uploaded to R2, and the bundle goes to Play's internal
+# testing track (on a release whenever the Play secret is there; on a
+# manual run only when its "play" box is ticked). Without the secret the
+# bundle stays a workflow artifact to upload by hand (android/README.md §6).
 # Secrets: BAUCORD_KEYSTORE_BASE64, BAUCORD_KEYSTORE_PASSWORD,
-#          BAUCORD_KEY_PASSWORD, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY.
+#          BAUCORD_KEY_PASSWORD, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+#          PLAY_SERVICE_ACCOUNT_JSON (optional).
 name: android-release
 
 on:
@@ -13,13 +17,27 @@ on:
       tag:
         description: "A release tag (v1.1.9) to rebuild and attach to that release; anything else is a dry run (workflow artifact only)"
         default: "manual"
+      play:
+        description: "Also upload the bundle to Play's internal track (needs PLAY_SERVICE_ACCOUNT_JSON)"
+        type: boolean
+        default: false
 
+# The build needs nothing; the publish job asks for what it needs.
 permissions:
-  contents: write   # gh release upload
+  contents: read
 
 jobs:
   licenses:
     uses: ./.github/workflows/licenses.yml
+    with:
+      ref: ${{ github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.tag, 'v') && github.event.inputs.tag || '' }}
+
+  # The checks (format, lints, tests) on the tagged commit, beside the
+  # build: nothing is published until they passed (review 2026-10-27,
+  # P1-4). A dry run publishes nothing and skips them.
+  check:
+    if: ${{ github.event_name == 'release' || startsWith(github.event.inputs.tag, 'v') }}
+    uses: ./.github/workflows/pr-check.yaml
     with:
       ref: ${{ github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.tag, 'v') && github.event.inputs.tag || '' }}
 
@@ -31,6 +49,12 @@ jobs:
       TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
       # Not a secret: GitHub masks secret values everywhere in the log.
       KEY_ALIAS: baucord
+    outputs:
+      # "1" when the release key signed both files (a release tag's
+      # build): what the publish job waits for.
+      signed: ${{ steps.aab.outputs.signed }}
+      apk: ${{ steps.apk.outputs.name }}
+      aab: ${{ steps.aab.outputs.name }}
     steps:
       - name: Check out source
         uses: actions/checkout@v7
@@ -155,7 +179,6 @@ jobs:
               --v4-signing-enabled false --out "$APK" aligned.apk
             "$BT/apksigner" verify --print-certs "$APK" \
               | awk '/certificate SHA-256 digest/ { d = toupper($NF); gsub(/../, "&:", d); sub(/:$/, "", d); print "release key SHA-256: " d }'
-            echo "SIGNED=1" >> "$GITHUB_ENV"
           else
             APK="baucord-${TAG}-android-arm64-unsigned.apk"
             cp aligned.apk "$APK"
@@ -170,37 +193,11 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v7
         with:
+          name: android-apk
           path: ${{ steps.apk.outputs.name }}
           archive: false
           if-no-files-found: error
           retention-days: 7
-
-      - name: Attach APK to release
-        if: ${{ env.SIGNED == '1' && (github.event_name == 'release' || startsWith(env.TAG, 'v')) }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          APK: ${{ steps.apk.outputs.name }}
-        run: gh release upload "$TAG" "$APK" --clobber --repo "$GITHUB_REPOSITORY"
-
-      - name: Stage APK for website
-        if: ${{ env.SIGNED == '1' && (github.event_name == 'release' || startsWith(env.TAG, 'v')) }}
-        env:
-          APK: ${{ steps.apk.outputs.name }}
-        run: |
-          set -eux
-          mkdir -p r2-upload
-          cp "$APK" r2-upload/
-      - name: Upload APK to R2
-        if: ${{ env.SIGNED == '1' && (github.event_name == 'release' || startsWith(env.TAG, 'v')) }}
-        uses: jakejarvis/s3-sync-action@v0.5.1
-        with:
-          args: --content-type application/vnd.android.package-archive
-        env:
-          AWS_S3_BUCKET: baucord
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_S3_ENDPOINT: https://6bcc35de83e46a771896026baf11b4ac.r2.cloudflarestorage.com
-          SOURCE_DIR: r2-upload
 
       - name: Sign app bundle
         id: aab
@@ -224,10 +221,12 @@ jobs:
             jarsigner -verify "$AAB"
             keytool -printcert -jarfile "$AAB" \
               | awk '/SHA256:/ { print "release key SHA-256: " $2 }'
+            echo "signed=1" >> "$GITHUB_OUTPUT"
           else
             AAB="baucord-${TAG}-android-unsigned.aab"
             cp "$AAB_IN" "$AAB"
             echo "::warning::no release key, or not a release tag: the bundle is unsigned (Play refuses it)"
+            echo "signed=" >> "$GITHUB_OUTPUT"
           fi
           if ! unzip -l "$AAB" | grep -q "BUNDLE-METADATA/com.android.tools.build.debugsymbols/"; then
             echo "::warning::no native debug symbols in the bundle"
@@ -237,7 +236,91 @@ jobs:
       - name: Upload app bundle artifact
         uses: actions/upload-artifact@v7
         with:
+          name: android-aab
           path: ${{ steps.aab.outputs.name }}
           archive: false
           if-no-files-found: error
           retention-days: 7
+
+  # What leaves the run, once the build is signed and the checks passed:
+  # the APK to the release and the website, the bundle to Play. The
+  # build job never holds the Play credential or a token that writes.
+  publish:
+    needs: [android, check]
+    if: ${{ needs.android.outputs.signed == '1' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write   # gh release upload
+    env:
+      TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+      APK: ${{ needs.android.outputs.apk }}
+      AAB: ${{ needs.android.outputs.aab }}
+      # Secrets can't be tested in a step's `if:`; this env copy can.
+      PLAY_SA_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+      # A release uploads whenever it can; a manual run only when asked.
+      WANT_PLAY: ${{ github.event_name == 'release' || github.event.inputs.play == 'true' }}
+    steps:
+      # Only the release notes Play shows, from the tag being published.
+      - name: Check out the Play release notes
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.tag, 'v') && github.event.inputs.tag || '' }}
+          sparse-checkout: android/play
+          sparse-checkout-cone-mode: false
+
+      - name: Download the signed APK
+        uses: actions/download-artifact@v8
+        with:
+          name: android-apk
+          path: .
+      - name: Download the signed bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: android-aab
+          path: .
+
+      - name: Attach APK to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" "$APK" --clobber --repo "$GITHUB_REPOSITORY"
+
+      - name: Stage APK for website
+        run: |
+          set -eux
+          mkdir -p r2-upload
+          cp "$APK" r2-upload/
+      - name: Upload APK to R2
+        uses: jakejarvis/s3-sync-action@v0.5.1
+        with:
+          args: --content-type application/vnd.android.package-archive
+        env:
+          AWS_S3_BUCKET: baucord
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_S3_ENDPOINT: https://6bcc35de83e46a771896026baf11b4ac.r2.cloudflarestorage.com
+          SOURCE_DIR: r2-upload
+
+      # The bundle to Play's internal testing track, completed at once:
+      # testers get it within minutes, as TestFlight does for iPhones.
+      # Promotion to closed testing and production stays a click in Play
+      # Console (PLAY-STORE.md §3), and the service account may only
+      # release to testing tracks, so a leaked secret reaches no further.
+      # The action is pinned by commit: it holds the credential.
+      - name: Upload bundle to Play (internal track)
+        if: ${{ env.WANT_PLAY == 'true' && env.PLAY_SA_JSON != '' }}
+        uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5 # v1.1.5
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: dev.baucord
+          releaseFiles: ${{ env.AAB }}
+          track: internal
+          status: completed
+          releaseName: ${{ env.TAG }}
+          whatsNewDirectory: android/play/whatsnew
+          changesNotSentForReview: false
+
+      - name: Play upload wanted, no credential
+        if: ${{ env.WANT_PLAY == 'true' && env.PLAY_SA_JSON == '' }}
+        run: echo "::warning::PLAY_SERVICE_ACCOUNT_JSON is not set; the bundle is a workflow artifact to upload in Play Console by hand (android/README.md §6)"

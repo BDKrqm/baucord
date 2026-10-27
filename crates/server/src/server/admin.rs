@@ -14,10 +14,8 @@ use protocol::{
 };
 
 use super::{hex, ChatServer, Waiting};
-use crate::{
-    persistence::{Answer, Command, Outcome, Query},
-    policy::RoleRecord,
-};
+use crate::persistence::{Answer, Command, Outcome, Query};
+use crate::policy::RoleRecord;
 
 /// How long the panel waits for the audit read.
 const AUDIT_DEADLINE: Duration = Duration::from_secs(2);

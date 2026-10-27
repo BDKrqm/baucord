@@ -5,7 +5,8 @@
 //! still render nicely). The catalog (`emoji_table::EMOJI`) also feeds the
 //! picker palette. Ported verbatim from the FLTK `ui/emoji.rs`.
 
-use std::{collections::HashMap, sync::OnceLock};
+use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use crate::emoji_table::EMOJI;
 

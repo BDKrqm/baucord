@@ -24,10 +24,8 @@
 //! dropped at once. A source whose decoder let go is dropped at once: a
 //! stream that stopped stops.
 
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Mutex, PoisonError, TryLockError,
-};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError, TryLockError};
 
 use rtrb::{Producer, RingBuffer};
 

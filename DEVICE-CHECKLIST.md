@@ -44,6 +44,30 @@
 > Linux, the quit question was driven headless; nothing run on
 > Windows, macOS or a phone.
 >
+> **2026-10-27 (1.4.0):** Settings → Stream on the desktop — the
+> share's resolution and frame rate, GPU or CPU encoding, visibility,
+> the pointer — and, on Windows, the share asking the GPU scheduler to
+> go ahead of a game (`video::gpu_priority`:
+> `D3DKMTSetProcessSchedulingPriorityClass` realtime or high, the
+> capture device at the top thread priority). Lines marked **[10-27]**;
+> the tab was rendered with slint-viewer in the three languages, the
+> Rust type-checked and tested on Linux. **The Windows module was
+> written against the `windows` 0.62 crate's sources and never
+> compiled for Windows** (no Windows target in the sandbox this time):
+> §1.3a's first line is the build.
+> Later the same day, the first of the 2026-10-27 review's fixes: the
+> voice thread no longer spins when a device flag is raised that
+> nothing consumes (P1-1: a default that moves under a picked device
+> on Windows, an interruption's end in an iPhone's lobby); a viewer
+> window minimized once no longer blanks that sharer's next stream
+> (P1-2); the release workflows wait for the checks (P1-4), the
+> website names the version that is downloadable (P1-3), the Windows
+> FFmpeg zip is checksummed (P1-5), and the Android bundle goes to
+> Play's internal track by itself. Lines marked **[10-27b]**; the
+> engine's two scenarios are unit-tested on the fake machine, the
+> Rust type-checked and linted on Linux, the workflows pass actionlint;
+> nothing run on a device.
+>
 > **2026-10-15:** Settings and the admin panel are pages over the
 > main window on every host (no more windows of their own), and the
 > admin panel works on the phones. Lines marked **[10-15]**; the real
@@ -119,6 +143,11 @@ built-in speakers is the machine that matters most.
 - [ ] **new** — pick a microphone, unplug it, pick it again (it fails).
   The line under Echo cancellation no longer says the canceller is
   running [P2-55].
+- [ ] **new [10-27b]** — with an output *picked* in Settings → Audio,
+  plug in a USB or Bluetooth device that Windows makes its default.
+  Sound stays on the pick, and Task Manager shows the client idle a
+  minute later (the voice thread used to pin a core from that moment
+  until a re-pick or a restart) [P1-1].
 - [ ] **same** — Echo cancellation *Off*, then *Automatic*. log:
   `Reopening voice streams (echo cancellation setting changed)` each
   time, and nothing when going Automatic → Always on speakers.
@@ -180,6 +209,11 @@ Play music in another app first, at a steady volume.
 
 ### 1.3 Sharing a screen [P2-22, P2-26, P2-41, P2-44, P3-28]
 
+- [ ] **new [10-27b]** — watch someone's share, minimize the viewer
+  window, let them stop sharing (or close the viewer), then watch
+  their next share: a picture, not black. Reconnecting in between
+  changes nothing. log: `stopped decoding peer …: viewer closed`, and
+  the next share logs its first keyframe [P1-2].
 - [ ] **new** — share a busy 1080p60 screen (a code editor full of text,
   then a game) from an AMD machine and from a Mac for five minutes.
   log: the session line says `10000 kbit/s`; after any `encoded frame
@@ -248,6 +282,67 @@ Play music in another app first, at a steady volume.
   `X11 (GetImage on DAMAGE)`; CPU near zero while nothing moves, a
   moving window shows smoothly, a second monitor's changes do not
   wake the first's share [P2-43].
+
+### 1.3a Settings → Stream, and the share ahead of a game **[10-27]** [1.4.0]
+
+- [ ] **builds [10-27]** — `cargo build --release` on Windows. The new
+  code is `crates/video/src/gpu_priority.rs` (the `Wdk_Graphics_Direct3D`,
+  `Win32_Security` and `Win32_System_Threading` features of the
+  `windows` crate) and one call in `dxgi.rs` (`SetGPUThreadPriority`).
+  If it does not compile, the names to check against the crate are
+  `windows::Wdk::Graphics::Direct3D::D3DKMTSetProcessSchedulingPriorityClass`
+  and `TOKEN_PRIVILEGES`' two fields; the logic is forty lines.
+- [ ] **new [10-27]** — Settings has a **Stream** tab between Keyboard
+  and Servers: Resolution (720p / 1080p / 1440p) and Frame rate side by
+  side, Encoder (Automatic / GPU / CPU), Visibility (My channel /
+  Everyone, the share dialog's words), "Show mouse pointer", and under
+  "Stream encoding priority" the switch "Enabled", on. Pick 1440p: the
+  frame-rate list becomes 30 fps alone; back to 1080p: 30 and 60
+  again, 30 kept.
+- [ ] **new [10-27]** — pick 720p at 60, Save and close, open the
+  share dialog: it opens on *720p 60fps*. Pick 1080p 30 there and
+  share; open Settings → Stream: 1080p and 30 fps. Close (not Save)
+  after changing the resolution: the dialog's choice is back.
+- [ ] **new [10-27]** — **the share ahead of a game.** With the switch
+  on, share a screen while a game runs uncapped at 99 % GPU (Task
+  Manager's GPU graph) — the case users reported. The stream holds
+  its frame rate (the sharer's stats line, a viewer's eye) instead of
+  dropping to a few frames a second; the game may lose a frame or two
+  a second. log, at the share's start, started as a plain user: `GPU
+  priority: no increase-priority privilege (…); realtime needs Baucord
+  started as administrator, high does not` then `GPU priority: high
+  for the share (Windows GPU scheduler)` and `GPU priority: the capture
+  device's thread priority is at the maximum`; started as
+  administrator: `…privilege is enabled` and `GPU priority: realtime
+  for the share`. At the stop: `GPU priority: normal again`. **If the
+  log says `high refused` as a plain user** (every class refused), the
+  class needs the privilege after all — say so in the switch's hint
+  (`stream-gpu-priority-hint`) and in `gpu_priority.rs`.
+- [ ] **new [10-27]** — the same share with the switch off: the old
+  behaviour (the stream starves while the game is uncapped), and no
+  `GPU priority:` lines. Turn it on mid-share: `GPU priority: high` (or
+  realtime) at once, and the stream recovers within seconds.
+- [ ] **new [10-27]** — Encoder *GPU only* on a machine with NVENC,
+  Quick Sync or AMF: the share starts, log `Using FFmpeg encoder:
+  h264_nvenc` (or `_qsv`, `_amf`). On a machine without (a VM, a
+  driver without the encoder): the share does not start, the error
+  says `Encoder init: no usable H.264 encoder (tried: hardware only,
+  Settings → Stream: …)`. *CPU only*: `Using FFmpeg encoder: libx264`
+  on any machine, the share works, the CPU costs what 1.2.0's did.
+- [ ] **same [10-27]** — Encoder *Automatic*: exactly 1.3.0's order
+  (NVENC, Quick Sync, AMF, then x264), the same log lines.
+- [ ] **new [10-27]** — a Settings switch whose hint wraps to two or
+  three lines (the Spanish Stream tab's) keeps its hint inside its
+  row: the next row starts under it, nothing overlaps. The Sounds and
+  General tabs look as they did (the rows' spacing was matched pixel
+  for pixel in slint-viewer renders).
+- [ ] **new [10-27]** — Settings' labels say what the setting is, in a
+  few words, with at most one line under them: General's "Connect on
+  launch", "Check for updates on launch", "Message timestamps", "Image
+  upload size"; Audio's "Microphone" / "Output", and "Level", "Gain",
+  "Sensitivity" under INPUT, "Volume" under OUTPUT; Debug's one-line
+  lead. Nothing reads as a paragraph except the Privacy note and the
+  macOS keybind warning.
 
 ### 1.4 Doing nothing cheaply [P2-35, P2-37, P2-39]
 
@@ -588,7 +683,7 @@ agrees with it.
   it: the microphone opens without leaving the room.
 - [ ] **same** — a phone call during a room; ten minutes with the
   screen off; Wi-Fi to cellular and back [TST-4].
-- [ ] **new [10-16b]** — **against a 1.3.0 server or newer**: unplugged,
+- [ ] **new [10-16b]** — **against a 1.4.0 server or newer**: unplugged,
   connected in the lobby, screen off for 5 minutes; then someone sends
   a DM. The notification comes within seconds, and the others did not
   see you leave and come back. (The server's PING every 20 s wakes the
@@ -785,6 +880,12 @@ after it is the seventh batch's.
   you hear).
 - [ ] **same** — a phone call during a room: after it ends both
   directions come back by themselves.
+- [ ] **new [10-27b]** — a phone call while in the *lobby* (no room):
+  after it ends the lobby's output comes back, and the app survives
+  ten minutes in the background afterwards — the battery graph shows
+  it barely there (the ended interruption left a microphone flag
+  raised that nothing consumed, and the app spun until iOS ended it)
+  [P1-1].
 - [ ] **same** — connect AirPods in a room: log `plain streams`; take
   them off: back to `voice-call path`.
 - [ ] **same** — leave the room: the app still survives the background.
@@ -906,7 +1007,7 @@ against stand-ins, the Swift helper never met a compiler.
   FileTimestamp and SystemBootTime as used, with no error or warning.
   An error there names the API to declare.
 - [ ] **the first upload** — the secrets of ios/README §3c, then a run
-  with *testflight* ticked: the step ends with *uploaded 1.3.0 (N)*;
+  with *testflight* ticked: the step ends with *uploaded 1.4.0 (N)*;
   App Store Connect → TestFlight shows the build processing, then
   *Missing Compliance*, answered once (2026-10-24, run #11: uploaded,
   processed); it installs from the TestFlight app on a phone that is
@@ -967,6 +1068,13 @@ silicon, and an Intel one if there is one.
 - [ ] **same** — on a Mac where the hardware encoder will not open
   (a VM): log `Encoder h264_videotoolbox failed to open, trying next`,
   then `libx264`, and the share works.
+
+- [ ] **new [10-27]** — Settings → Stream on the Mac: the tab and its
+  pickers as on Windows (§1.3a), **without** the "Stream encoding
+  priority" section — macOS has no GPU scheduling class to ask for, so the
+  switch is not shown. *GPU only* opens `h264_videotoolbox`; *CPU
+  only* `libx264`. Linux the same, with x264 the only encoder most
+  builds have: *GPU only* refuses to share there, as it says.
 
 - [ ] **new [10-14c]** — the menu-bar icon reads at its size in light
   and dark menu bars, and turns red while muted or deafened; its menu
@@ -1076,6 +1184,43 @@ the simulator only:
   section: the log names it at start (`… is not a section this server
   reads; ignored`), and the server runs.
 
+### 5.0a The bot gateway **[10-27]** [1.4.0]
+
+Run on Linux here against a real server (admission by invite, then by
+key with the pin written next to it; chat; 5 s of audio paced at 50
+frames a second with 0 lost per the server's receiver reports; the
+token gate), and against the in-process server in `tests/sim.rs`.
+What was not run: a Windows or macOS build, and a real listener's ears.
+
+- [ ] **builds [10-27]** — `cargo build -p gateway` on Windows and
+  macOS (libopus through cmake, as the desktop's `audio` already
+  builds it).
+- [ ] **new [10-27]** — `baucord-gateway --server … --name MusicBot
+  --invite <code>` (crates/gateway/README.md §1): the log says
+  `admitted as …`, the bot appears in the app's roster in the lobby;
+  a second run with no `--invite` logs in by the key (`pinned … from
+  musicbot.pin`). `examples/echo_bot.py` answers `!ping` with `pong`
+  in General and greets a joiner.
+- [ ] **new [10-27]** — `examples/music_bot.py` with `yt-dlp` and
+  `ffmpeg` installed: from the app, in a voice channel, type `!play
+  <url>`. The bot moves to your channel, its speaking light comes on,
+  **you hear the song, steady, no stutter** (the pacer's one frame per
+  20 ms; Settings' per-person volume applies to it); `!stop` cuts it.
+  log: `VOICE_REPORT` lines in the bot's output say `lost: 0`.
+- [ ] **new [10-27]** — Ctrl-C on the gateway: the app's roster drops
+  the bot at once (a goodbye, not a 30 s timeout). Kick the bot from
+  the app: the gateway exits with status 1 and says why.
+- [ ] **new [10-27]** — the Rust music bot, nothing installed: `cargo
+  run -p gateway --example music -- --server … --name MusicBot --invite
+  <code> --library ~/Music`. From the app, in a voice channel: `!play
+  song.mp3` — the bot joins your channel, says "Now playing", **you
+  hear the song at the right pitch and speed** (the pipeline was
+  checked by numbers: a 44.1 kHz stereo tone comes out as 48 kHz mono
+  at the same level); a second `!play` while it plays answers "Queued
+  (1)" and follows by itself; `!skip` starts it within a blink;
+  `!stop` is silence within a frame; `!play https://…/stream.mp3` (an
+  internet radio) plays until `!stop`. `!play ../anything` is refused.
+
 ### 5.1 The workflows **[7]**
 
 - [ ] The next push: `pr-check` is green. It installs neither
@@ -1101,6 +1246,24 @@ the simulator only:
   `latest` moves only if the tag is the newest stable one; the
   `version` file is uploaded only then; the APK and AAB artifacts
   expire after 7 days, and a dry run's APK is unsigned.
+- [ ] **[10-27b]** The next push to `main`: the Windows leg of "Build
+  and Release" prints `ffmpeg-prebuilt.zip SHA-256: …` with a warning
+  that it is not pinned. Pin it in `release.yml`'s
+  `FFMPEG_WIN_SHA256` before tagging; a release with it empty stops
+  at that step on purpose [P1-5].
+- [ ] **[10-27b]** The next release: every workflow has a `check` job
+  (the whole of `pr-check` on the tagged commit); `release`, the
+  Android `publish` job, the iOS build and the image push run only
+  after it passed. Break the format on a throwaway tag's commit to see
+  them stop [P1-4]. The Android run is two jobs now: the APK reaches
+  the release and the site from `publish`, and with
+  `PLAY_SERVICE_ACCOUNT_JSON` set the bundle shows on Play's internal
+  track within minutes, with the notes from `android/play/whatsnew/`
+  (android/README.md §6a).
+- [ ] **[10-27b]** Bump the version on `main` without releasing: the
+  website still offers the released version's files (the `version`
+  file's, not Cargo.toml's), and a download row whose file is missing
+  is hidden instead of a dead button [P1-3].
 
 ---
 

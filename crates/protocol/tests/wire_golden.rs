@@ -27,7 +27,9 @@
 
 use std::fmt::Debug;
 
-use protocol::{admin::*, messages::*, safety::*};
+use protocol::admin::*;
+use protocol::messages::*;
+use protocol::safety::*;
 use serde::de::DeserializeOwned;
 
 /// A variant or struct: its name, the bytes an all-zero body takes,

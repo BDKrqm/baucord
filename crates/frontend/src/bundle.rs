@@ -9,10 +9,8 @@
 //! Accessibility). Nothing here is macOS-only code, so it builds and is
 //! tested everywhere; only the updater's macOS path calls it.
 
-use std::{
-    fs, io,
-    path::{Component, Path, PathBuf},
-};
+use std::path::{Component, Path, PathBuf};
+use std::{fs, io};
 
 /// The bundle's folder name in the update zip
 /// (`baucord-v<version>-macos.zip`, made by `ditto --keepParent`).

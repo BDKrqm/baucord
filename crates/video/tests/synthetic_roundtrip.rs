@@ -4,10 +4,8 @@
 //! Skips (with a message) if no H.264 encoder is available in the local
 //! `FFmpeg` build.
 
-use video::{
-    codec::{FfmpegDecoder, FfmpegEncoder, KEYFRAME_INTERVAL_MS},
-    Frame, PixelFormat, Quality, VideoEncoder,
-};
+use video::codec::{FfmpegDecoder, FfmpegEncoder, KEYFRAME_INTERVAL_MS};
+use video::{Frame, PixelFormat, Quality, VideoEncoder};
 
 /// Synthetic RGBA frame: gradient background + a moving white square, so
 /// the encoder has real motion to chew on.

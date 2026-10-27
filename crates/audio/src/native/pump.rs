@@ -8,14 +8,14 @@
 //! run on the platform's real-time audio thread: no locks, no
 //! allocation, no logging.
 
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use rtrb::{Consumer, Producer};
 
-use crate::{input_config::InputConfig, latch::Ring, stats::AudioStats};
+use crate::input_config::InputConfig;
+use crate::latch::Ring;
+use crate::stats::AudioStats;
 
 /// Largest render callback served in one piece from the scratch
 /// buffer; bigger ones are served in pieces.

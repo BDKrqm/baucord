@@ -20,20 +20,15 @@
 //! voice engine ([`chime_route`]) rather than vanishing. Local
 //! notifications only — no push entitlement, no `aps-environment`.
 
-use std::{
-    path::Path,
-    ptr::NonNull,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use std::path::Path;
+use std::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use block2::{DynBlock, RcBlock};
 use frontend::host::{ChimeRoute, Notice};
-use objc2::{
-    define_class, msg_send,
-    rc::Retained,
-    runtime::{Bool, NSObject, NSObjectProtocol, ProtocolObject},
-    AllocAnyThread,
-};
+use objc2::rc::Retained;
+use objc2::runtime::{Bool, NSObject, NSObjectProtocol, ProtocolObject};
+use objc2::{define_class, msg_send, AllocAnyThread};
 use objc2_foundation::{NSArray, NSError, NSString};
 use objc2_user_notifications::{
     UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent, UNNotification,
@@ -71,8 +66,12 @@ define_class!(
     #[unsafe(super(NSObject))]
     struct NoticeDelegate;
 
+    // SAFETY: the class is an `NSObject` subclass (`super(NSObject)` above),
+    // which is all the protocol asks.
     unsafe impl NSObjectProtocol for NoticeDelegate {}
 
+    // SAFETY: the methods below have the selectors and signatures the
+    // protocol declares, and each calls its completion handler exactly once.
     unsafe impl UNUserNotificationCenterDelegate for NoticeDelegate {
         /// A notice arriving while the app is on screen: a chime is
         /// played and not shown; anything else (posted in the

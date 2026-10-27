@@ -189,7 +189,8 @@ the microphone, probably a privacy policy URL. The first one:
    the bundle too; nothing to add.
 2. Publish the GitHub release as usual. The android-release run
    prints the key's SHA-256. Download `baucord-<tag>-android.aab` from
-   the run's *Artifacts*.
+   the run's *Artifacts* (this first one goes up by hand: the API can
+   create neither the app nor its first release).
 3. Deploy the site (push `web/` to `main`) so the privacy policy is
    live.
 4. Play Console: *Create app* (`dev.baucord`, §3 step 3). Before
@@ -209,6 +210,12 @@ the microphone, probably a privacy policy URL. The first one:
   testers by email, available within minutes, lighter review). Install
   it over a sideloaded build on your phone: it must update in place
   (proves decision 2) and keep the identity.
+- [ ] Then let the workflow do the next ones: a service account with
+  *Release to testing tracks* and the `PLAY_SERVICE_ACCOUNT_JSON`
+  secret (android/README.md §6a). From then on every published
+  release lands on the internal track by itself, with the notes from
+  `android/play/whatsnew/`; closed testing and production stay a
+  *Promote release* click in the Console.
 - [ ] Walk the reviewer's path from a clean phone with only the App
   access instructions.
 
@@ -236,9 +243,12 @@ the microphone, probably a privacy policy URL. The first one:
 ### Step 7 — after launch (both)
 
 - [ ] Releases: the tag builds the APK and the AAB; the AAB goes to
-  Play (by API once automated) — same `versionCode` counter for both
-  (the run number), so neither channel ever offers a lower build than
-  the one installed.
+  Play's internal track by API (android/README.md §6a) — same
+  `versionCode` counter for both (the run number), so neither channel
+  ever offers a lower build than the one installed. Promotion from
+  internal to production is the Console's *Promote release*; a second
+  workflow step aimed at `beta` can come once the 14-day test is
+  behind you.
 - [ ] Android vitals (crashes, ANRs) — partly covers OPS-2 for Android.
 - [ ] The yearly target-API rule: next year's bump will move to API 37
   (likely by August 2027). Known costs: the background-audio rule in
@@ -299,7 +309,7 @@ Types must match what the service does.
 In the lobby nothing holds the CPU: with the screen off the phone
 sleeps through its own 5 s keep-alive, and what keeps the session open
 is the server's PING every 20 s, which wakes it (ANDROID-SPEC.md D74;
-servers from 1.3.0). A 1.2.1 server sends a quiet session nothing, so
+servers from 1.4.0, the 1.3.0 that was next). A 1.2.1 server sends a quiet session nothing, so
 against one the session ends after 30 s with the screen off and the
 phone reconnects when it wakes — a DM meanwhile is not notified. The
 special use's text ("keeps the connection … open while they wait in

@@ -17,13 +17,11 @@
 //! Also here, because every host needs the same: the line format
 //! ([`line`]) and the panic hook ([`install_panic_hook`]).
 
-use std::{
-    fmt::Display,
-    fs::{self, File, OpenOptions},
-    io::{self, Read, Seek, SeekFrom, Write},
-    path::{Path, PathBuf},
-    sync::{Mutex, OnceLock, PoisonError},
-};
+use std::fmt::Display;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 static PATH: OnceLock<PathBuf> = OnceLock::new();
 
@@ -318,7 +316,8 @@ pub fn total_len(path: &Path) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::{fmt::Write as _, io::Write};
+    use std::fmt::Write as _;
+    use std::io::Write;
 
     use super::*;
 

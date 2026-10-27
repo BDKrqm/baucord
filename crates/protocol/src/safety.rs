@@ -29,6 +29,7 @@ pub const MAX_REPORT_EXCERPT_BYTES: usize = 2000;
 /// Someone this user blocked, as Settings lists them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockedUser {
+    /// The blocked user's id.
     pub user_id: UserId,
     /// Their name of record, so the list reads even when they are
     /// offline.
@@ -39,23 +40,39 @@ pub struct BlockedUser {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReportTarget {
     /// One message, in General or in a DM the reporter is part of.
-    Message { conv: ConvRef, msg_id: u64 },
+    Message {
+        /// The conversation it is in.
+        conv: ConvRef,
+        /// The message's id.
+        msg_id: u64,
+    },
     /// A person, for something that is not one message (their name,
     /// their avatar, what they say in voice).
-    User { user: UserId },
+    User {
+        /// The reported person.
+        user: UserId,
+    },
 }
 
 /// Why something is reported. Append-only; the discriminants are the
 /// database encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReportReason {
+    /// Unwanted advertising or repetition.
     Spam = 0,
+    /// Targeting a person to intimidate or upset.
     Harassment = 1,
+    /// Attacking people for what they are.
     Hate = 2,
+    /// Sexual content.
     Sexual = 3,
+    /// Violence, or threats of it.
     Violence = 4,
+    /// Self-harm, or its encouragement.
     SelfHarm = 5,
+    /// Something illegal where the server is.
     Illegal = 6,
+    /// None of the above; the note says what.
     Other = 7,
 }
 
@@ -72,11 +89,14 @@ impl ReportReason {
         Self::Other,
     ];
 
+    /// The reason stored as `value` in the database; `None` for a
+    /// discriminant this build does not know.
     #[must_use]
     pub fn from_db(value: i64) -> Option<Self> {
         Self::ALL.into_iter().find(|r| r.to_db() == value)
     }
 
+    /// The database encoding of this reason: its discriminant.
     #[must_use]
     pub fn to_db(self) -> i64 {
         self as i64
@@ -103,6 +123,7 @@ impl ReportReason {
 pub enum ReportRefusal {
     /// No such message, or a DM the reporter is not part of.
     NoSuchMessage,
+    /// No user has that id.
     NoSuchUser,
     /// One's own message, or oneself.
     Yourself,
@@ -120,6 +141,7 @@ pub enum DeleteRefusal {
 /// One report, as the admin panel's Reports tab shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReportSummary {
+    /// The report's id (`ResolveReport` takes it).
     pub id: u64,
     /// Milliseconds since the Unix epoch.
     pub ts: u64,
@@ -127,6 +149,7 @@ pub struct ReportSummary {
     pub reporter: Option<String>,
     /// The reported person; `None` once they deleted their account.
     pub target_user: Option<UserId>,
+    /// The reported person's name as it was when reported.
     pub target_name: String,
     /// The reported message, when the report is about one.
     pub msg_id: Option<u64>,
@@ -134,8 +157,11 @@ pub struct ReportSummary {
     pub in_dm: bool,
     /// The message's text as it was when reported.
     pub excerpt: String,
+    /// Why it was reported.
     pub reason: ReportReason,
+    /// The reporter's note, possibly empty.
     pub note: String,
+    /// Whether a moderator marked it handled.
     pub resolved: bool,
 }
 

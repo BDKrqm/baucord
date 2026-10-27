@@ -226,11 +226,23 @@ builds, in one Gradle run (`assembleRelease bundleRelease`, arm64):
   the zips, where the download section links it.
 - **The app bundle for Google Play**, `baucord-<tag>-android.aab`,
   signed with the same key, with the native debug symbols inside
-  (Play shows crash stacks with Rust function names). It is only a
-  workflow artifact: open the run on the Actions tab, download it under
-  *Artifacts* (it comes as the `.aab` itself; unzip it if your browser
-  hands you a `.zip`), and upload it in Play Console (*Test and release
-  → Internal testing → Create new release*). PLAY-STORE.md §4.
+  (Play shows crash stacks with Rust function names). With the
+  `PLAY_SERVICE_ACCOUNT_JSON` secret in place (§6a) the run uploads it
+  to Play's **internal testing** track itself and completes the
+  release: testers have it within minutes, as TestFlight does for
+  iPhones. Without the secret it is a workflow artifact: open the run
+  on the Actions tab, download it under *Artifacts* (it comes as the
+  `.aab` itself; unzip it if your browser hands you a `.zip`), and
+  upload it in Play Console (*Test and release → Internal testing →
+  Create new release*). PLAY-STORE.md §4.
+
+The run is two jobs. `android` builds and signs; `publish` attaches
+the APK to the release, puts it on the website and sends the bundle
+to Play — and runs only once `pr-check` (format, lints, tests), run
+on the tagged commit beside the build, has passed. A release never
+hands out a build that failed them (review 2026-10-27, P1-4). The
+build job holds the signing key and nothing else; the Play credential
+and the token that writes to the release live in `publish` alone.
 
 Both have versionCode = the run number and versionName = the tag
 without its `v` (ANDROID-SPEC.md D55), so Play and GitHub builds of a
@@ -277,4 +289,55 @@ workflow — and attaches the APK to the existing release and the
 website: the fix when a release's own run broke on CI (re-running that
 run uses the workflow as it was at the tag, so it breaks again).
 ANDROID-SPEC.md D54. A rebuild gets a new run number, so its bundle can
-go to Play after the first one.
+go to Play after the first one — on a manual run only when its *play*
+box is ticked; a published release uploads whenever the secret is
+there.
+
+### 6a. Uploading to Play from the workflow
+
+Google's equivalent of the App Store Connect API key is a Google Cloud
+service account invited into Play Console. Once:
+
+1. **Google Cloud**: create a project (or reuse one), enable the
+   *Google Play Android Developer API*, create a service account
+   (*IAM & Admin → Service accounts*) with no Cloud roles, and add a
+   JSON key to it (*Keys → Add key → JSON*). The file is the
+   credential; keep it with the keystore's backup.
+2. **Play Console → Users and permissions → Invite new user**, with
+   the service account's email. Under *App permissions* add
+   `dev.baucord` and grant only **Release to testing tracks** (and
+   *Manage testing tracks and edit tester lists* if the workflow is to
+   manage testers one day). Not *Release to production*: a leaked
+   secret or a bad run then reaches the internal track at most, and
+   promotion to closed testing and production stays a click in the
+   Console — the staged rollout of PLAY-STORE.md §3 step 6 stays a
+   human decision.
+3. **GitHub → Settings → Secrets**: `PLAY_SERVICE_ACCOUNT_JSON` = the
+   JSON file's contents. Nothing else: the keystore secrets sign the
+   bundle already.
+
+Before the first upload from the workflow: the app must exist in Play
+Console with one bundle uploaded by hand (the API can create neither
+an app nor its first release — the internal test of PLAY-STORE.md §3
+step 4 covers it); the `versionCode` the API sends must be higher than
+every build on every track, and ours is the run number, so the
+hand-uploaded build must have used a run number too, not a local
+count; and the permission grant can take up to a day to reach the API,
+so a first *The caller does not have permission* is usually time, not
+a mistake.
+
+The step uses `r0adkll/upload-google-play`, pinned by commit because
+it holds the credential (Dependabot moves it). It writes the release
+notes Play shows from `android/play/whatsnew/`: one file per listing
+language, `whatsnew-en-US`, `whatsnew-es-419`, `whatsnew-pt-BR`, at
+most 500 characters each — **update them with the version before
+tagging**, they are what testers read in the Play Store. If Play
+answers that the edit cannot be sent for review automatically (a
+listing change is pending review in the Console), finish that review
+first or set the step's `changesNotSentForReview` to `true` for the
+one run. Build numbers come from `github.run_number`, which only grows
+per workflow *file*: renaming `android-release.yml` resets it and Play
+refuses the lower `versionCode`; if that ever happens, add an offset.
+Keyless authentication (Workload Identity Federation through
+`google-github-actions/auth`) is the same upload with more Cloud
+setup: a later improvement, not a blocker.

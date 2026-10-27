@@ -342,8 +342,12 @@ was fixed on 2026-10-16 (§7), with what only a device can confirm in
   (`nightly-2026-10-10`); `tools/chat-scroll-sim` and a Windows
   type-check from Linux (MinGW, eight crates) as jobs of their own.
   The release guard reads the workspace version every shipped crate
-  inherits. Left: clippy does not yet deny warnings (the crates carry
-  pedantic ones); the release jobs do not `needs:` the check.
+  inherits. *2026-10-27 (review 2026-10-27, P1-4):* `pr-check.yaml`
+  is callable (`workflow_call`, with a `ref`), and every release
+  workflow runs it on the tagged commit as a `check` job that the
+  publishing jobs `needs:` — `release`, the Android `publish` job,
+  the iOS build, the image push. Left: clippy does not yet deny
+  warnings (the crates carry pedantic ones).
 - [ ] **REL-2 [P1][M] Code signing**: Windows (Azure Trusted Signing or an
   OV certificate) and macOS (Developer ID, a real `.app` with an
   `Info.plist` — which is also how macOS attributes the microphone and
@@ -365,6 +369,12 @@ was fixed on 2026-10-16 (§7), with what only a device can confirm in
   its SHA-256 (LEG-1); the Windows zip's builder
   (`build-ffmpeg-windows.yml.disabled`, kept disabled — the owner's
   decision) now names the object `release.yml` downloads.
+  *2026-10-27 (review 2026-10-27, P1-5):* the Windows zip is checked
+  against `FFMPEG_WIN_SHA256` before it is unpacked; a push's build
+  prints the digest and warns while the pin is empty, a release
+  refuses. The zip's provenance is unrecorded (a past builder run or a
+  hand upload): the first pin is the digest of what is in the bucket
+  today, and the builder prints the digest to pin when it next runs.
 - [ ] **REL-5 [P1][S] The website can advertise versions that do not
   exist yet**: `web.yaml` runs after any successful "Build and
   Release", including the cache-seeding pushes to `chunk`, and stamps
@@ -376,7 +386,12 @@ was fixed on 2026-10-16 (§7), with what only a device can confirm in
   *Since:* the page deploys after a release run only (1.2.1, review
   P2-50), and only for the newest stable tag (2026-10-16, review
   2026-10 P2-27: a rebuilt older tag or a backport moved it, the
-  `version` file and Docker's `latest` backwards). Left: the APK link.
+  `version` file and Docker's `latest` backwards). *2026-10-27 (review
+  2026-10-27, P1-3):* a push's deploy (the `web/` path, and
+  `Cargo.lock`, which a version bump rewrites) stamps the version the
+  `version` file names — what is downloadable — or the newest stable
+  tag, never `main`'s `Cargo.toml`; and the page hides a download row
+  whose `HEAD` answers 404, which also covers the APK's minutes.
 - [ ] **REL-6 [P2] Supply chain and release hygiene**: no
   cargo-deny/audit; `serde_yaml` is deprecated; Dependabot PRs merge with no
   CI; no Gradle wrapper checksum; floating NDK, cargo-ndk and runner

@@ -13,13 +13,11 @@
 //! hotkeys instead. With it but no tap (the system refused one), the
 //! state is read on a clock.
 
-use std::{
-    cell::Cell,
-    ffi::c_void,
-    ptr,
-    sync::atomic::{AtomicBool, AtomicPtr, Ordering},
-    time::{Duration, Instant},
-};
+use std::cell::Cell;
+use std::ffi::c_void;
+use std::ptr;
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::time::{Duration, Instant};
 
 use log::warn;
 

@@ -3,11 +3,9 @@
 //! run code, and the one pick that may be in flight. Each host had its
 //! own copy (review P3-44).
 
-use std::{
-    path::{Path, PathBuf},
-    sync::{Mutex, MutexGuard, PoisonError},
-    time::{Duration, Instant},
-};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 /// A file name that is one path component and that every desktop can
 /// write and open by that name: separators, control characters and the

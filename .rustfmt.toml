@@ -16,22 +16,25 @@
 #   use_small_heuristics = "Max" .. 233 (13-file sample)
 #
 # ── The import style this workspace wants ────────────────────────────────
-# Kept from the previous config. These require a nightly rustfmt to take
-# effect (the compiler stays stable — nightly is for `fmt` only):
+# These require a nightly rustfmt to take effect (the compiler stays
+# stable — nightly is for `fmt` only). CI pins one (`pr-check.yaml`,
+# `nightly-2026-10-10`) so a rustfmt behavior change can't break the
+# check overnight; format locally with the same pin:
 #
-#   cargo +nightly fmt --all              # format
-#   cargo +nightly fmt --all -- --check   # CI
+#   cargo +nightly-2026-10-10 fmt --all              # format
+#   cargo +nightly-2026-10-10 fmt --all -- --check   # what CI runs
 #
-# Pin the nightly in CI (e.g. a dated toolchain) so a rustfmt behavior
-# change can't break the check overnight. Applying these the first time
-# rewrites imports in ~25–30 of 54 files (std-first grouping + merging
-# per-crate use trees) — do that as one standalone normalization commit
-# together with the ~127 body hunks.
+# `Module` granularity (one `use` per module, 2026-10-27, from Google's
+# Rust style guide, SESSION-GUIDE.md §4): a diff that adds an import
+# touches one line, and a merge conflict stays inside the module it is
+# about. It was `Crate` (one tree per crate) until 1.4.0; the switch
+# rewrites the import blocks of most files once, as one standalone
+# formatting commit.
 #
 # If you'd rather stay 100 % stable instead: delete the next two lines
 # (killing the per-run warnings) and run plain `cargo fmt` — you lose only
-# the import grouping/merging, which was never in effect anyway.
-imports_granularity = "Crate"
+# the import grouping/splitting.
+imports_granularity = "Module"
 group_imports = "StdExternalCrate"
 
 # Stable, and the one setting that measurably matters: half the workspace is

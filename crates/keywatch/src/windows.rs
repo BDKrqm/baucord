@@ -12,31 +12,25 @@
 //! ([`RawInput`]); the toolkit's key events for its own windows are
 //! the ordinary window messages, which neither registration touches.
 
-use std::{
-    ffi::c_void,
-    time::{Duration, Instant},
-};
+use std::ffi::c_void;
+use std::time::{Duration, Instant};
 
 use log::warn;
-use windows::{
-    core::w,
-    Win32::{
-        Devices::HumanInterfaceDevice::{HID_USAGE_GENERIC_KEYBOARD, HID_USAGE_PAGE_GENERIC},
-        Foundation::{HWND, LPARAM, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM},
-        System::Threading::{GetCurrentThreadId, INFINITE},
-        UI::{
-            Input::{
-                GetRawInputData, GetRegisteredRawInputDevices, KeyboardAndMouse::GetAsyncKeyState,
-                RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
-                RIDEV_INPUTSINK, RIDEV_REMOVE, RID_INPUT, RIM_TYPEKEYBOARD,
-            },
-            WindowsAndMessaging::{
-                CreateWindowExW, DestroyWindow, DispatchMessageW, MsgWaitForMultipleObjectsEx,
-                PeekMessageW, PostThreadMessageW, HWND_MESSAGE, MSG, MWMO_INPUTAVAILABLE,
-                PM_REMOVE, QS_ALLINPUT, WINDOW_EX_STYLE, WINDOW_STYLE, WM_INPUT, WM_NULL,
-            },
-        },
-    },
+use windows::core::w;
+use windows::Win32::Devices::HumanInterfaceDevice::{
+    HID_USAGE_GENERIC_KEYBOARD, HID_USAGE_PAGE_GENERIC,
+};
+use windows::Win32::Foundation::{HWND, LPARAM, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM};
+use windows::Win32::System::Threading::{GetCurrentThreadId, INFINITE};
+use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+use windows::Win32::UI::Input::{
+    GetRawInputData, GetRegisteredRawInputDevices, RegisterRawInputDevices, HRAWINPUT, RAWINPUT,
+    RAWINPUTDEVICE, RAWINPUTHEADER, RIDEV_INPUTSINK, RIDEV_REMOVE, RID_INPUT, RIM_TYPEKEYBOARD,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DestroyWindow, DispatchMessageW, MsgWaitForMultipleObjectsEx, PeekMessageW,
+    PostThreadMessageW, HWND_MESSAGE, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_INPUT, WM_NULL,
 };
 
 use crate::{Interest, Kick, Modifier, Source, Woke, POLL};

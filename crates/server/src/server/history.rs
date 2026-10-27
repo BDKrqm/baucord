@@ -60,7 +60,7 @@ impl ChatServer {
         let retry_ms = ((1.0 - *tokens) * per_secs as f64 / burst * 1000.0).ceil() as u32;
         info!(
             "{} ({client:#x}) chat rate limited; retry in {retry_ms} ms",
-            self.get_username(client)
+            self.username_of(client)
         );
         self.send_msg(client, &ServerMessage::ChatRateLimited { retry_ms });
         false
@@ -343,7 +343,7 @@ impl ChatServer {
         });
         info!(
             "{} ({client:#x}) edited message {msg_id}",
-            self.get_username(client)
+            self.username_of(client)
         );
         // Not to whoever blocked the author: they never saw the message,
         // and an edit of one off screen is shown with its text.
@@ -377,7 +377,7 @@ impl ChatServer {
         self.persist.send(Command::DeleteMessage { msg_id, ts });
         info!(
             "{} ({client:#x}) deleted message {msg_id}{}",
-            self.get_username(client),
+            self.username_of(client),
             if by_admin { " (moderation)" } else { "" }
         );
         self.broadcast_msg(&ServerMessage::MessageDeleted { msg_id });

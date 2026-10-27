@@ -24,11 +24,13 @@ impl Default for Hasher {
 }
 
 impl Hasher {
+    /// A hasher with nothing fed to it yet.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Feed more bytes; the digest covers everything fed, in order.
     pub fn update(&mut self, data: &[u8]) {
         self.0.update(data);
     }

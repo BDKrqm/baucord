@@ -7,7 +7,10 @@
 //! string is a line in tr.slint and a message in each .ftl, and the
 //! build stops here when a locale lacks one.
 
-use std::{collections::HashSet, env, fmt::Write as _, fs, path::PathBuf};
+use std::collections::HashSet;
+use std::fmt::Write as _;
+use std::path::PathBuf;
+use std::{env, fs};
 
 /// `Tr` properties `fill_tr` sets by hand, from per-platform messages
 /// (`audio-output-hint-android`): there is no message of their name.

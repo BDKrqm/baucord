@@ -40,12 +40,27 @@ env:
   # 2026-10-16). Must match the FFmpeg entry in scripts/licenses.py.
   FFMPEG_VERSION: 7.1.2
   FFMPEG_SHA256: 089bc60fb59d6aecc5d994ff530fd0dcb3ee39aa55867849a2bbc4e555f9c304
+  # The Windows build's prebuilt FFmpeg (the vcpkg zip in R2, see the
+  # download step), checked against this digest before it is unpacked:
+  # the zip becomes every Windows user's encoder, and the bucket's key
+  # can rewrite it (review 2026-10-27, P1-5). Empty = not pinned yet: a
+  # push's build prints the digest and goes on, a release's refuses.
+  # Pin it from that line; re-pin when build-ffmpeg-windows.yml makes a
+  # new zip.
+  FFMPEG_WIN_SHA256: ""
   # Must match the x264 entry in scripts/licenses.py.
   X264_COMMIT: 31e19f92f00c7003fa115047ce50978bc98c3a0d
 
 jobs:
   licenses:
     uses: ./.github/workflows/licenses.yml
+
+  # The checks (format, lints, tests) on the tagged commit, beside the
+  # builds: nothing is attached to the release until they passed. A push
+  # to main is checked by pr-check's own run (review 2026-10-27, P1-4).
+  check:
+    if: github.event_name == 'release'
+    uses: ./.github/workflows/pr-check.yaml
 
   # A release's tag has to be the workspace's version. Checked first:
   # it used to be the last job's business, after an hour of builds.
@@ -293,9 +308,27 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
+          $ErrorActionPreference = "Stop"
           $obj = "ci/ffmpeg-$($env:VCPKG_COMMIT.Substring(0,10))-avcodec-avformat-swscale-x264-gpl-nvcodec-amf-x64-windows-static-md.zip"
           aws s3 cp "s3://baucord/$obj" ffmpeg-prebuilt.zip --endpoint-url https://6bcc35de83e46a771896026baf11b4ac.r2.cloudflarestorage.com
+          if ($LASTEXITCODE -ne 0) { throw "could not download $obj" }
+          # Verified before anything is unpacked (P1-5). The digest is
+          # pinned in FFMPEG_WIN_SHA256 at the top of this file.
+          $hash = (Get-FileHash ffmpeg-prebuilt.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $want = "$env:FFMPEG_WIN_SHA256".Trim().ToLowerInvariant()
+          Write-Host "ffmpeg-prebuilt.zip SHA-256: $hash ($obj)"
+          if ($want -eq "") {
+            if ($env:GITHUB_EVENT_NAME -eq "release") {
+              Write-Host "::error::FFMPEG_WIN_SHA256 is not pinned in release.yml; the zip's digest is $hash — pin it and release again"
+              exit 1
+            }
+            Write-Host "::warning::FFMPEG_WIN_SHA256 is not pinned in release.yml; a release will refuse. The zip's digest is $hash"
+          } elseif ($hash -ne $want) {
+            Write-Host "::error::ffmpeg-prebuilt.zip is not the pinned file: SHA-256 $hash, release.yml says $want"
+            exit 1
+          }
           7z x ffmpeg-prebuilt.zip -oC:\ffmpeg-prebuilt
+          if ($LASTEXITCODE -ne 0) { throw "could not unpack ffmpeg-prebuilt.zip" }
           echo "FFMPEG_DIR=C:\ffmpeg-prebuilt\x64-windows-static-md" >> $env:GITHUB_ENV
 
       # No sccache: the Rust cache above restores `target/` from the
@@ -531,8 +564,9 @@ jobs:
 
   release:
     # macos-app too: its disk image and the updater's zip go up with the
-    # rest, before the version file names them.
-    needs: [build, macos-app]
+    # rest, before the version file names them. And the checks: a build
+    # that passed them is the only one handed out (P1-4).
+    needs: [build, macos-app, check]
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
     permissions:

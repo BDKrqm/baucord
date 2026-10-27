@@ -18,10 +18,8 @@
 //! `start` returns `None` and the loop polls the socket every
 //! millisecond.
 
-use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc,
-};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 use crossbeam_channel::{Receiver, Sender};
 use transport::UdpIo;

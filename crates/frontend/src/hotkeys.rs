@@ -24,18 +24,14 @@
 // hotkey manager (common on Wayland, some remote sessions, etc.) the
 // app runs without them instead of crashing at startup.
 
-use std::{
-    collections::HashMap,
-    str::FromStr,
-    sync::{Once, OnceLock},
-};
+use std::collections::HashMap;
+use std::str::FromStr;
+use std::sync::{Once, OnceLock};
 
 use client::config::{BindableAction, KeybindEntry, Settings};
 use crossbeam_channel::{unbounded, Receiver, Sender};
-use global_hotkey::{
-    hotkey::{Code, HotKey, Modifiers},
-    GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
-};
+use global_hotkey::hotkey::{Code, HotKey, Modifiers};
+use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use keywatch::{platform_key, Binding, Watcher};
 use log::{info, warn};
 

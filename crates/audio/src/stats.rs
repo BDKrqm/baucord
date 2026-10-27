@@ -4,13 +4,9 @@
 //! Tracks everything a TeamSpeak-style client needs for its debug overlay:
 //! packet rates, codec stats, bandwidth, latency budgets, and buffer health.
 
-use std::{
-    sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
-        Mutex,
-    },
-    time::Instant,
-};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::time::Instant;
 
 use crate::aec::AecReport;
 
@@ -335,7 +331,8 @@ impl AudioStats {
         self.aec.lock().ok().and_then(|g| g.clone())
     }
 
-    pub fn get_summary(&self) -> String {
+    #[must_use]
+    pub fn summary(&self) -> String {
         let elapsed = self.start_time.elapsed().as_secs();
         let aec = self
             .aec_report()
@@ -393,7 +390,8 @@ impl AudioStats {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::atomic::Ordering, time::Duration};
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
 
     use super::AudioStats;
 

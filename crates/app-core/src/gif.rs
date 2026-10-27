@@ -78,7 +78,8 @@ impl GifStream {
     }
 
     fn reopen(bytes: &Arc<[u8]>) -> Result<image::Frames<'static>, ImageError> {
-        use image::{codecs::gif::GifDecoder, AnimationDecoder, ImageDecoder};
+        use image::codecs::gif::GifDecoder;
+        use image::{AnimationDecoder, ImageDecoder};
 
         let mut decoder = GifDecoder::new(std::io::Cursor::new(SharedBytes(Arc::clone(bytes))))
             .map_err(|e| ImageError::Codec(e.to_string()))?;
@@ -193,7 +194,8 @@ pub(crate) fn loop_secs(bytes: &[u8]) -> f64 {
 
 #[cfg(test)]
 mod decode_tests {
-    use image::{codecs::gif::GifEncoder, Delay, Frame, RgbaImage};
+    use image::codecs::gif::GifEncoder;
+    use image::{Delay, Frame, RgbaImage};
 
     use super::*;
 

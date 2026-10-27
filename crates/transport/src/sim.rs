@@ -6,13 +6,11 @@
 //! Every acceptance scenario in §10 that does not need a real NIC runs
 //! here, in-process, in `cargo test`.
 
-use std::{
-    any::Any,
-    cmp::Reverse,
-    collections::{BinaryHeap, HashMap},
-    net::SocketAddr,
-    time::{Duration, Instant},
-};
+use std::any::Any;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
+use std::net::SocketAddr;
+use std::time::{Duration, Instant};
 
 use bytes::BytesMut;
 use rand::{RngExt, SeedableRng};
@@ -49,12 +47,14 @@ impl LinkSpec {
         }
     }
 
+    /// The link drops this fraction of datagrams (0 to 1).
     #[must_use]
     pub fn with_loss(mut self, loss: f64) -> Self {
         self.loss = loss;
         self
     }
 
+    /// Each datagram's delay varies by up to this much.
     #[must_use]
     pub fn with_jitter(mut self, jitter: Duration) -> Self {
         self.jitter = jitter;
@@ -126,6 +126,8 @@ pub struct SimNet {
 }
 
 impl SimNet {
+    /// A network with no nodes; `seed` makes its losses and jitter
+    /// repeatable.
     #[must_use]
     pub fn new(seed: u64) -> Self {
         Self {
@@ -146,6 +148,8 @@ impl SimNet {
         self.now
     }
 
+    /// Add a node at `addr`, driven through its `DriverHost`; the id
+    /// addresses it in every later call.
     pub fn add_node(&mut self, host: impl DriverHost, addr: SocketAddr) -> NodeId {
         self.nodes.push(Node {
             addr,
@@ -161,6 +165,7 @@ impl SimNet {
         self.nodes[node.0].addr = addr;
     }
 
+    /// The node's driver, for the test to call directly.
     pub fn driver(&mut self, node: NodeId) -> &mut Driver {
         self.nodes[node.0].host.driver()
     }
@@ -177,6 +182,8 @@ impl SimNet {
         self.set_link_one_way(b, a, spec);
     }
 
+    /// Set the link from `from` to `to` only (`set_link` sets both
+    /// directions).
     pub fn set_link_one_way(&mut self, from: NodeId, to: NodeId, spec: LinkSpec) {
         self.links.insert(
             (from.0, to.0),

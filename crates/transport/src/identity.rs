@@ -20,22 +20,18 @@
 //! the time in the file name, which survives copies and restores; a
 //! `<stem>.key` retired by an older build falls back to the file's mtime.
 
-use std::{
-    fmt, fs,
-    io::Write,
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use std::{fmt, fs};
 
 use base64::Engine;
 use log::info;
-use rustls::{
-    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
-    crypto::CryptoProvider,
-    pki_types::{CertificateDer, ServerName, UnixTime},
-    DigitallySignedStruct, SignatureScheme,
-};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::crypto::CryptoProvider;
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{DigitallySignedStruct, SignatureScheme};
 
 use crate::der;
 
@@ -92,6 +88,8 @@ const SERVER_NAME: &str = "baucord";
 pub struct Fingerprint(pub [u8; 32]);
 
 impl Fingerprint {
+    /// The fingerprint of a public key given as its DER
+    /// `SubjectPublicKeyInfo`: what certificates and pins carry.
     #[must_use]
     pub fn of_spki(spki_der: &[u8]) -> Self {
         Self(crate::sha256::digest(spki_der))
@@ -169,6 +167,8 @@ pub fn encode_successor_proofs(proofs: &[SuccessorProof]) -> Vec<u8> {
     out
 }
 
+/// The successor proofs a server sends during the handshake, from their
+/// wire form; `None` when malformed.
 #[must_use]
 pub fn decode_successor_proofs(bytes: &[u8]) -> Option<Vec<SuccessorProof>> {
     let (&count, mut rest) = bytes.split_first()?;
@@ -308,18 +308,24 @@ fn hex_short(bytes: &[u8]) -> String {
 
 // ── Errors ──────────────────────────────────────────────────────────────
 
+/// What went wrong loading or making a server identity or a client key.
 #[derive(Debug, thiserror::Error)]
 pub enum IdentityError {
+    /// The identity directory could not be read or written.
     #[error("identity directory {0}: {1}")]
     Io(PathBuf, std::io::Error),
+    /// The server's signing key could not be made or parsed.
     #[cfg(any(test, feature = "server"))]
     #[error("identity key {0}: {1}")]
     Key(PathBuf, rcgen::Error),
+    /// The client's key file is unusable.
     #[error("client key {0}: {1}")]
     ClientKey(PathBuf, String),
+    /// The self-signed certificate could not be made from the key.
     #[cfg(any(test, feature = "server"))]
     #[error("certificate generation: {0}")]
     Certificate(rcgen::Error),
+    /// rustls refused the configuration built from the identity.
     #[error("TLS configuration: {0}")]
     Tls(rustls::Error),
 }
@@ -349,19 +355,28 @@ pub enum Trust {
     /// No pin yet — trust on first use; the caller stores the fingerprint.
     FirstUse,
     /// A successor proof from the pinned key; the caller re-pins silently.
-    Successor { from: Fingerprint },
+    Successor {
+        /// The pinned key that vouched for the new one.
+        from: Fingerprint,
+    },
 }
 
 /// What the verifier saw during the last handshake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Observation {
+    /// The handshake was accepted, with the key seen and why it was
+    /// trusted.
     Accepted {
+        /// The server key seen.
         fingerprint: Fingerprint,
+        /// Why it was accepted.
         trust: Trust,
     },
     /// Refused: identity changed with no valid successor proof.
     Rejected {
+        /// The pinned key.
         expected: Fingerprint,
+        /// The key the server presented.
         observed: Fingerprint,
     },
 }
@@ -376,6 +391,8 @@ pub struct PinnedVerifier {
 }
 
 impl PinnedVerifier {
+    /// A verifier that accepts `pin` only (or, with `None`, any key on
+    /// first use).
     #[must_use]
     pub fn new(pin: Option<Fingerprint>) -> Arc<Self> {
         Arc::new(Self {
@@ -524,10 +541,8 @@ mod tests {
 
     use rcgen::{KeyPair, PublicKeyData, SigningKey, PKCS_ED25519};
 
-    use super::{
-        server::{retired_at_from_name, unix_secs, KEY_FILE, RETIRED_DIR},
-        *,
-    };
+    use super::server::{retired_at_from_name, unix_secs, KEY_FILE, RETIRED_DIR};
+    use super::*;
 
     #[test]
     fn client_key_roundtrips_and_signs_verifiably() {

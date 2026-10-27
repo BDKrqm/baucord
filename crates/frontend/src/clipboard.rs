@@ -70,6 +70,11 @@ pub fn clipboard_file() -> Option<std::path::PathBuf> {
         fn DragQueryFileW(hdrop: *mut c_void, index: u32, out: *mut u16, cch: u32) -> u32;
     }
 
+    // SAFETY: the declarations match the Win32 signatures; the clipboard is
+    // opened and closed on this thread with no early exit between (the
+    // closure keeps every return inside), and `DragQueryFileW` is called
+    // first for the length and then with a buffer of `len + 1` code units, as
+    // it documents.
     unsafe {
         if IsClipboardFormatAvailable(CF_HDROP) == 0 || OpenClipboard(std::ptr::null_mut()) == 0 {
             return None;
@@ -125,6 +130,10 @@ pub fn clipboard_png() -> Option<Vec<u8>> {
     // "PNG\0" as UTF-16.
     let name: [u16; 4] = [u16::from(b'P'), u16::from(b'N'), u16::from(b'G'), 0];
 
+    // SAFETY: the declarations match the Win32 signatures; the clipboard is
+    // opened and closed on this thread with every exit inside the closure;
+    // the handle is locked before its memory is read, `GlobalSize` bounds the
+    // read, and it is unlocked before the clipboard closes.
     unsafe {
         let format = RegisterClipboardFormatW(name.as_ptr());
         if format == 0

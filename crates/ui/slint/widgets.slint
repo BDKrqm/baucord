@@ -559,7 +559,15 @@ export component CheckRow inherits Rectangle {
     in property <bool> enabled: true;
     callback toggled(bool);
 
-    height: body.preferred-height + 2 * Theme.gap-xs;
+    // As tall as its texts wrapped at their width, read from the texts
+    // themselves as WarningNote does: measured through the layout, a
+    // hint of three lines counted as two and ran into the row below
+    // (the Stream tab's, 1.4.0). The box is the floor.
+    // The constants keep the rows where the layout had them, to the
+    // pixel (measured in slint-viewer renders of the Sounds tab).
+    height: max(box.y * 2 + box.height, title.preferred-height + (root.hint == "" ? 8px : 4px) + root.hint-height) + 2 * Theme.gap-xs;
+    /// The hint's room: its wrapped height under a 6px gap.
+    property <length> hint-height: root.hint == "" ? 0 : 6px + hint.preferred-height;
     // Concentric with the box: 4px box radius + 4px padding.
     border-radius: 8px;
     background: touch.has-hover ? Theme.hover : transparent;
@@ -588,13 +596,18 @@ export component CheckRow inherits Rectangle {
             }
         }
         VerticalLayout {
-            spacing: 2px;
-            Text {
+            alignment: start;
+            title := Text {
                 text: root.text;
                 color: root.enabled ? Theme.text-primary : Theme.text-muted;
                 font-size: Theme.font-body;
             }
-            if root.hint != "" : Text {
+            // Always here, so the row can measure it; nothing when
+            // there is no hint. Its box holds the gap above the words.
+            hint := Text {
+                visible: root.hint != "";
+                height: root.hint-height;
+                vertical-alignment: bottom;
                 text: root.hint;
                 color: Theme.text-muted;
                 opacity: root.enabled ? 1.0 : 0.6;

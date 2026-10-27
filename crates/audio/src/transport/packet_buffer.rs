@@ -30,7 +30,8 @@ use std::collections::VecDeque;
 
 use opus::{Channels, Decoder};
 
-use crate::{transport::packet::AudioPacket, FRAME_SIZE, OPUS_SAMPLE_RATE};
+use crate::transport::packet::AudioPacket;
+use crate::{FRAME_SIZE, OPUS_SAMPLE_RATE};
 
 /// Largest single packet this buffer decodes: 40 ms at 48 kHz (the rate
 /// controller's low-bitrate rungs use 40 ms frames). Bump to 2880 only if

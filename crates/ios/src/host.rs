@@ -20,21 +20,19 @@
 //! are called from. Photos hands its file over on a background queue;
 //! the pick's callback is `Send` and hops back to the UI itself.
 
-use std::{
-    cell::RefCell,
-    path::{Path, PathBuf},
-    ptr::NonNull,
-};
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
+use std::ptr::NonNull;
 
 use app_core::files::{safe_name, write_new, PickSlot};
 use block2::RcBlock;
 use frontend::host::{ChimeRoute, Hooks, KeepAlive, Notice, NoticeKind, OnPick, Saved};
 use i18n::t;
+use objc2::rc::{Allocated, Retained};
+use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{
-    define_class, extern_class, extern_methods, msg_send,
-    rc::{Allocated, Retained},
-    runtime::{NSObject, NSObjectProtocol, ProtocolObject},
-    DefinedClass, MainThreadMarker, MainThreadOnly,
+    define_class, extern_class, extern_methods, msg_send, DefinedClass, MainThreadMarker,
+    MainThreadOnly,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{NSArray, NSDictionary, NSError, NSString, NSURL};
@@ -354,11 +352,16 @@ define_class!(
     #[ivars = u64]
     struct PhotosDelegate;
 
+    // SAFETY: the class is an `NSObject` subclass (`super(NSObject)` above),
+    // which is all the protocol asks.
     unsafe impl NSObjectProtocol for PhotosDelegate {}
 
     // The bindings declare the protocol's one (required) method for
     // macOS only; it is implemented here under the protocol all the
     // same, which is where objc2's debug check looks for it.
+    // SAFETY: the method below has the selector and signature the protocol
+    // declares, and the class is retained by the picker only while it is
+    // presented.
     unsafe impl PHPickerViewControllerDelegate for PhotosDelegate {
         #[unsafe(method(picker:didFinishPicking:))]
         fn picker_did_finish(
@@ -378,6 +381,8 @@ define_class!(
         }
     }
 
+    // SAFETY: the one method implemented has the protocol's selector and
+    // signature; the rest are optional.
     unsafe impl UIAdaptivePresentationControllerDelegate for PhotosDelegate {
         #[unsafe(method(presentationControllerDidDismiss:))]
         fn did_dismiss(&self, _controller: &UIPresentationController) {
@@ -494,8 +499,12 @@ define_class!(
     #[ivars = u64]
     struct FilesDelegate;
 
+    // SAFETY: the class is an `NSObject` subclass (`super(NSObject)` above),
+    // which is all the protocol asks.
     unsafe impl NSObjectProtocol for FilesDelegate {}
 
+    // SAFETY: the methods below have the selectors and signatures the
+    // protocol declares.
     unsafe impl UIDocumentPickerDelegate for FilesDelegate {
         #[unsafe(method(documentPicker:didPickDocumentsAtURLs:))]
         fn did_pick_documents(
@@ -532,6 +541,8 @@ define_class!(
         }
     }
 
+    // SAFETY: the one method implemented has the protocol's selector and
+    // signature; the rest are optional.
     unsafe impl UIAdaptivePresentationControllerDelegate for FilesDelegate {
         #[unsafe(method(presentationControllerDidDismiss:))]
         fn did_dismiss(&self, _controller: &UIPresentationController) {
@@ -614,8 +625,12 @@ define_class!(
     #[thread_kind = MainThreadOnly]
     struct PreviewDelegate;
 
+    // SAFETY: the class is an `NSObject` subclass (`super(NSObject)` above),
+    // which is all the protocol asks.
     unsafe impl NSObjectProtocol for PreviewDelegate {}
 
+    // SAFETY: the methods below have the selectors and signatures the
+    // protocol declares.
     unsafe impl UIDocumentInteractionControllerDelegate for PreviewDelegate {
         #[unsafe(method_id(documentInteractionControllerViewControllerForPreview:))]
         fn view_controller_for_preview(

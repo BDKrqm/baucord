@@ -293,6 +293,7 @@ impl AppState {
             self.voice.tx.send(control).ok();
         }
         self.sync_stream_output();
+        self.apply_share_live();
         self.refresh_hotkeys();
         super::apply_log_level(&self.settings);
         if self.settings.language != before.language {

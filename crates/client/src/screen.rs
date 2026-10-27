@@ -19,36 +19,26 @@
 // bitrate ladder on the encoder; viewer keyframe-request distress drives
 // a small fps pacer. See the "Sender-side adaptation" section below.
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
-        Arc, Mutex,
-    },
-    thread,
-    time::{Duration, Instant},
-};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
-use audio::stream::{
-    decoder::{self as stream_decoder, StreamAudioPacket, StreamDecoder},
-    input::{PacketSink, SystemAudioCapture},
-};
+use audio::stream::decoder::{self as stream_decoder, StreamAudioPacket, StreamDecoder};
+use audio::stream::input::{PacketSink, SystemAudioCapture};
 use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, SendError, Sender, TrySendError};
 use log::{info, warn};
+use video::buffer::{BufferedPacket, VideoJitterBuffer};
+use video::capture::{CaptureStatus, Capturer};
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use video::codec::FfmpegDecoder;
-use video::{
-    buffer::{BufferedPacket, VideoJitterBuffer},
-    capture::{CaptureStatus, Capturer},
-    codec::FfmpegEncoder,
-    CodecError, EncodedFrame, Quality, VideoDecoder, VideoEncoder,
-};
+use video::codec::FfmpegEncoder;
+use video::{CodecError, EncodedFrame, EncoderPreference, Quality, VideoDecoder, VideoEncoder};
 
+use crate::network::{MediaOut, NetworkControl};
 pub use crate::viewlog::PresentTally;
-use crate::{
-    network::{MediaOut, NetworkControl},
-    viewlog::{ShareState, Sharing, Viewing},
-};
+use crate::viewlog::{ShareState, Sharing, Viewing};
 
 /// What the UI did with each watched stream's frames since its last
 /// summary line, by sharer (see [`PresentTally`]).
@@ -64,6 +54,11 @@ pub enum ScreenControl {
         monitor_index: usize,
         /// Who may see the stream (channel-only or the whole server).
         scope: protocol::ShareScope,
+        /// Hardware, software or either (Settings → Stream, 1.4.0).
+        encoder: EncoderPreference,
+        /// Ask the GPU scheduler to run the share ahead of a game
+        /// (`video::gpu_priority`; Windows).
+        gpu_priority: bool,
     },
     /// Stop sharing our screen.
     StopSharing,
@@ -524,6 +519,8 @@ struct CaptureState {
     uplink_loss_pct: f32,
     /// Encoder backend name, for telemetry.
     encoder_name: &'static str,
+    /// What the share may switch to when that one keeps failing.
+    encoder_preference: EncoderPreference,
     /// Encodes that failed in a row (`encode_failed`).
     encode_failures: u32,
     /// IDRs we forced (viewer requests, oversized-frame restarts).
@@ -971,7 +968,7 @@ fn encode_failed(state: &mut CaptureState, e: &CodecError) {
     }
     state.encode_failures = 0;
     let failing = state.encoder_name;
-    match FfmpegEncoder::new_without(state.quality, &[failing]) {
+    match FfmpegEncoder::new_with(state.quality, state.encoder_preference, &[failing]) {
         Ok(mut next) => {
             next.set_bitrate_scale_pct(state.encoder.bitrate_scale_pct());
             next.force_keyframe();
@@ -1590,17 +1587,23 @@ fn handle_control(
             quality,
             monitor_index,
             scope,
+            encoder: encoder_preference,
+            gpu_priority,
         } => {
             // Restart-while-sharing replaces the pipeline. The vendored
             // DXGI backend shuts down cleanly on drop (thread joined,
             // duplication released), so no park/reuse dance is needed.
             drop(st.capture.take());
+            // Before the capturer: its device asks for the GPU thread
+            // priority as it opens (Settings → Stream, 1.4.0).
+            video::gpu_priority::request(gpu_priority);
             // Create capturer — picks the best backend for the platform
             // (streaming on Windows, screenshots elsewhere / as
             // fallback) and logs the choice.
             let capturer = match Capturer::new(monitor_index, quality) {
                 Ok(c) => c,
                 Err(e) => {
+                    video::gpu_priority::release();
                     event_tx
                         .send(ScreenEvent::Error(format!("Capture init: {e}")))
                         .ok();
@@ -1609,9 +1612,10 @@ fn handle_control(
             };
 
             let (encoder, encoder_name): (Box<dyn VideoEncoder + Send>, &'static str) =
-                match create_encoder(quality) {
+                match create_encoder(quality, encoder_preference) {
                     Ok(e) => e,
                     Err(e) => {
+                        video::gpu_priority::release();
                         event_tx
                             .send(ScreenEvent::Error(format!("Encoder init: {e}")))
                             .ok();
@@ -1620,8 +1624,10 @@ fn handle_control(
                 };
 
             info!(
-                "Screen share started: {quality}, monitor {monitor_index}, capture backend: {}",
-                capturer.backend_name()
+                "Screen share started: {quality}, monitor {monitor_index}, capture backend: {}, \
+                 encoder preference {}",
+                capturer.backend_name(),
+                encoder_preference.key()
             );
 
             // Start system audio capture (best-effort — non-fatal if unsupported)
@@ -1656,6 +1662,7 @@ fn handle_control(
                 offered_since: Instant::now(),
                 uplink_loss_pct: 0.0,
                 encoder_name,
+                encoder_preference,
                 forced_keyframes: 0,
                 keyframe_requests: 0,
                 viewer_loss_pct: 0.0,
@@ -1696,6 +1703,7 @@ fn handle_control(
 
         ScreenControl::StopSharing => {
             if st.capture.take().is_some() {
+                video::gpu_priority::release();
                 shared.is_sharing.store(false, Ordering::Relaxed);
                 shared.fps_scale_pct.store(100, Ordering::Relaxed);
                 shared.stream_loss_pct.store(0, Ordering::Relaxed);
@@ -2278,11 +2286,13 @@ impl Drop for AudioRoute {
 
 // ── Encoder/decoder factory ─────────────────────────────────────────────
 
-/// Create the video encoder (`FFmpeg` is currently the only backend).
+/// Create the video encoder (`FFmpeg` is currently the only backend),
+/// hardware, software or either as Settings → Stream says.
 fn create_encoder(
     quality: Quality,
+    preference: EncoderPreference,
 ) -> Result<(Box<dyn VideoEncoder + Send>, &'static str), CodecError> {
-    match FfmpegEncoder::new(quality) {
+    match FfmpegEncoder::new_with(quality, preference, &[]) {
         Ok(enc) => {
             let name = enc.encoder_name();
             info!("Using FFmpeg encoder: {name}");

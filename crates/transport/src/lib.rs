@@ -12,6 +12,10 @@
 //! - [`config::Budget`] — the §4.5 buffer budgets per side.
 //! - [`sim`] (feature `sim`) — the in-process network harness.
 
+// A published crate: every public item says what it is for
+// (Google's Rust style guide; SESSION-GUIDE.md §4).
+#![warn(missing_docs)]
+
 pub mod config;
 mod der;
 pub mod driver;

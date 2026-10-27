@@ -3,9 +3,12 @@
 // in-window image viewer overlay (chat image tapped → darkened scrim,
 // ◀ ▶ stepping, save).
 
-use std::{cell::Cell, rc::Rc, time::Duration};
+use std::cell::Cell;
+use std::rc::Rc;
+use std::time::Duration;
 
-use app_core::{fps::FpsCounter, stats::FrameRing};
+use app_core::fps::FpsCounter;
+use app_core::stats::FrameRing;
 use i18n::t;
 use slint::{ComponentHandle, Model};
 use ui::{MainWindow, State, StreamViewerWindow};
@@ -78,7 +81,8 @@ impl Minimized {
 /// events, and an X11 restore need not send either.
 #[cfg(feature = "desktop")]
 fn window_minimized(win: &slint::Window) -> bool {
-    use slint::winit_030::{winit::window::Window, WinitWindowAccessor};
+    use slint::winit_030::winit::window::Window;
+    use slint::winit_030::WinitWindowAccessor;
     win.with_winit_window(Window::is_minimized)
         .flatten()
         .unwrap_or_else(|| win.is_minimized())
@@ -310,6 +314,14 @@ impl Viewer {
         match &self.surface {
             Surface::Window(win) => {
                 let _ = win.hide();
+                // A window closed while minimized: the stream is not
+                // hidden any more, it is gone. Told to the network
+                // thread alone (the screen thread forgets on its own
+                // when the watch or the share ends); its reveal hook
+                // may still fire and finds nothing to do (review
+                // 2026-10-27, P1-2).
+                self.minimized.told.set(false);
+                client::network::set_stream_hidden(self.minimized.client_id, false);
             }
             Surface::Page(main) => {
                 let s = main.global::<State>();

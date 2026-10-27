@@ -15,11 +15,9 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    admin::{AdminCommand, AdminError, AdminOutcome, RestrictionKind},
-    lanes::Lane,
-    permissions::{Rank, RoleId},
-};
+use crate::admin::{AdminCommand, AdminError, AdminOutcome, RestrictionKind};
+use crate::lanes::Lane;
+use crate::permissions::{Rank, RoleId};
 
 /// Transport-assigned identity of a connection, valid for its lifetime.
 /// The server assigns a random non-zero id at admission and every peer
@@ -91,6 +89,9 @@ pub const MAX_IMAGE_CHUNKS: u32 = (MAX_CHAT_IMAGE_BYTES / IMAGE_CHUNK_BYTES + 1)
 /// The largest blob the wire carries (spec §7: `files.max_mb` is capped
 /// here whatever the config says), and the chunks it spans.
 pub const MAX_BLOB_BYTES: usize = 50 * 1024 * 1024;
+/// Most chunks a blob may span: the ceiling of [`MAX_BLOB_BYTES`] in
+/// [`IMAGE_CHUNK_BYTES`] pieces, plus one for the remainder. Reassemblers
+/// refuse anything claiming more.
 #[allow(clippy::cast_possible_truncation)] // 3201 with current constants
 pub const MAX_BLOB_CHUNKS: u32 = (MAX_BLOB_BYTES / IMAGE_CHUNK_BYTES + 1) as u32;
 
@@ -117,7 +118,9 @@ pub struct ChatMessage {
     pub id: u64,
     /// Server wall clock, milliseconds since the Unix epoch.
     pub ts: u64,
+    /// The author's session.
     pub client_id: ClientId,
+    /// The text as typed, at most `limits.max_chat_bytes`.
     pub text: String,
 }
 
@@ -170,6 +173,7 @@ impl DenyReason {
 pub struct ChannelInfo {
     /// Stable id for this server run: the index in the config list.
     pub id: u16,
+    /// The name as the config or its creator spelled it.
     pub name: String,
     /// Whether [`ClientMessage::JoinChannel`] must carry a password.
     pub has_password: bool,
@@ -228,7 +232,10 @@ impl ChannelDenyReason {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Auth {
     /// The 1.0 room secret. Refused by a 1.1 server.
-    Shared { password: Option<String> },
+    Shared {
+        /// The room password, if the room had one.
+        password: Option<String>,
+    },
     /// "You know this device": `Hello.client_key` is the login. Every
     /// visit after the first.
     Key,
@@ -236,7 +243,10 @@ pub enum Auth {
     /// server creates the user, links the key and grants the code's
     /// role. A known key sending a code is logged in as `Key` and no
     /// use is burned.
-    Invite { code: String },
+    Invite {
+        /// The code as typed; the server canonicalizes it.
+        code: String,
+    },
 }
 
 /// Proof that the client holds a stable Ed25519 identity key: the public
@@ -245,6 +255,7 @@ pub enum Auth {
 /// `Hello` proves nothing on another session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientKeyProof {
+    /// The Ed25519 public key, raw.
     pub public_key: [u8; 32],
     /// 64-byte Ed25519 signature.
     pub signature: Vec<u8>,
@@ -263,7 +274,9 @@ pub enum NeedInviteReason {
 /// Why an invite code was not accepted (spec §3.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InviteInvalidReason {
+    /// Its expiry has passed.
     Expired,
+    /// An admin revoked it.
     Revoked,
     /// Its use cap is reached.
     Exhausted,
@@ -286,15 +299,26 @@ pub enum RefusedReason {
     // ── 1.1 (feature bit `INVITES`) ─────────────────────────────────
     /// Unknown (or retired) key and no invite code: the client shows
     /// the invite field.
-    NeedInvite { why: NeedInviteReason },
+    NeedInvite {
+        /// Which: an unknown key, or a retired one.
+        why: NeedInviteReason,
+    },
     /// The code did not admit: the client says which and keeps the
     /// field.
-    InviteInvalid { why: InviteInvalidReason },
+    InviteInvalid {
+        /// Which way the code failed.
+        why: InviteInvalidReason,
+    },
     /// The chosen name belongs to someone else: ask for another.
     NameInUse,
     /// A `server` restriction on the key, user or address. `until` is
     /// milliseconds since the Unix epoch; `None` is indefinite.
-    Banned { until: Option<u64>, reason: String },
+    Banned {
+        /// When the ban ends; `None` for until lifted.
+        until: Option<u64>,
+        /// The reason the admin gave.
+        reason: String,
+    },
 }
 
 impl RefusedReason {
@@ -339,8 +363,11 @@ impl RefusedReason {
 /// Client build and platform.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ClientInfo {
+    /// The app's version (`CARGO_PKG_VERSION`).
     pub version: String,
+    /// The platform (`windows`, `macos`, `linux`, `android`, `ios`).
     pub os: String,
+    /// The CPU architecture (`x86_64`, `aarch64`).
     pub arch: String,
     /// Settings live next to the executable (portable install).
     pub portable: bool,
@@ -351,11 +378,17 @@ pub struct ClientInfo {
 /// media decision (spec §6.1).
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct PathSample {
+    /// Smoothed round-trip time to the server, milliseconds.
     pub rtt_ms: u32,
+    /// Packets the QUIC stack declared lost, as a percentage of those sent.
     pub loss_pct: f32,
+    /// The congestion window, bytes.
     pub cwnd: u64,
+    /// Bytes sent and not yet acknowledged.
     pub bytes_in_flight: u64,
+    /// Sending rate over the sample's window, kbit/s.
     pub kbps_up: f32,
+    /// Receiving rate over the sample's window, kbit/s.
     pub kbps_down: f32,
     /// Datagrams dropped at send time (buffer full or too large).
     pub datagram_send_drops: u64,
@@ -368,42 +401,71 @@ pub struct PathSample {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AudioSample {
     // ── encode ──
+    /// The Opus bitrate in force, bits per second.
     pub bitrate_bps: u32,
     /// Opus band as the ladder names it (`"wide"`, `"narrow"`, …).
     pub band: String,
+    /// Milliseconds of audio per packet (20 or 40).
     pub frame_ms: u32,
+    /// Whether a redundant copy of the previous frame rides in each packet.
     pub red: bool,
+    /// The packet-loss hint given to the Opus encoder for in-band FEC, 0 to
+    /// 100.
     pub fec_hint_pct: u32,
+    /// The uplink loss the receiver reports, smoothed, as a percentage.
     pub smoothed_loss_pct: f32,
     /// The encoder transmitted enough packets in the last window for
     /// its receiver report to count (spec §6.1).
     pub exercised: bool,
+    /// Voice packets sent this session.
     pub packets_sent: u64,
+    /// The last Opus encode, microseconds.
     pub encode_us: u64,
+    /// Capture glitches: discontinuities the OS reported plus ring
+    /// overflows.
     pub input_overruns: u64,
+    /// Playback underruns: times the output ran dry.
     pub output_underruns: u64,
+    /// The capture device opened, by name.
     pub input_device: String,
+    /// The playback device opened, by name.
     pub output_device: String,
     // ── decode ──
+    /// Voice packets received this session.
     pub packets_received: u64,
+    /// Voice packets that never arrived (by sequence gaps).
     pub packets_lost: u64,
+    /// Packets recovered from in-band FEC in the following packet.
     pub fec_recoveries: u64,
+    /// Packets recovered from a RED copy in a later packet.
     pub red_recoveries: u64,
+    /// Frames the decoder had to make up (packet-loss concealment).
     pub plc_frames: u64,
+    /// The jitter measured at the receiver, milliseconds.
     pub jitter_ms: u32,
+    /// The jitter buffer's current target depth, milliseconds.
     pub jitter_target_ms: u32,
+    /// The last Opus decode, microseconds.
     pub decode_us: u64,
 }
 
 /// Screen-share sender counters.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SharingSample {
+    /// The preset the share runs at (`720p30`, `1080p60`, ...).
     pub preset: String,
+    /// The rate ladder's rung as a percentage of the preset's bitrate.
     pub rung_pct: u32,
+    /// Frames encoded per second over the sample's window.
     pub fps_encoded: f32,
+    /// The frame-rate scale the pacer applied under distress, percent of
+    /// the preset's.
     pub fps_scale_pct: u32,
+    /// Keyframes the sharer forced (a new viewer, a stream restart).
     pub forced_keyframes: u64,
+    /// Keyframes viewers asked for.
     pub keyframe_requests: u64,
+    /// The encoder in use (`h264_nvenc`, `libx264`, ...).
     pub encoder: String,
     /// Groups the sharer reset because they fell behind the deadline.
     pub groups_reset: u64,
@@ -412,10 +474,15 @@ pub struct SharingSample {
 /// Screen-share viewer counters, one per watched stream.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ViewingSample {
+    /// Whose stream this is.
     pub sharer: ClientId,
+    /// Frames decoded and shown.
     pub frames_decoded: u64,
+    /// Frames dropped before showing (late, or the viewer hidden).
     pub frames_dropped: u64,
+    /// Keyframes this viewer asked the sharer for.
     pub keyframe_requests_sent: u64,
+    /// The last decode, microseconds.
     pub decode_us: u64,
 }
 
@@ -423,10 +490,15 @@ pub struct ViewingSample {
 /// minute while nothing moves (review 2026-10, P3-40).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TelemetrySample {
+    /// The build and platform.
     pub client: ClientInfo,
+    /// The transport path.
     pub path: PathSample,
+    /// The voice engine's counters, when one is running.
     pub audio: Option<AudioSample>,
+    /// The share's counters, while sharing.
     pub sharing: Option<SharingSample>,
+    /// One entry per stream being watched.
     pub viewing: Vec<ViewingSample>,
 }
 
@@ -436,29 +508,40 @@ pub enum TelemetryEvent {
     // (Variants carry a `String` or two; the size spread is small.)
     /// The audio rate ladder moved.
     RateRungChanged {
+        /// The rung now in force, 0 = the top.
         level: u32,
+        /// The Opus bitrate at that rung, bits per second.
         bitrate_bps: u32,
+        /// Whether redundancy is on at that rung.
         red: bool,
     },
     /// The server-identity prompt was shown to the user.
     IdentityPromptShown,
     /// An audio device changed or was restarted.
     DeviceChanged {
+        /// What changed, as the engine logged it.
         description: String,
     },
     /// A burst of capture discontinuities.
     InputDiscontinuityBurst {
+        /// Discontinuities in the burst.
         count: u64,
     },
     /// The transport reported send-buffer pressure.
     SendBufferPressure,
+    /// A screen share started, with the preset and the encoder it opened
+    /// on.
     ShareStarted {
+        /// The preset (`720p30`, `1080p60`, ...).
         preset: String,
+        /// The encoder it opened on.
         encoder: String,
     },
+    /// The screen share ended.
     ShareStopped,
     /// The connection ended, as the client understood it.
     Disconnected {
+        /// The reason, as shown to the user.
         reason: String,
     },
 }
@@ -469,7 +552,9 @@ pub enum TelemetryEvent {
 /// 1.1.1; the variant exists so the shape does not change then.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConvRef {
+    /// The general chat.
     General,
+    /// The direct-message conversation with this user.
     Dm(UserId),
 }
 
@@ -477,25 +562,32 @@ pub enum ConvRef {
 /// offline, so it names the author rather than a session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryMessage {
+    /// The message's id, as `ChatMessage::id`.
     pub id: u64,
     /// Milliseconds since the Unix epoch.
     pub ts: u64,
+    /// The author's account.
     pub user_id: UserId,
     /// The author's name of record at the time of sending.
     pub name: String,
+    /// The text, as last edited.
     pub text: String,
+    /// Whether the text was edited after it was sent.
     pub edited: bool,
 }
 
 /// Why a channel could not be created, edited or deleted (spec §5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChannelUiDenyReason {
+    /// A channel of that name exists already.
     NameTaken,
+    /// The actor lacks the permission the change needs.
     NoPermission,
     /// Config channels belong to the file: rename yes, delete no.
     ConfigOwned,
     /// The creator already owns `user_channels.max_per_user`.
     Limit,
+    /// No channel has that id.
     NoSuchChannel,
     /// A malformed request: empty name, absurd limit.
     Invalid,
@@ -519,8 +611,11 @@ impl ChannelUiDenyReason {
 /// A user-created channel's settings, sent whole on create and edit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelSpec {
+    /// The channel's name (1 to 32 characters after trimming).
     pub name: String,
+    /// A password newcomers must give to join; `None` for an open channel.
     pub password: Option<String>,
+    /// At most this many people at once; `None` for no cap.
     pub user_limit: Option<u16>,
     /// Joinable from this role's rank up; `None` = everyone.
     pub min_role: Option<RoleId>,
@@ -533,6 +628,9 @@ pub struct ChannelSpec {
 }
 
 /// Messages sent from a client to the server.
+// The variants' docs say what their fields are; a line per field would
+// restate the names (`missing_docs` stays on for the variants' kin).
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClientMessage {
     /// First message on the Control stream. The server answers with
@@ -556,10 +654,7 @@ pub enum ClientMessage {
 
     /// Broadcast our mute/deafen state to other users. The server also
     /// uses `deafened` to stop relaying voice to us entirely.
-    AudioState {
-        muted: bool,
-        deafened: bool,
-    },
+    AudioState { muted: bool, deafened: bool },
 
     // ── Screen share signaling ──────────────────────────────────────
     /// We started sharing our screen. Dimensions are the quality preset
@@ -575,21 +670,15 @@ pub enum ClientMessage {
     ScreenShareStop,
 
     /// Subscribe to another user's screen share stream.
-    SubscribeScreen {
-        target_id: ClientId,
-    },
+    SubscribeScreen { target_id: ClientId },
 
     /// Unsubscribe from another user's screen share stream.
-    UnsubscribeScreen {
-        target_id: ClientId,
-    },
+    UnsubscribeScreen { target_id: ClientId },
 
     /// Request a fresh keyframe from a sharer we are subscribed to
     /// (viewer → server → sharer). Travels on the signal channel so it
     /// can never queue behind chat.
-    RequestKeyframe {
-        target_id: ClientId,
-    },
+    RequestKeyframe { target_id: ClientId },
 
     // ── Chat, continued ─────────────────────────────────────────────
     /// One slice of a chat image upload (PNG/JPEG/GIF, total ≤
@@ -669,33 +758,20 @@ pub enum ClientMessage {
         limit: u16,
     },
     /// Replace the text of your own message.
-    EditMessage {
-        msg_id: u64,
-        text: String,
-    },
+    EditMessage { msg_id: u64, text: String },
     /// Remove your own message.
-    DeleteMessage {
-        msg_id: u64,
-    },
+    DeleteMessage { msg_id: u64 },
 
     // ── 1.1: channels from the UI (feature bit `CHANNELS_UI`) ───────
     /// Create a channel (needs `CREATE_CHANNELS`; spec §5).
     CreateChannel(ChannelSpec),
     /// Edit a channel you own (`MANAGE_OWN_CHANNELS`) or any
     /// (`MANAGE_CHANNELS`). A config channel accepts only a rename.
-    EditChannel {
-        channel_id: u16,
-        spec: ChannelSpec,
-    },
+    EditChannel { channel_id: u16, spec: ChannelSpec },
     /// Delete a channel you own, or any with `MANAGE_CHANNELS`.
-    DeleteChannel {
-        channel_id: u16,
-    },
+    DeleteChannel { channel_id: u16 },
     /// Send a member of your channel back to the default channel.
-    ChannelKick {
-        channel_id: u16,
-        user_id: UserId,
-    },
+    ChannelKick { channel_id: u16, user_id: UserId },
 
     // ── 1.1.2: profiles (feature bit `PROFILES`, spec §7.1) ─────────
     /// How this user's name looks; sent right after `Session` on every
@@ -707,9 +783,7 @@ pub enum ClientMessage {
     /// A new name while connected. Checked like the name at `Hello`;
     /// answered by [`ServerMessage::UserRenamed`] to everyone, or
     /// [`ServerMessage::RenameDenied`].
-    SetNickname {
-        name: String,
-    },
+    SetNickname { name: String },
 
     // ── 1.1.2: blobs (feature bit `BLOBS`, spec §7) ─────────────────
     /// Announce an upload. `sha256` lets a known blob be acknowledged
@@ -733,9 +807,7 @@ pub enum ClientMessage {
     /// Ask for a blob's bytes; they arrive as
     /// [`ServerMessage::BlobChunk`] on a Media stream, or
     /// [`ServerMessage::BlobMissing`].
-    FetchBlob {
-        blob_id: BlobId,
-    },
+    FetchBlob { blob_id: BlobId },
 
     // ── 1.1.1: direct messages (feature bit `DM`, spec §6) ──────────
     /// A message to one user. `client_ref` is the sender's own handle
@@ -748,10 +820,7 @@ pub enum ClientMessage {
     },
     /// Everything up to `msg_id` in `conv` has been seen; the unread
     /// count in [`ServerMessage::Conversations`] starts after it.
-    MarkRead {
-        conv: ConvRef,
-        msg_id: u64,
-    },
+    MarkRead { conv: ConvRef, msg_id: u64 },
 
     // ── 1.1.3: files in conversations (feature bit `FILES`, spec §7) ─
     /// Post an uploaded blob (yours, per [`ClientMessage::UploadBegin`]
@@ -771,12 +840,10 @@ pub enum ClientMessage {
     /// their voice and stream sound are not relayed to this user, and
     /// DMs between the two are refused. Answered with
     /// [`ServerMessage::Blocks`].
-    Block {
-        user: UserId,
-    },
-    Unblock {
-        user: UserId,
-    },
+    Block { user: UserId },
+    /// Lift a [`ClientMessage::Block`]. Answered with
+    /// [`ServerMessage::Blocks`].
+    Unblock { user: UserId },
     /// Report a message or a person to the server's moderators.
     /// `note` is optional free text (at most
     /// [`crate::safety::MAX_REPORT_NOTE_BYTES`]). Answered with
@@ -852,6 +919,8 @@ impl ClientMessage {
 // ── Server → Client ─────────────────────────────────────────────────────
 
 /// Messages sent from the server to clients.
+// As for `ClientMessage`: the variants' docs name their fields.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServerMessage {
     /// Admission granted. Always followed by [`ServerMessage::Init`].
@@ -865,9 +934,7 @@ pub enum ServerMessage {
     },
 
     /// Admission refused; the server closes the connection after this.
-    Refused {
-        reason: RefusedReason,
-    },
+    Refused { reason: RefusedReason },
 
     /// Initialization payload for a newly connected client: the current
     /// user list, our authoritative client id, server name and greeting,
@@ -890,9 +957,7 @@ pub enum ServerMessage {
     },
 
     /// A client disconnected.
-    UserLeft {
-        client_id: ClientId,
-    },
+    UserLeft { client_id: ClientId },
 
     /// A chat message from a client.
     Chat(ChatMessage),
@@ -925,14 +990,10 @@ pub enum ServerMessage {
     /// streams, the stream became invisible to *you* (the sharer or you
     /// moved channels). Either way: clear the LIVE badge and close any
     /// viewer window for this stream.
-    ScreenShareStopped {
-        client_id: ClientId,
-    },
+    ScreenShareStopped { client_id: ClientId },
 
     /// The server refused our `ScreenShareStart`.
-    ShareDenied {
-        reason: DenyReason,
-    },
+    ShareDenied { reason: DenyReason },
 
     /// The server refused our `SubscribeScreen`.
     SubscribeDenied {
@@ -942,9 +1003,7 @@ pub enum ServerMessage {
 
     /// A viewer needs a keyframe from us — force an IDR.
     /// Signal channel: must not queue behind chat.
-    KeyframeRequested {
-        viewer_id: ClientId,
-    },
+    KeyframeRequested { viewer_id: ClientId },
 
     /// Periodic health report for a stream we are sharing, aggregated
     /// across our viewers. Drives sender-side rate adaptation.
@@ -1050,9 +1109,7 @@ pub enum ServerMessage {
         max_uses: Option<u32>,
     },
     /// `CreateInvite` was refused.
-    InviteDenied {
-        reason: InviteDenyReason,
-    },
+    InviteDenied { reason: InviteDenyReason },
 
     // ── 1.1: roles and moderation (feature bit `ROLES`) ─────────────
     /// Who a session is, for the roster: after each `UserJoined`, and
@@ -1074,9 +1131,7 @@ pub enum ServerMessage {
         reason: String,
     },
     /// A restriction on this session ended (lifted, or ran out).
-    RestrictionLifted {
-        kind: RestrictionKind,
-    },
+    RestrictionLifted { kind: RestrictionKind },
     /// The answer to `ClientMessage::Admin`.
     AdminResult {
         request_id: u32,
@@ -1097,28 +1152,19 @@ pub enum ServerMessage {
     },
     /// The store could not answer in time (a stalled disk): the client
     /// keeps what it has and may retry after `retry_secs`.
-    HistoryUnavailable {
-        conv: ConvRef,
-        retry_secs: u16,
-    },
-    MessageEdited {
-        msg_id: u64,
-        text: String,
-    },
-    MessageDeleted {
-        msg_id: u64,
-    },
+    HistoryUnavailable { conv: ConvRef, retry_secs: u16 },
+    /// A message's text changed (its author's edit, relayed to everyone who
+    /// has it).
+    MessageEdited { msg_id: u64, text: String },
+    /// A message is gone (its author's or a moderator's doing); clients
+    /// drop it from view.
+    MessageDeleted { msg_id: u64 },
     /// Chat is rate limited (`limits.chat`); the message was dropped.
-    ChatRateLimited {
-        retry_ms: u32,
-    },
+    ChatRateLimited { retry_ms: u32 },
 
     // ── 1.1: progress (feature bit `PROGRESS`) ──────────────────────
     /// Your xp crossed a level (spec §9.1).
-    ProgressUpdate {
-        xp: u64,
-        level: u16,
-    },
+    ProgressUpdate { xp: u64, level: u16 },
 
     // ── 1.1: channels from the UI (feature bit `CHANNELS_UI`) ───────
     /// What `ChannelInfo` cannot say, one per channel after `Init` and
@@ -1134,14 +1180,10 @@ pub enum ServerMessage {
         is_afk: bool,
     },
     /// A create/edit/delete/kick was refused.
-    ChannelDenied {
-        reason: ChannelUiDenyReason,
-    },
+    ChannelDenied { reason: ChannelUiDenyReason },
     /// The server moved this session to the AFK channel after
     /// `after_min` idle minutes (spec §5).
-    MovedIdle {
-        after_min: u16,
-    },
+    MovedIdle { after_min: u16 },
 
     // ── 1.1.2: profiles (feature bit `PROFILES`, spec §7.1) ─────────
     /// A session's profile, sent right after each `UserDetails` and as
@@ -1152,33 +1194,23 @@ pub enum ServerMessage {
     },
     /// A profile changed (or was reset by an admin); everyone renders
     /// from it.
-    ProfileUpdated {
-        user_id: UserId,
-        profile: Profile,
-    },
-    ProfileDenied {
-        reason: ProfileDenyReason,
-    },
+    ProfileUpdated { user_id: UserId, profile: Profile },
+    /// The session's `SetProfile` was refused.
+    ProfileDenied { reason: ProfileDenyReason },
     /// A session changed its name; every roster renames it.
-    UserRenamed {
-        client_id: ClientId,
-        name: String,
-    },
-    RenameDenied {
-        reason: RenameDenyReason,
-    },
+    UserRenamed { client_id: ClientId, name: String },
+    /// The session's `SetNickname` was refused; its name stands.
+    RenameDenied { reason: RenameDenyReason },
 
     // ── 1.1.2: blobs (feature bit `BLOBS`, spec §7) ─────────────────
     /// `needed: false` = the server already has this hash; reference
     /// it, send nothing.
-    UploadAccept {
-        upload_id: u32,
-        needed: bool,
-    },
-    UploadDone {
-        upload_id: u32,
-        blob_id: BlobId,
-    },
+    UploadAccept { upload_id: u32, needed: bool },
+    /// The upload is complete and stored; `blob_id` is what messages and
+    /// profiles reference.
+    UploadDone { upload_id: u32, blob_id: BlobId },
+    /// The upload was refused, at its start or once whole; nothing was
+    /// stored.
     UploadRejected {
         upload_id: u32,
         reason: UploadRejectReason,
@@ -1191,22 +1223,17 @@ pub enum ServerMessage {
         count: u32,
         data: Vec<u8>,
     },
-    BlobMissing {
-        blob_id: BlobId,
-    },
+    /// The blob a `FetchBlob` asked for is not on this server (evicted, or
+    /// never there).
+    BlobMissing { blob_id: BlobId },
 
     // ── 1.1.1: direct messages (feature bit `DM`, spec §6) ──────────
     /// A live DM from `from`; `msg.client_id` is their session.
-    Direct {
-        from: UserId,
-        msg: ChatMessage,
-    },
+    Direct { from: UserId, msg: ChatMessage },
     /// The sender's DM has its id: stored (with persistence) and
     /// delivered to every session of the recipient that is online.
-    MessageAck {
-        client_ref: u32,
-        msg_id: u64,
-    },
+    MessageAck { client_ref: u32, msg_id: u64 },
+    /// The sender's DM was not delivered; `client_ref` says which one.
     MessageFailed {
         client_ref: u32,
         reason: DmFailReason,
@@ -1214,9 +1241,7 @@ pub enum ServerMessage {
     /// The DM conversations this user has, with unread counts; sent
     /// after the general replay on join and after a change (a DM
     /// arrived while away, a mark moved).
-    Conversations {
-        dms: Vec<DmSummary>,
-    },
+    Conversations { dms: Vec<DmSummary> },
 
     // ── 1.1: progress, everyone's (feature bit `PROGRESS`) ──────────
     /// How far a session's user is (spec §9.1), for the profile card's
@@ -1252,18 +1277,14 @@ pub enum ServerMessage {
     /// One audit line, the moment it is written, to sessions holding
     /// `ADMIN_CHANNEL` (spec §8). `entry.id` is 0: the store numbers
     /// rows later; `AuditLog` is the paged, numbered read.
-    AuditLine {
-        entry: crate::admin::AuditEntry,
-    },
+    AuditLine { entry: crate::admin::AuditEntry },
 
     // ── 1.1.3: the role table (feature bit `ROLE_LIST`) ──────────────
     /// Every role the server has, in rank order: after `Session` on
     /// join, and to everyone when the table changes (a `server role`
     /// command). Custom roles have no built-in name; this is how a
     /// client shows "streamer" on the card and offers it in the menu.
-    RoleList {
-        roles: Vec<RoleInfo>,
-    },
+    RoleList { roles: Vec<RoleInfo> },
 
     // ── 1.2: block, report, delete (feature bit `SAFETY`) ────────────
     /// Everyone this user has blocked: after `Session` on join, and to
@@ -1278,6 +1299,7 @@ pub enum ServerMessage {
     /// This session's account is gone (its own `DeleteAccount`); the
     /// session ends right after. The client forgets the server.
     AccountDeleted,
+    /// The `DeleteAccount` was refused; the account stands.
     AccountDeleteRefused {
         reason: crate::safety::DeleteRefusal,
     },
@@ -1285,19 +1307,14 @@ pub enum ServerMessage {
     /// `SAFETY` session gets instead of [`ServerMessage::Chat`], so a
     /// message from someone in the lobby (whose `UserDetails` nobody
     /// gets) can still be reported and its author blocked.
-    ChatFrom {
-        from: UserId,
-        msg: ChatMessage,
-    },
+    ChatFrom { from: UserId, msg: ChatMessage },
     /// Who wrote what this session is about to get, for authors it has
     /// no roster row for: someone in the lobby (whose join nobody saw)
     /// right before their post or DM, and whoever wrote a history page
     /// or is on the other end of a listed DM conversation right before
     /// that page or list. A name and a look, nothing about presence.
     /// `SAFETY` sessions (1.2).
-    Authors {
-        authors: Vec<AuthorInfo>,
-    },
+    Authors { authors: Vec<AuthorInfo> },
     /// Rows of an admin listing that did not fit its `AdminResult`
     /// (1.2.1, feature bit `ADMIN_PAGES`). Sent *before* the result,
     /// in order, under the same request id: the result carries the
@@ -1332,6 +1349,7 @@ pub enum DmFailReason {
 }
 
 impl DmFailReason {
+    /// The reason as a sentence for the chat line.
     #[must_use]
     pub fn describe(self) -> &'static str {
         match self {
@@ -1350,9 +1368,13 @@ impl DmFailReason {
 /// sanitized for display and never a path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attachment {
+    /// The blob's identity: the SHA-256 of its bytes.
     pub blob_id: BlobId,
+    /// The file name as uploaded, made safe to save.
     pub name: String,
+    /// The MIME type as declared and sniffed.
     pub mime: String,
+    /// The size in bytes.
     pub size: u32,
 }
 
@@ -1360,10 +1382,16 @@ pub struct Attachment {
 /// `UserDetails.roles` carries by id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoleInfo {
+    /// The role's id, as `UserDetails::roles` carries it.
     pub id: RoleId,
+    /// The role's name: a built-in's, or the custom name.
     pub name: String,
+    /// Where the role stands for `min_role` gates.
     pub rank: Rank,
+    /// The permission bits the role grants (`permissions::*`).
     pub permissions: u64,
+    /// Whether it is one of the four built-in roles (which cannot be
+    /// deleted).
     pub builtin: bool,
     /// A glyph from `permissions::ROLE_ICONS`, or `""`.
     pub icon: String,
@@ -1374,9 +1402,11 @@ pub struct RoleInfo {
 /// One DM conversation as the list shows it (spec §6).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DmSummary {
+    /// The other party.
     pub user_id: UserId,
     /// Their name of record.
     pub name: String,
+    /// Messages from them not yet read here.
     pub unread: u32,
     /// The newest message's `ts`, milliseconds since the Unix epoch.
     pub last_ts: u64,
@@ -1387,6 +1417,7 @@ pub struct DmSummary {
 /// One author in [`ServerMessage::Authors`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthorInfo {
+    /// The author's account.
     pub user_id: UserId,
     /// Their session, when the post they wrote is arriving live (its
     /// `client_id` names no one the receiver was told about); `None`
@@ -1394,6 +1425,7 @@ pub struct AuthorInfo {
     pub client_id: Option<ClientId>,
     /// Their name of record now.
     pub name: String,
+    /// How the author's name is drawn, and their picture.
     pub profile: Profile,
 }
 
@@ -1403,9 +1435,12 @@ pub type BlobId = [u8; 32];
 /// How a name is drawn (spec §7.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum NameStyle {
+    /// The regular weight.
     #[default]
     Normal,
+    /// Bold.
     Bold,
+    /// Italic.
     Italic,
 }
 
@@ -1415,6 +1450,7 @@ pub enum NameStyle {
 pub struct Profile {
     /// `0xRRGGBB`; `None` = the client's default name color.
     pub name_color: Option<u32>,
+    /// How the name is drawn.
     pub name_style: NameStyle,
     /// A 128×128 PNG/JPEG/WebP blob the client uploaded.
     pub avatar: Option<BlobId>,
@@ -1437,6 +1473,7 @@ pub enum ProfileDenyReason {
 }
 
 impl ProfileDenyReason {
+    /// The reason as a sentence for the chat line.
     #[must_use]
     pub fn describe(self) -> &'static str {
         match self {
@@ -1462,6 +1499,7 @@ pub enum RenameDenyReason {
 }
 
 impl RenameDenyReason {
+    /// The reason as a sentence for the chat line.
     #[must_use]
     pub fn describe(self) -> &'static str {
         match self {
@@ -1475,6 +1513,7 @@ impl RenameDenyReason {
 /// Why `UploadBegin` or the finished upload was refused (spec §7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UploadRejectReason {
+    /// Larger than the server's cap for this kind of upload.
     TooLarge,
     /// Not PNG/JPEG/WebP (declared or sniffed).
     BadType,
@@ -1496,6 +1535,7 @@ pub enum UploadRejectReason {
 }
 
 impl UploadRejectReason {
+    /// The reason as a sentence for the chat line.
     #[must_use]
     pub fn describe(self) -> &'static str {
         match self {
@@ -1520,7 +1560,11 @@ pub enum RemovedKind {
     Kicked,
     /// Access revoked and the key and address blocked; `until` in
     /// milliseconds since the Unix epoch, `None` = indefinite.
-    Banned { until: Option<u64> },
+    Banned {
+        /// When the ban ends, milliseconds since the Unix epoch; `None`
+        /// for until lifted.
+        until: Option<u64>,
+    },
     /// The same user signed in from a newer connection (auto-reconnect
     /// after a blackout); this older session yields.
     Replaced,
@@ -1761,6 +1805,19 @@ fn decode<M: Wire>(bytes: &[u8]) -> Option<M> {
 
 /// Serialize a [`ClientMessage`]. `None` on serializer failure or if
 /// the message exceeds its variant's length budget.
+///
+/// The pair round-trips, and a message over its budget is refused at
+/// the sender, never at the receiver:
+///
+/// ```
+/// use protocol::{decode_client_message, encode_client_message, ClientMessage};
+///
+/// let wire = encode_client_message(&ClientMessage::Chat("hello".into())).unwrap();
+/// assert!(matches!(decode_client_message(&wire), Some(ClientMessage::Chat(t)) if t == "hello"));
+///
+/// let too_long = ClientMessage::Chat("x".repeat(protocol::MAX_CONTROL_MESSAGE_BYTES));
+/// assert!(encode_client_message(&too_long).is_none());
+/// ```
 #[must_use]
 pub fn encode_client_message(msg: &ClientMessage) -> Option<Vec<u8>> {
     encode(msg)

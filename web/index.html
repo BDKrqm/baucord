@@ -1258,6 +1258,12 @@
           },
         ];
         var sizes = {}; // id -> "51 MB"
+        // Files the server says are not there (a HEAD answered 404 or
+        // 403): their rows are hidden rather than offered — the Android
+        // APK lands a few minutes after the zips, and a version named
+        // before its files were up gave a dead button (review
+        // 2026-10-27, P1-3). A failed request hides nothing.
+        var missing = {}; // id -> true
 
         function formatSize(bytes) {
           var mb = bytes / 1048576;
@@ -1273,6 +1279,9 @@
                 var len = r.ok && r.headers.get("content-length");
                 if (len) {
                   sizes[p.id] = formatSize(parseInt(len, 10));
+                  store.sizesVersion++;
+                } else if (r.status === 404 || r.status === 403) {
+                  missing[p.id] = true;
                   store.sizesVersion++;
                 }
               })
@@ -1308,14 +1317,17 @@
           return {
             get platforms() {
               shared.sizesVersion; // subscribe
-              return PLATFORMS.map(function (p) {
+              return PLATFORMS.filter(function (p) {
+                return !missing[p.id];
+              }).map(function (p) {
                 return Object.assign({ size: sizes[p.id] || "" }, p);
               });
             },
             get current() {
+              shared.sizesVersion;
               return (
                 PLATFORMS.filter(function (p) {
-                  return p.id === shared.selected;
+                  return p.id === shared.selected && !missing[p.id];
                 })[0] || null
               );
             },

@@ -276,6 +276,27 @@ otherwise).
   `server user|role|invite|restriction|key|telemetry|backup|restore`,
   `server db check|db prune`, `server user purge` (`server role --help`
   etc.); the config keys are PERSISTENCE-SPEC §1.
+- `gateway` — `baucord-gateway` (1.4.0): a bot's door to a server.
+  `session.rs` is the client's Hello/lanes/messages cut down to what a
+  bot does (a state machine over a `Driver`, `DriverHost` so the
+  server's e2e harness drives it: `tests/sim.rs`); `wire.rs` the JSON
+  envelopes (`op`/`t`/`d`, README.md §2); `ws.rs` the WebSocket
+  listener and the hub (one thread per bot, tungstenite, a 25 ms read
+  slice); `voice.rs` the PCM → Opus pacer (one 20 ms frame per slot
+  whatever the bot pushes); `net.rs` the UDP loop and reconnect, woken
+  by a datagram to its own socket when a command arrives; `bot.rs` the
+  library face (`Bot::connect` → the same session, loop and pacer on
+  threads of their own, events on a channel instead of a WebSocket —
+  the output side is the `net::Sink` trait, the WebSocket hub and the
+  bot's channel both implement it). A stop in the voice sink bumps a
+  generation and frames fed before it are dropped on sight (`Feeder`,
+  `PcmChunk`), so `!stop` is immediate, not ten seconds later;
+  `Feeder::pending` is how a player knows the room finished a track.
+  No slash commands yet: those are server work (the review document's
+  bot section, steps 1–2). `examples/*.py` are the Python bots,
+  `examples/music.rs` the Rust one (symphonia + rubato as
+  dev-dependencies, its decode pipeline tested), the Dockerfile the
+  image.
 - `client` — the network thread (`network.rs`), the voice and screen
   threads (`voice.rs`; `screen.rs`: `screen-share` and `screen-watch`),
   `config.rs` (settings, identity key), `inbound_wake.rs` (the socket
@@ -361,6 +382,25 @@ Memory-mode servers (persistence off) still use the legacy
 
 ## 4. Rules learned the hard way
 
+- **House style is Google's Rust style guide, read through the
+  `rust-best-practices` skill** (2026-10-27, the "Google's Rust guide
+  vs baucord" doc): <https://google.github.io/styleguide/rustguide.html>
+  for layout, naming, imports, enums-over-bools, `expect` with a
+  reason, `// SAFETY:` on every `unsafe` block (the
+  `undocumented_unsafe_blocks` lint warns), docs on every public item
+  of a published crate (`#![warn(missing_docs)]` in `protocol` and
+  `transport`), one `use` per module (`.rustfmt.toml`, nightly `fmt`).
+  The skill adds Apollo's handbook. Where the two sources disagree the
+  tree has decided: `expect("why")` states an invariant, it is not a
+  hidden `unwrap`; a trace-style test (several asserts along one story)
+  is fine, one assertion per test is not a rule; crates are cut at a
+  dependency boundary or a platform seam, not by size (`audio`, `server`
+  and `frontend` are 18–22 kLOC each and stay); a comment says *why*,
+  the code says what. `Viewer::set_self_audio(muted, deafened)` keeps its two bools
+  on purpose — two independent toggles with named call sites, not one
+  state. Deferred, not rejected: the `Rc<RefCell>` → `Arc<Mutex>`
+  question in `frontend`, and the crate cuts the doc proposes
+  (`server-store`, `video-capture`/`video-codec`, `audio-dsp`).
 - **Nothing is written inside `baucord.app`** (2026-10-26): a release
   build keeps its config beside the executable when that folder is
   writable, and a bundle dragged into `/Applications` is — so the
@@ -981,7 +1021,15 @@ Memory-mode servers (persistence off) still use the legacy
   word-wrapping one as its longest word: a long label wraps (Settings'
   `Setting` does), a name elides. Measure with the "Text size"
   setting at Larger (×1.3) in es-AR: Servers' identity label alone
-  took the form to 749 px before it wrapped (2026-10-16).
+  took the form to 749 px before it wrapped (2026-10-16). **A
+  component that sets its own `height` from a layout's
+  `preferred-height` counts a wrapping `Text` inside it unwrapped**:
+  `CheckRow`'s three-line hint on the Stream tab was measured as two
+  and ran into the row below (2026-10-27). Read the `Text`'s own
+  `preferred-height` instead, as `WarningNote` and now `CheckRow` do
+  (its hint is always an element, `visible` only with text, so the
+  row can read it). Match the old rows' pixels when you do: render
+  before and after and compare the glyph rows (`renders/`).
 - Interactions (drags, flicks, long-press) can't be screenshotted, but
   they can be driven headless: a scratch crate with `slint =
   { version = "=1.18.1", default-features = false, features = ["std",

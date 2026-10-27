@@ -9,11 +9,9 @@
 //! left behind by code that moved on, in each of three files, and
 //! translators kept translating them (the review's dead-code list).
 
-use std::{
-    collections::BTreeSet,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 fn workspace() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

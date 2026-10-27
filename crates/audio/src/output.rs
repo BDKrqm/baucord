@@ -3,39 +3,29 @@
 //! Asks the device for 48 kHz first (see [`crate::device`]); only devices
 //! that cannot do 48 kHz get a resampler on this path.
 
-use std::{
-    sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
-        Arc,
-    },
-    thread,
-    time::{Duration, Instant},
-};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use audioadapter_buffers::direct::SequentialSliceOfVecs;
-use cpal::{
-    traits::{DeviceTrait, HostTrait, StreamTrait},
-    Device, SampleFormat, Stream, SupportedStreamConfig,
-};
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{Device, SampleFormat, Stream, SupportedStreamConfig};
 use crossbeam_channel::Receiver;
 use dasp_sample::{FromSample, Sample as DaspSample, ToSample};
 use log::{debug, error, info};
 use rtrb::{Consumer, Producer, RingBuffer};
 use rubato::{Async, Resampler};
 
-use crate::{
-    latch::{Ring, Wait},
-    loopback::{LoopbackDelay, LOOPBACK_DELAY},
-    processor::limiter::Limiter,
-    resampler::build_output_resampler,
-    sounds::{SoundBank, SoundType},
-    stats::AudioStats,
-    transport::{
-        jitter_buffer::{AdaptiveJitterBuffer, PeerTable},
-        packet::AudioPacket,
-    },
-    PcmFrame, OPUS_SAMPLE_RATE,
-};
+use crate::latch::{Ring, Wait};
+use crate::loopback::{LoopbackDelay, LOOPBACK_DELAY};
+use crate::processor::limiter::Limiter;
+use crate::resampler::build_output_resampler;
+use crate::sounds::{SoundBank, SoundType};
+use crate::stats::AudioStats;
+use crate::transport::jitter_buffer::{AdaptiveJitterBuffer, PeerTable};
+use crate::transport::packet::AudioPacket;
+use crate::{PcmFrame, OPUS_SAMPLE_RATE};
 
 /// Samples pulled from the jitter buffer per hop (10 ms at 48 kHz). The
 /// codec frame is 20 ms; the packet buffers stage decoded PCM so the hop

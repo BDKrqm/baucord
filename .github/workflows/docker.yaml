@@ -25,7 +25,18 @@ env:
   DOCKERHUB_REPO: ${{ vars.DOCKERHUB_USER }}/baucord
 
 jobs:
+  # The checks (format, lints, tests) on the commit being imaged: no
+  # image is pushed from one that failed them (review 2026-10-27,
+  # P1-4). A build-only run (no tag) pushes nothing and skips them.
+  check:
+    if: ${{ github.event_name == 'release' || inputs.tag != '' }}
+    uses: ./.github/workflows/pr-check.yaml
+    with:
+      ref: ${{ inputs.tag || '' }}
+
   build-and-push:
+    needs: check
+    if: ${{ !cancelled() && (needs.check.result == 'success' || needs.check.result == 'skipped') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:

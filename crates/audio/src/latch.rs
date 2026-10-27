@@ -14,14 +14,10 @@
 //! any platform we build for. Any number of [`Ring`]s (the callback,
 //! and the owner's stop), one [`Wait`] on one thread.
 
-use std::{
-    sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, OnceLock,
-    },
-    thread::{self, Thread},
-    time::{Duration, Instant},
-};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::thread::{self, Thread};
+use std::time::{Duration, Instant};
 
 struct Shared {
     /// Rung and not yet seen by the waiter.

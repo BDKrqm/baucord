@@ -38,6 +38,7 @@ pub mod codec;
 // pictures it finishes, all platform-free so they are tested
 // everywhere.
 pub mod annexb;
+pub mod gpu_priority;
 pub mod held;
 #[cfg(target_os = "android")]
 pub mod mediacodec;
@@ -200,6 +201,59 @@ impl Quality {
         Self::ALL.iter().copied().find(|q| q.key() == key)
     }
 }
+
+/// Which encoder a share opens (Settings → Stream, 1.4.0). Hardware
+/// means the GPU's (NVENC, Quick Sync, AMF, `VideoToolbox`), software
+/// means libx264 on the CPU; the names are `codec::ENCODER_PRIORITY`'s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum EncoderPreference {
+    /// A hardware encoder when one opens, libx264 otherwise — what
+    /// every share did before 1.4.0.
+    #[default]
+    Auto,
+    /// A hardware encoder or nothing: the share does not start without
+    /// one, and says so, instead of quietly costing the CPU.
+    Hardware,
+    /// libx264 whatever the GPU offers: the way around a driver whose
+    /// encoder opens but streams badly.
+    Software,
+}
+
+impl EncoderPreference {
+    pub const ALL: &'static [Self] = &[Self::Auto, Self::Hardware, Self::Software];
+
+    /// Stable key for the settings file (`share.encoder`).
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Hardware => "gpu",
+            Self::Software => "cpu",
+        }
+    }
+
+    /// Inverse of [`Self::key`]; `None` for a key this version does
+    /// not know.
+    #[must_use]
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|p| p.key() == key)
+    }
+
+    /// Whether an encoder of this `FFmpeg` name may be opened under
+    /// this preference.
+    #[must_use]
+    pub fn allows(self, encoder_name: &str) -> bool {
+        let software = encoder_name == SOFTWARE_ENCODER;
+        match self {
+            Self::Auto => true,
+            Self::Hardware => !software,
+            Self::Software => software,
+        }
+    }
+}
+
+/// The one software encoder in the `FFmpeg` builds baucord ships with.
+pub const SOFTWARE_ENCODER: &str = "libx264";
 
 /// Lowest bitrate scale an encoder accepts, in percent of the preset. A
 /// mechanism bound, not policy: the sender's ladder decides how far down
@@ -556,6 +610,29 @@ mod tests {
         ];
         assert_eq!(describe_annexb_nals(&au), "SPS,PPS,IDR,nal12");
         assert_eq!(describe_annexb_nals(&[1, 2, 3]), "no start codes found");
+    }
+
+    mod encoder_preference {
+        use super::*;
+
+        #[test]
+        fn keys_round_trip() {
+            for pref in EncoderPreference::ALL {
+                assert_eq!(EncoderPreference::from_key(pref.key()), Some(*pref));
+            }
+            assert_eq!(EncoderPreference::from_key("vulkan"), None);
+            assert_eq!(EncoderPreference::default(), EncoderPreference::Auto);
+        }
+
+        #[test]
+        fn hardware_and_software_split_the_list() {
+            assert!(EncoderPreference::Auto.allows("h264_nvenc"));
+            assert!(EncoderPreference::Auto.allows(SOFTWARE_ENCODER));
+            assert!(EncoderPreference::Hardware.allows("h264_nvenc"));
+            assert!(!EncoderPreference::Hardware.allows(SOFTWARE_ENCODER));
+            assert!(!EncoderPreference::Software.allows("h264_videotoolbox"));
+            assert!(EncoderPreference::Software.allows(SOFTWARE_ENCODER));
+        }
     }
 
     mod scaled_bitrate {

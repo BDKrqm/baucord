@@ -37,25 +37,20 @@
 //!
 //! Owns the Opus encoder exclusively — no shared mutex needed.
 
-use std::{
-    collections::VecDeque,
-    sync::{atomic::Ordering, Arc},
-    time::{Duration, Instant},
-};
+use std::collections::VecDeque;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError};
 use log::{error, info, warn};
 use opus::{Application, Bitrate, Channels, Encoder};
 
-use crate::{
-    adapt::{Band, Decision, LinkSample, Profile, RateController, LADDER},
-    stats::AudioStats,
-    transport::{
-        packet::{AudioPacket, PayloadType},
-        red,
-    },
-    PcmFrame, FRAME_SIZE, OPUS_SAMPLE_RATE,
-};
+use crate::adapt::{Band, Decision, LinkSample, Profile, RateController, LADDER};
+use crate::stats::AudioStats;
+use crate::transport::packet::{AudioPacket, PayloadType};
+use crate::transport::red;
+use crate::{PcmFrame, FRAME_SIZE, OPUS_SAMPLE_RATE};
 
 /// Largest packet the encoder will ever produce: 40 ms at the top rate,
 /// with LBRR, plus two RED copies of the same. Generous.

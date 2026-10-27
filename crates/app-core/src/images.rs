@@ -6,10 +6,8 @@
 //! failures are typed ([`ImageError`]) instead of pre-localized strings
 //! — the shell maps them to fluent messages.
 
-use std::{
-    io::Cursor,
-    path::{Path, PathBuf},
-};
+use std::io::Cursor;
+use std::path::{Path, PathBuf};
 
 /// First-pass bound for a pasted image's longest edge.
 pub(crate) const MAX_IMAGE_DIM: u32 = 1280;

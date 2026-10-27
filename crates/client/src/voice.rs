@@ -10,26 +10,22 @@
 // a `WakeFn` callback that is called whenever the UI event loop should
 // check for new events (a no-op works for headless use).
 
-use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering, Ordering::Relaxed},
-        Arc, Mutex,
-    },
-    thread,
-    time::{Duration, Instant},
-};
+use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use audio::{
-    AecMode, AecReport, AudioStats, PeerAudioSettings, SoundType, VoiceChat, VoiceChatConfig,
+    AecMode, AecReport, AudioStats, PeerAudioSettings, Presence, SoundType, VoiceChat,
+    VoiceChatConfig,
 };
 use crossbeam_channel::{select, unbounded, Receiver, Sender};
 use log::info;
 
-use crate::{
-    config::Settings,
-    network::{NetworkControl, VoiceLink},
-    WakeFn,
-};
+use crate::config::Settings;
+use crate::network::{NetworkControl, VoiceLink};
+use crate::WakeFn;
 
 // ── Channel messages ────────────────────────────────────────────────────
 
@@ -400,10 +396,22 @@ impl VoiceLoopState {
     /// (`VoiceChat::set_presence`).
     fn apply_mute(&mut self) {
         let mute = self.effective_mute();
-        let in_room = self.in_room;
+        let presence = self.presence();
         if let Some(v) = self.vc.as_mut() {
             v.set_muted(mute);
-            v.set_presence(in_room, !mute);
+            v.set_presence(presence);
+        }
+    }
+
+    /// Where we are, for the engine: the lobby, or a room with the
+    /// microphone live or muted.
+    fn presence(&self) -> Presence {
+        if !self.in_room {
+            Presence::Lobby
+        } else if self.effective_mute() {
+            Presence::Muted
+        } else {
+            Presence::Live
         }
     }
 
@@ -430,7 +438,7 @@ impl VoiceLoopState {
                 self.sessionless = id.is_none();
                 let mut voice = VoiceChat::new(config);
                 voice.set_transmit(self.transmit);
-                voice.set_presence(in_room, !self.effective_mute());
+                voice.set_presence(self.presence());
                 match voice.start() {
                     audio::StartOutcome::Started => {}
                     // Nothing can be heard: no engine this time.

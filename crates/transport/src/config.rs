@@ -6,7 +6,8 @@
 //! against measured footprint at M5; the shape is what matters: every
 //! real-time queue has a byte bound *and* (in the driver) a time bound.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use quinn_proto::{AckFrequencyConfig, IdleTimeout, MtuDiscoveryConfig, TransportConfig, VarInt};
 
@@ -39,6 +40,8 @@ pub struct Budget {
     pub max_concurrent_uni_streams: u32,
     /// Bidirectional streams the peer may have open at once.
     pub max_concurrent_bidi_streams: u32,
+    /// What the congestion controller assumes the round trip is before it
+    /// has measured one.
     pub initial_rtt: Duration,
     /// Bytes per second at which Media-lane uploads drain onto the
     /// wire, so bulk never fills the bottleneck queue voice shares.

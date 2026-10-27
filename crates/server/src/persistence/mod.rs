@@ -29,16 +29,12 @@
 
 mod store;
 
-use std::{
-    fmt,
-    path::PathBuf,
-    sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
-    },
-    thread::{self, JoinHandle},
-    time::{Duration, Instant, SystemTime},
-};
+use std::fmt;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant, SystemTime};
 
 use crossbeam_channel::{
     bounded, select_biased, unbounded, Receiver, Sender, TryRecvError, TrySendError,
@@ -54,11 +50,9 @@ pub use self::store::{
     cli_telemetry, hex, parse_hex_id, restore_from_tar, BackupReport, CheckReport, RestoreReport,
     Retention, RoleEdit, TelemetryLine, GENERAL_CONV, SCHEMA_VERSION,
 };
-use crate::{
-    clock::WallMs,
-    config::PersistenceSettings,
-    policy::{InviteRecord, KeyRecord, Policy, Restriction, UserChannelRecord, UserRecord},
-};
+use crate::clock::WallMs;
+use crate::config::PersistenceSettings;
+use crate::policy::{InviteRecord, KeyRecord, Policy, Restriction, UserChannelRecord, UserRecord};
 
 /// General-chat messages the tick keeps in memory for replay and for
 /// edit/delete checks (spec §6): at least `history.replay`, and enough

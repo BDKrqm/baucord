@@ -1,19 +1,18 @@
-use std::{
-    fs::{self, File, OpenOptions},
-    io::Write,
-    path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
-    thread,
-    time::{Duration, Instant},
-};
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use env_logger::Builder;
 use log::{info, warn};
-use server::{clock::Clock, config::Config, persistence, server::ChatServer};
+use server::clock::Clock;
+use server::config::Config;
+use server::persistence;
+use server::server::ChatServer;
 use transport::{DriverHost, ServerIdentity, UdpIo};
 
 const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;

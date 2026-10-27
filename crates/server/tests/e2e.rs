@@ -2,31 +2,26 @@
 //! `ChatServer` and real client `Driver`s, every message crossing the
 //! simulated wire through the full QUIC stack, on a fake clock.
 
-use std::{
-    collections::HashMap,
-    net::SocketAddr,
-    path::PathBuf,
-    sync::Arc,
-    time::{Duration, Instant, SystemTime},
-};
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
 
+use protocol::permissions::{self, RoleId, ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
 use protocol::{
-    features,
-    permissions::{self, RoleId, ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER},
-    AdminCommand, AdminError, AdminOutcome, AdminTarget, Auth, ChannelDenyReason, ChannelSpec,
-    ChannelUiDenyReason, ClientId, ClientKeyProof, ClientMessage, ConvRef, DenyReason,
+    features, AdminCommand, AdminError, AdminOutcome, AdminTarget, Auth, ChannelDenyReason,
+    ChannelSpec, ChannelUiDenyReason, ClientId, ClientKeyProof, ClientMessage, ConvRef, DenyReason,
     DmFailReason, InviteDenyReason, InviteInvalidReason, Lane, NeedInviteReason, RefusedReason,
     RemovedKind, RestrictionKind, ServerMessage, ShareScope, UploadRejectReason, UserId,
 };
-use server::{
-    clock::Clock,
-    config::{ChannelSettings, Config},
-    policy::Restriction,
-    server::ChatServer,
-};
+use server::clock::Clock;
+use server::config::{ChannelSettings, Config};
+use server::policy::Restriction;
+use server::server::ChatServer;
+use transport::identity::{CLIENT_AUTH_EXPORTER_BYTES, CLIENT_AUTH_EXPORTER_LABEL};
+use transport::sim::{LinkSpec, NodeId, SimNet};
 use transport::{
-    identity::{CLIENT_AUTH_EXPORTER_BYTES, CLIENT_AUTH_EXPORTER_LABEL},
-    sim::{LinkSpec, NodeId, SimNet},
     Budget, ClientKey, DisconnectReason, Driver, Event, Fingerprint, PeerId, ServerIdentity,
     VideoItem, OWN_TRACK,
 };

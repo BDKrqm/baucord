@@ -35,16 +35,12 @@
 //! write per frame), and the decoder's buffers go back to
 //! [`video::pool`].
 
-use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    sync::{Arc, Mutex, OnceLock},
-    time::{Duration, Instant},
-};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
-use client::{
-    screen::{FrameMeta, PresentTallies, ScreenControl, ScreenEvent, ScreenTx},
-    WakeFn,
-};
+use client::screen::{FrameMeta, PresentTallies, ScreenControl, ScreenEvent, ScreenTx};
+use client::WakeFn;
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use log::{error, info};
 use video::PictureFormat;
