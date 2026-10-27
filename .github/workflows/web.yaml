@@ -19,6 +19,9 @@ on:
   workflow_run:
     workflows: ["Build and Release"]
     types: [completed]
+  # By hand, from main: the site as it stands, naming the version the
+  # version file says (a release whose site deploy was missed).
+  workflow_dispatch:
 
 jobs:
   # A release's deploy names its version on the site: only the newest
@@ -28,11 +31,15 @@ jobs:
   # that bumps the version rewrites Cargo.lock, which deploys here, and
   # the site offered files that did not exist yet (review 2026-10-27,
   # P1-3). The version file release.yml writes last says what is there;
-  # failing that, the newest stable tag.
+  # failing that, the newest stable tag. A "Build and Release" started
+  # by hand (a release repeated with *Run workflow*) is read the same
+  # way: its head branch is the branch it was started from, not the
+  # tag, and the version file it may have just written is the truth.
   newest:
     if: >-
-      github.event_name == 'push' ||
-      (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'release' &&
+      github.event_name == 'push' || github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' &&
+      (github.event.workflow_run.event == 'release' || github.event.workflow_run.event == 'workflow_dispatch') &&
       github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     outputs:
@@ -45,11 +52,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           # A release run's head branch is its tag.
           TAG: ${{ github.event.workflow_run.head_branch }}
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
         run: |
           set -euo pipefail
           NEWEST=$(gh api "repos/$GITHUB_REPOSITORY/tags" --paginate --jq '.[].name' \
             | { grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true; } | sort -V | tail -1)
-          if [ "$GITHUB_EVENT_NAME" != "workflow_run" ]; then
+          if [ "$GITHUB_EVENT_NAME" != "workflow_run" ] || [ "$RUN_EVENT" = "workflow_dispatch" ]; then
             LIVE=$(curl -fsS --max-time 20 https://baucord.com/version 2>/dev/null | tr -d '[:space:]' || true)
             if [[ "$LIVE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
               VERSION="$LIVE"
@@ -79,8 +87,9 @@ jobs:
 
   licenses:
     if: >-
-      github.event_name == 'push' ||
-      (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'release' &&
+      github.event_name == 'push' || github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' &&
+      (github.event.workflow_run.event == 'release' || github.event.workflow_run.event == 'workflow_dispatch') &&
       github.event.workflow_run.conclusion == 'success')
     uses: ./.github/workflows/licenses.yml
     with:
