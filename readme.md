@@ -1,7 +1,9 @@
 # baucord
 
-> **This is a fork of [mpwsh/baucord](https://github.com/mpwsh/baucord)**
-> that adds, on the client only (it works with any baucord server):
+> **This is a fork of [mpwsh/baucord](https://github.com/mpwsh/baucord)**;
+> its app is called **empecord** (`empecord.exe`). It shares baucord's
+> settings and identity key, and adds, on the client only (it works with
+> any baucord server):
 >
 > - **Spatial voice** — a voice space (the radar button beside Deafen)
 >   where you drag each person around you and hear them from that
@@ -11,6 +13,17 @@
 > - **A five-band equalizer per person** (*Equalizer…* in their menu) and
 >   a **voice tone** over everyone's voice — Natural, Crisp or Bass
 >   boosted — in Settings → Audio. (`crates/audio/src/processor/eq.rs`)
+> - **Camera sharing** — the share dialog's Monitor | Camera switch
+>   (Windows). (`crates/video/src/camera.rs`)
+> - **Save the last 5 minutes** — the call's last five minutes kept in
+>   memory and written on a button press, one WAV per person and a mix;
+>   nobody else is told. (`crates/audio/src/replay.rs`)
+> - **A soundboard** — the files in a folder as buttons, played into the
+>   call through the microphone. (`crates/audio/src/soundboard.rs`)
+> - **Colour themes** — six built in and a custom one from three
+>   colours. (`crates/frontend/src/theme.rs`)
+>
+> empecord does not look for updates: baucord's would replace it.
 >
 > The voice output path is stereo for this (it was mono). Files changed
 > from upstream are listed in the fork's commit; the details are in

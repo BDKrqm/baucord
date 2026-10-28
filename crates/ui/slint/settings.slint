@@ -87,6 +87,7 @@ export global SettingsState {
     in-out property <bool> start-minimized: false;
     in property <bool> tray-available: false; // start-minimized needs the tray
     in-out property <bool> check-updates: true;
+    in property <bool> updater-available: false;
     // Sounds (their own tab): a master switch, then each one. Ordinary
     // chat messages never make a sound.
     in-out property <bool> sounds-enabled: true;
@@ -814,7 +815,8 @@ component GeneralPanel inherits VerticalLayout {
             checked <=> SettingsState.start-minimized;
             toggled(on) => { SettingsLogic.start-minimized-changed(on); }
         }
-        CheckRow {
+        // empecord has no update channel of its own (app.rs `UPDATER`).
+        if SettingsState.updater-available : CheckRow {
             text: Tr.startup-check-updates;
             checked <=> SettingsState.check-updates;
             toggled(on) => { SettingsLogic.check-updates-changed(on); }

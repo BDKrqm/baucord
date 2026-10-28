@@ -176,8 +176,8 @@ unknown-device = dispositivo desconhecido
 # ── Tray & viewer ───────────────────────────────────────────────────────
 tray-show = Mostrar
 tray-quit = Sair
-tray-tip-muted = baucord — silenciado
-tray-tip-deafened = baucord — ensurdecido
+tray-tip-muted = empecord — silenciado
+tray-tip-deafened = empecord — ensurdecido
 # In the tray's menu, one item per person in our voice room: muting is for you alone.
 tray-mute-person = Silenciar { $name }
 tray-unmute-person = Reativar som de { $name }
@@ -222,7 +222,7 @@ action-push-to-talk = Pressionar para falar
 
 # ── Keybinds panel ──────────────────────────────────────────────────────
 keybinds-hint = Clique em Gravar e pressione uma combinação de teclas. Esc cancela, Backspace limpa.
-keybinds-access = O macOS só deixa o baucord ver seus atalhos enquanto você está em outro app com a permissão de Acessibilidade. Até lá, uma tecla atribuída continua funcionando, mas o macOS a tira do app em que você está: ela não digita nada ali.
+keybinds-access = O macOS só deixa o empecord ver seus atalhos enquanto você está em outro app com a permissão de Acessibilidade. Até lá, uma tecla atribuída continua funcionando, mas o macOS a tira do app em que você está: ela não digita nada ali.
 keybinds-access-ask = Permitir nos Ajustes do Sistema…
 keybind-not-set = Não definido
 keybind-press-combo = Pressione uma combinação de teclas...
@@ -334,7 +334,7 @@ error-lost-gave-up = A reconexão automática desistiu; clique em Conectar para 
 error-reconnecting = Reconectando em { $secs } s…
 error-refused-full = O servidor está cheio no momento.
 error-refused-rate-limited = Muitas tentativas falhas — espere um minuto e tente de novo.
-error-outdated = Esta versão do baucord não combina com o servidor. Atualize o baucord e tente de novo.
+error-outdated = Esta versão do empecord não combina com o servidor. Atualize o empecord e tente de novo.
 error-local = Não foi possível iniciar a conexão: { $detail }
 error-lost-restart = O servidor está reiniciando.
 error-lost-full = O servidor está cheio no momento.
@@ -573,7 +573,7 @@ aec-status-canceller-off = Indisponível — não foi possível ligar o cancelam
 aec-status-refused = Indisponível — o sistema não abriu o áudio de chamada. Os detalhes estão no baucord.log.
 aec-status-unsupported = Ainda não disponível neste sistema.
 aec-status-idle = Vale quando você entrar num canal de voz.
-aec-lowering = O Windows abaixa o volume dos seus outros apps enquanto você está num canal de voz, e não deixou o baucord desativar isso. Nas configurações de som do Windows, na aba Comunicações, escolha "Não fazer nada".
+aec-lowering = O Windows abaixa o volume dos seus outros apps enquanto você está num canal de voz, e não deixou o empecord desativar isso. Nas configurações de som do Windows, na aba Comunicações, escolha "Não fazer nada".
 aec-lowering-fix = Abrir as configurações de som do Windows
 aec-lowering-told = O Windows abaixa o volume dos seus outros apps enquanto você está num canal de voz. Em Configurações → Áudio você vê como evitar.
 ptt-tooltip = Apertar para falar — segure
@@ -723,6 +723,7 @@ theme-background = Fundo
 theme-text = Texto
 theme-accent = Destaque
 theme-custom-hint = Cores no formato #RRGGBB. O resto da paleta sai destas três; texto parecido demais com o fundo é afastado até dar para ler.
+about-fork-of = Um fork do baucord, com voz espacial, equalizador por pessoa, transmissão da câmera, buffer de replay, mesa de sons e temas de cores. Funciona com qualquer servidor do baucord.
 card-offline = Desconectado
 invite-dialog-title = Convidar usuários
 invite-role = Entra como
@@ -747,7 +748,7 @@ notif-dm-file = Enviou um arquivo: { $name }
 notif-first-join-title = { $name } entrou em { $channel }
 notif-first-join-text = A primeira pessoa na voz em { $server }.
 notifs-header = Notificações
-notifs-lead = Enquanto o baucord está em segundo plano e ainda conectado. Os modos silencioso e Não perturbe do celular valem aqui, e também para os sons de mensagens acima.
+notifs-lead = Enquanto o empecord está em segundo plano e ainda conectado. Os modos silencioso e Não perturbe do celular valem aqui, e também para os sons de mensagens acima.
 notifs-messages = Mensagens diretas
 notifs-messages-hint = A mensagem e quem enviou; toque para abrir a conversa.
 notifs-first-join = Alguém começa uma chamada
@@ -910,7 +911,7 @@ admin-channel-lead = A auditoria, ao vivo. Os comandos funcionam aqui: /kick, /b
 admin-channel-commands-only = Este canal só aceita comandos — comece com /
 
 # ── Hosts de celular (ANDROID-SPEC.md, IOS-SPEC.md; uma janela por processo) ──
-quit-ios = No iPhone, os apps são fechados pelo seletor de apps: deslize para cima a partir da borda inferior, pare um instante e deslize o baucord para cima.
+quit-ios = No iPhone, os apps são fechados pelo seletor de apps: deslize para cima a partir da borda inferior, pare um instante e deslize o empecord para cima.
 pick-from-photos = Fotos
 pick-from-files = Arquivos
 
@@ -991,7 +992,7 @@ activity-empty = Entradas, saídas, mudanças de sala e telas compartilhadas apa
 # ── Configurações → Licenças de código aberto (1.2) ────────────────────
 tab-licenses = Licenças
 licenses-title = Licenças de código aberto
-licenses-lead = baucord é software livre sob a Apache License 2.0, feito sobre o software de código aberto abaixo. Cada parte mantém sua própria licença; abra uma para lê-la.
+licenses-lead = empecord é software livre sob a Apache License 2.0, feito sobre o software de código aberto abaixo. Cada parte mantém sua própria licença; abra uma para lê-la.
 licenses-section-components = Componentes
 licenses-section-crates = Crates do Rust ({ $count })
 licenses-crates-count = { $count ->

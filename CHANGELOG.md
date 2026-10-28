@@ -286,6 +286,36 @@ The 1.3.0 that was next became this.
   with their volume; *Flat* undoes it. Settings → Audio → *Voice tone*
   colours everyone's voice at once: *Natural* (as before), *Crisp* or
   *Bass boosted*. Like the places, both stay on your device.
+- **empecord.** The fork's app is called empecord: its window, tray,
+  About tab and `empecord.exe`. It reads and writes the same
+  `settings.json`, `identity.key` and `baucord.log` as baucord (the
+  same login on every server), and it never offers baucord's updates,
+  which would put upstream baucord in its place. The settings it adds
+  are ones baucord ignores; its own hotkey is kept apart
+  (`more_keybinds`), because baucord refuses an action it does not
+  know.
+- **Save the last 5 minutes** (desktop). empecord keeps the last five
+  minutes of the call in memory, and the button beside the voice space
+  (or its hotkey, Settings → Keyboard) writes them to
+  `replays/<date time>/` next to the settings: one WAV per person,
+  named after them and aligned with the others, and `mix.wav`. Only
+  speech is kept (silence costs nothing), at most 192 MB; nothing
+  touches the disk before the button, and nobody else is told.
+  Settings → Audio → *Replay buffer* turns it off, which forgets what it
+  held, and opens the folder.
+- **Soundboard** (desktop). The music-note button opens it: every
+  sound file in `soundboard/` next to the settings (WAV, MP3, OGG,
+  FLAC or M4A, up to 60 s) is a button. A press plays the file into the
+  call through your microphone — after the noise gate and the denoiser,
+  so they leave it alone — and, with *Hear them myself too*, into your
+  ears. It has its own volume. Muted or in push-to-talk with the key
+  up, nobody hears it, as with your voice.
+- **Colour themes.** Settings → General → *Theme*: Dark (the original,
+  unchanged), Midnight, Forest, Sunset, Light, High contrast, or Custom
+  — a background, a text colour and an accent as `#RRGGBB`, from which
+  the rest of the palette is made. Text too close to its background is
+  moved apart until it reads. Seen at once in the main window and the
+  stream viewers; Close without saving puts the old one back.
 - Pictures you send have their EXIF data removed (camera, GPS
   location) and are turned the right way up first; a portrait photo no
   longer arrives sideways.

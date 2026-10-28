@@ -196,6 +196,36 @@ built-in speakers is the machine that matters most.
   front pair only, still placed. Echo cancellation *Automatic* on
   laptop speakers with people placed: the others hear no echo of
   themselves.
+- [ ] **new (replay buffer)** — a room with two others, talk for a few
+  minutes, press the clock button beside the voice space: a toast says
+  how many seconds and people were saved; `replays/<date time>/` next
+  to settings.json holds one WAV per person (named after them, ours
+  after our nickname) and `mix.wav`, all the same length, words lined
+  up across files to within a few tens of ms. Talk for more than five
+  minutes: the files are five minutes long. Nobody talking: "Nothing
+  was said". Settings → Audio → *Replay buffer* off, Save: the toast
+  says it is off. Task Manager: memory grows with talking, not with
+  silence. The others are not told anything.
+- [ ] **new (replay buffer)** — its hotkey (Settings → Keyboard → *Save
+  the last 5 minutes*) saves while the app is in the background. Then
+  start upstream baucord on the same folder: it opens, its settings
+  intact (the hotkey lives in `more_keybinds`, which it ignores).
+- [ ] **new (soundboard)** — drop a WAV, an MP3 and an M4A into
+  `soundboard/` (the music-note button → *Open folder*), *Refresh*:
+  three buttons. In a room, a press: the others hear it at the
+  volume slider's level, and we hear it too unless *Hear them myself
+  too* is off. Muted: a toast, and nobody hears it. *Stop* cuts every
+  clip. A 2-minute file: "longer than 60 seconds". A renamed .txt: "not
+  a sound file".
+- [ ] **new (themes)** — Settings → General → *Theme*: each preset
+  repaints the main window and an open stream viewer at once; *Light*
+  is readable everywhere (chat, roster, menus, the admin panel,
+  dialogs). *Custom* with background `#303030` and text `#383838`: the
+  text is pulled light enough to read. *Close* without saving: the old
+  theme comes back; *Save and close*, restart: the theme stays.
+- [ ] **new (empecord)** — the window, the tray tip and Task Manager
+  say empecord; About says "a fork of baucord"; there is no *Check for
+  updates* switch and no update prompt at start.
 
 ### 1.2 Ducking — other apps getting quieter [CLI-11, AEC-SPEC E14, E15]
 

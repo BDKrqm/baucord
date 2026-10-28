@@ -949,6 +949,24 @@ the peer's limiter), and the finished voice mix one voice tone
 (`ToneFilter`: natural, crisp, bass boosted; Settings → Audio), which
 the chimes and a watched stream skip.
 
+empecord adds two taps and a mixer to the same two workers, all real-time
+safe. The **replay buffer** (`audio/src/replay.rs`) copies each peer's
+decoded voice in `pull_mixed` — before their volume, equalizer and place
+— and the microphone's frame as it goes to the encoder, through a
+`ReplayTap` each: whole records into a lock-free byte ring, nothing
+allocated or waited for, nothing while a source is silent (a peak
+threshold with a 200 ms hangover). A thread of its own drains the rings
+into one-second pages per source on one timeline (the engine's clock;
+each tap re-anchors when it drifts past −100/+500 ms, a stalled device),
+trims them to five minutes and to `MEMORY_CAP`, and on `save` writes
+one WAV per source and a mix from a snapshot of the pages. The
+**soundboard** (`audio/src/soundboard.rs`) decodes a file once
+(symphonia, then rubato to mono 48 kHz; the client's voice thread
+caches it) and sends `ClipCmd`s to a `ClipMixer` in the input worker,
+which adds it after the chain (the gate and RNNoise never see it) and
+limits the sum, and, to hear it ourselves, to one in the output worker.
+Neither changes the wire: the server relays an ordinary voice stream.
+
 A watched stream's audio has an output of its own (stereo, its own
 volume, untouched by deafen) — except on a phone's call path, where it
 is mixed into the voice output instead (`stream::mix`, ANDROID-SPEC

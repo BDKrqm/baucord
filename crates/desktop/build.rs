@@ -7,6 +7,12 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let mut res = winresource::WindowsResource::new();
         res.set_icon("../../assets/icons/icon.ico");
+        // What Explorer and Task Manager call the program (empecord, the
+        // fork); the version stays the package's.
+        res.set("ProductName", "empecord");
+        res.set("FileDescription", "empecord");
+        res.set("InternalName", "empecord");
+        res.set("OriginalFilename", "empecord.exe");
         res.compile()
             .expect("embed Windows resources (assets/icons/icon.ico)");
     }

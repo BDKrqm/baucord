@@ -699,6 +699,7 @@ pub fn populate(app: &mut AppState) {
         .unwrap_or(1);
     s.set_text_size_index(i32::try_from(size_index).unwrap_or(1));
     push_theme(&s, settings);
+    s.set_updater_available(app::UPDATER);
     let levels: Vec<slint::SharedString> = LOG_LEVELS.iter().map(|(k, _)| t!(k).into()).collect();
     s.set_log_levels(ModelRc::new(VecModel::from(levels)));
     let level_index = LOG_LEVELS
@@ -2310,8 +2311,10 @@ fn set_about(s: &ui::SettingsState) {
         std::env::current_exe().map_or_else(|_| t!("unknown"), |p| p.display().to_string());
     let config_path = client::config::settings_file_path().display().to_string();
     let head = format!(
-        "baucord {}\nhttps://baucord.com\n\n{} {}\n{} {}",
+        "{} {}\n{}\nhttps://github.com/BDKrqm/baucord\n\n{} {}\n{} {}",
+        app::APP_NAME,
         app::CURRENT_VERSION,
+        t!("about-fork-of"),
         t!("about-running-from"),
         exe_path,
         t!("about-config-file"),

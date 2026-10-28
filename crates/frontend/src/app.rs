@@ -76,6 +76,16 @@ pub(crate) use safety::reason_label;
 /// Compiled-in version of this binary.
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// The app's name, where it names itself: empecord, a fork of baucord.
+/// The files it shares with baucord (settings.json, identity.key,
+/// baucord.log) keep their names, so either reads the other's.
+pub const APP_NAME: &str = "empecord";
+
+/// Whether to look for a newer release at startup. Off in empecord:
+/// what baucord's channel offers is baucord's build, and installing it
+/// would put upstream baucord in place of this fork.
+pub const UPDATER: bool = false;
+
 /// Slint's Android backend has one window per process (every `Window`
 /// component is handed the same window adapter), so a second window
 /// would collide with the main one: the stream viewer, the one
@@ -1012,7 +1022,7 @@ pub fn run() {
     }
     // The version check gates the splash; without it, straight to the
     // connect screen (and whatever startup asks for there).
-    if state.borrow().settings.startup.check_updates {
+    if UPDATER && state.borrow().settings.startup.check_updates {
         crate::updater::spawn_version_check();
     } else {
         state.borrow_mut().show_connect_phase();
@@ -2825,7 +2835,7 @@ pub mod tray {
                 } else if view.quiet {
                     t!("tray-tip-muted")
                 } else {
-                    "baucord".to_string()
+                    super::APP_NAME.to_string()
                 }
                 .into(),
             );
