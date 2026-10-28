@@ -674,6 +674,41 @@ audio-voice-tone-hint = Applies to everyone's voice; notifications and streams a
 audio-tone-natural = Natural
 audio-tone-crisp = Crisp
 audio-tone-bass = Bass boosted
+# empecord: the replay buffer. The last five minutes of the call stay
+# in memory; the button writes them, one file per person and a mix.
+# Nobody else is told. Local only.
+replay-save = Save the last 5 minutes
+replay-header = Replay buffer
+replay-toggle = Keep the last 5 minutes of the call
+replay-toggle-hint = Held in memory only, for the Save button next to the microphone (or its key). Nothing is written until you press it, and nobody else is told.
+replay-folder-line = Saved in:
+replay-open-folder = Open recordings folder
+replay-off = The replay buffer is off. Turn it on in Settings → Audio.
+replay-nothing = Nothing was said in the last 5 minutes.
+replay-me = me
+replay-saved = Saved { $seconds } s ({ $people ->
+    [one] 1 person
+   *[other] { $people } people
+}) to { $folder }
+replay-failed = Unable to save the recording: { $error }
+action-save-replay = Save the last 5 minutes
+# empecord: the soundboard. The files in its folder, played into the
+# call through your microphone.
+soundboard-title = Soundboard
+soundboard-hint = Every sound file in the folder below is a button (WAV, MP3, OGG, FLAC or M4A, up to 60 seconds). The others hear it through your microphone, so not while you are muted.
+soundboard-empty = No sounds yet. Put some files in the folder, then Refresh.
+soundboard-volume = Volume
+soundboard-hear = Hear them myself too
+soundboard-folder-line = Folder:
+soundboard-open-folder = Open folder
+soundboard-refresh = Refresh
+soundboard-stop = Stop
+soundboard-not-in-room = Join a voice channel to play sounds.
+soundboard-muted = You are muted: nobody else will hear it.
+soundboard-too-big = the file is over 25 MB
+soundboard-too-long = it is longer than 60 seconds
+soundboard-unreadable = it is not a sound file that can be read
+soundboard-failed = Can't play { $file }: { $reason }
 card-offline = Offline
 invite-dialog-title = Invite users
 invite-role = Joins as

@@ -86,6 +86,11 @@ export struct SpacePerson {
     y: float,
 }
 
+/// One soundboard button: a file in the soundboard folder, by name.
+export struct SoundboardClip {
+    name: string,
+}
+
 /// A channel as the "Move to" submenu lists it (visible ones only).
 
 /// One direct-message conversation in the sidebar's Messages section.
@@ -378,6 +383,15 @@ export global State {
     in-out property <float> eq-b3: 0;
     in-out property <float> eq-b4: 0;
 
+    // ── The soundboard (main.slint's dialog, soundboard.slint) ──
+    // The files in the soundboard folder, one button each; played into
+    // the call through the microphone, and into our ears if wanted.
+    in property <bool> soundboard-open: false;
+    in property <[SoundboardClip]> soundboard-clips;
+    in property <string> soundboard-folder;
+    in-out property <float> soundboard-volume: 0.7;
+    in-out property <bool> soundboard-hear: true;
+
     // Channel dialog (create, or edit one we may manage; spec §5)
     in property <bool> channel-dialog-open: false;
     in property <bool> channel-dialog-editing: false;   // false = create
@@ -595,6 +609,19 @@ export global Logic {
     callback eq-released(band: int, db: float);
     callback eq-reset();
     callback eq-close();
+    // The replay buffer: write the last five minutes (the bar's button).
+    callback replay-save();
+    // The soundboard: open and close it, play a button (index into
+    // State.soundboard-clips), stop them all, read the folder again,
+    // open the folder, the volume let go, hearing them ourselves.
+    callback soundboard-open();
+    callback soundboard-close();
+    callback soundboard-play(int);
+    callback soundboard-stop();
+    callback soundboard-refresh();
+    callback soundboard-folder();
+    callback soundboard-volume-released(float);
+    callback soundboard-hear-toggled(bool);
     // 1.1.1 — the Messages section
     callback dm-clicked(int);                  // index into State.dms
     callback dm-closed(int);                   // hide the conversation (nothing is deleted)

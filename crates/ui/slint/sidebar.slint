@@ -865,6 +865,19 @@ export component Sidebar inherits Rectangle {
                     tooltip: Tr.space-title;
                     clicked => { Logic.space-open(); }
                 }
+                // empecord: the last five minutes to disk, and the
+                // soundboard. The desktop's (a phone has no folder to
+                // put files in, nor to find them).
+                if !State.touch-host : IconBtn {
+                    icon: IconSet.History;
+                    tooltip: Tr.replay-save;
+                    clicked => { Logic.replay-save(); }
+                }
+                if !State.touch-host : IconBtn {
+                    icon: IconSet.Music;
+                    tooltip: Tr.soundboard-title;
+                    clicked => { Logic.soundboard-open(); }
+                }
                 // A phone cannot share its screen (ANDROID-SPEC.md §9.4):
                 // no button that could only fail.
                 if !State.touch-host : IconBtn {

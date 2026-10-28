@@ -119,7 +119,7 @@ impl HotkeyManager {
             watch_tx,
             registered: Vec::new(),
             bindings: HashMap::new(),
-            binds: wanted(&settings.keybinds, settings.audio.push_to_talk),
+            binds: wanted(settings.all_keybinds(), settings.audio.push_to_talk),
             active: false,
         }
     }
@@ -127,7 +127,7 @@ impl HotkeyManager {
     /// The keybinds or push-to-talk changed: re-arm with the new set
     /// (while connected).
     pub fn update(&mut self, settings: &Settings) {
-        let binds = wanted(&settings.keybinds, settings.audio.push_to_talk);
+        let binds = wanted(settings.all_keybinds(), settings.audio.push_to_talk);
         if binds == self.binds {
             return;
         }
@@ -327,9 +327,12 @@ impl HotkeyManager {
 
 /// The bindings to arm: the bound ones, push-to-talk's only while
 /// push-to-talk is on (its key is not watched, nor grabbed, otherwise).
-fn wanted(keybinds: &[KeybindEntry], push_to_talk: bool) -> Vec<KeybindEntry> {
+fn wanted<'a>(
+    keybinds: impl IntoIterator<Item = &'a KeybindEntry>,
+    push_to_talk: bool,
+) -> Vec<KeybindEntry> {
     keybinds
-        .iter()
+        .into_iter()
         .filter(|e| !e.bind.is_empty())
         .filter(|e| push_to_talk || e.action != BindableAction::PushToTalk)
         .cloned()

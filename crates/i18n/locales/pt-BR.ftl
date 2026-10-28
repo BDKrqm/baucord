@@ -674,6 +674,41 @@ audio-voice-tone-hint = Vale para a voz de todos; notificações e transmissões
 audio-tone-natural = Natural
 audio-tone-crisp = Nítido
 audio-tone-bass = Graves reforçados
+# empecord: o buffer de replay. Os últimos cinco minutos da chamada
+# ficam na memória; o botão os grava, um arquivo por pessoa e uma
+# mixagem. Ninguém é avisado. Só neste dispositivo.
+replay-save = Salvar os últimos 5 minutos
+replay-header = Buffer de replay
+replay-toggle = Manter na memória os últimos 5 minutos da chamada
+replay-toggle-hint = Só na memória, para o botão Salvar ao lado do microfone (ou a tecla dele). Nada é gravado até você apertar, e ninguém é avisado.
+replay-folder-line = Salvos em:
+replay-open-folder = Abrir a pasta de gravações
+replay-off = O buffer de replay está desligado. Ligue em Configurações → Áudio.
+replay-nothing = Ninguém falou nos últimos 5 minutos.
+replay-me = eu
+replay-saved = { $seconds } s salvos ({ $people ->
+    [one] 1 pessoa
+   *[other] { $people } pessoas
+}) em { $folder }
+replay-failed = Não foi possível salvar a gravação: { $error }
+action-save-replay = Salvar os últimos 5 minutos
+# empecord: a mesa de sons. Os arquivos da pasta dela, tocados na
+# chamada pelo seu microfone.
+soundboard-title = Mesa de sons
+soundboard-hint = Cada arquivo de som da pasta abaixo é um botão (WAV, MP3, OGG, FLAC ou M4A, até 60 segundos). Os outros ouvem pelo seu microfone, então não enquanto você estiver silenciado.
+soundboard-empty = Ainda não há sons. Coloque arquivos na pasta e clique em Atualizar.
+soundboard-volume = Volume
+soundboard-hear = Ouvir também
+soundboard-folder-line = Pasta:
+soundboard-open-folder = Abrir a pasta
+soundboard-refresh = Atualizar
+soundboard-stop = Parar
+soundboard-not-in-room = Entre em um canal de voz para tocar sons.
+soundboard-muted = Você está silenciado: ninguém mais vai ouvir.
+soundboard-too-big = o arquivo tem mais de 25 MB
+soundboard-too-long = dura mais de 60 segundos
+soundboard-unreadable = não é um arquivo de som que dê para ler
+soundboard-failed = Não dá para tocar { $file }: { $reason }
 card-offline = Desconectado
 invite-dialog-title = Convidar usuários
 invite-role = Entra como

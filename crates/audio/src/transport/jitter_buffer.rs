@@ -36,6 +36,7 @@ use std::time::{Duration, Instant};
 use crate::config::PeerAudioSettings;
 use crate::processor::eq::{PeerEq, ToneFilter, VoiceTone};
 use crate::processor::limiter::Limiter;
+use crate::replay::{Hangover, ReplayTap};
 use crate::spatial::Spatializer;
 use crate::transport::packet::{AudioPacket, PayloadType};
 use crate::transport::packet_buffer::{PacketBuffer, Push};
@@ -200,6 +201,9 @@ struct PeerBuffer {
     /// This peer's own equalizer (`processor::eq`), after the volume and
     /// before the limiter.
     eq: PeerEq,
+    /// Whether this peer is speaking, for the replay buffer
+    /// (`crate::replay`).
+    rec_hang: Hangover,
 }
 
 impl PeerBuffer {
@@ -226,6 +230,7 @@ impl PeerBuffer {
             limiter: Limiter::new(),
             spatial: Spatializer::new(),
             eq: PeerEq::new(),
+            rec_hang: Hangover::default(),
         })
     }
 
@@ -361,6 +366,10 @@ pub struct AdaptiveJitterBuffer {
     width: f32,
     /// The voice tone over the finished mix (`PeerTable::set_tone`).
     tone: ToneFilter,
+    /// Where each peer's decoded voice is copied for the replay buffer,
+    /// before the volume, the equalizer and the place
+    /// ([`Self::set_replay`]).
+    replay: Option<ReplayTap>,
 
     /// Self-monitor PCM (mic loopback), mixed after the peers.
     loopback: VecDeque<f32>,
@@ -424,6 +433,7 @@ impl AdaptiveJitterBuffer {
             stereo: false,
             width: 0.0,
             tone: ToneFilter::new(),
+            replay: None,
             loopback: VecDeque::with_capacity(LOOPBACK_CAP),
             scratch: Vec::new(),
             jitter_scratch: Vec::new(),
@@ -460,6 +470,13 @@ impl AdaptiveJitterBuffer {
         if self.target_samples < self.min_samples {
             self.target_samples = self.min_samples;
         }
+    }
+
+    /// Copy every peer's decoded voice to `tap` (one track per peer,
+    /// `crate::replay`). A peer muted here is not decoded, so it is not
+    /// kept either: the recording is of what the listener heard.
+    pub fn set_replay(&mut self, tap: ReplayTap) {
+        self.replay = Some(tap);
     }
 
     /// Whether the output has two ears to play to. A mono device (a
@@ -800,7 +817,7 @@ impl AdaptiveJitterBuffer {
         let prime_cap = ((60 * self.sample_rate) / 1000).max(self.min_samples);
         let prime_target = self.target_samples.min(prime_cap);
 
-        for peer in self.buffers.values_mut() {
+        for (&peer_id, peer) in &mut self.buffers {
             let peer_settings = peer.settings.clone();
             if peer_settings.is_muted {
                 peer.packets.clear();
@@ -938,6 +955,16 @@ impl AdaptiveJitterBuffer {
             }
 
             if available > 0 {
+                // The replay buffer gets the voice as decoded: its level
+                // is theirs, not the listener's volume for them.
+                if let Some(tap) = self.replay.as_mut() {
+                    tap.push(
+                        peer_id,
+                        peer.consumed_samples.saturating_sub(n as u64),
+                        &self.scratch[..available],
+                        &mut peer.rec_hang,
+                    );
+                }
                 for slot in &mut self.scratch[..available] {
                     *slot *= peer_settings.volume;
                 }

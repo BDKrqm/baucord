@@ -40,6 +40,10 @@ pub enum BindableAction {
     ToggleDeafen,
     ToggleScreenShare,
     PushToTalk,
+    /// Write the replay buffer's last five minutes (`audio::replay`).
+    /// Kept in [`Settings::more_keybinds`], not `keybinds`: a baucord
+    /// that does not know it would refuse the whole file.
+    SaveReplay,
 }
 
 impl BindableAction {
@@ -50,6 +54,7 @@ impl BindableAction {
         BindableAction::ToggleDeafen,
         BindableAction::ToggleScreenShare,
         BindableAction::PushToTalk,
+        BindableAction::SaveReplay,
     ];
 
     #[must_use]
@@ -59,7 +64,15 @@ impl BindableAction {
             BindableAction::ToggleDeafen => "Toggle Deafen",
             BindableAction::ToggleScreenShare => "Toggle Screen Share",
             BindableAction::PushToTalk => "Push to talk",
+            BindableAction::SaveReplay => "Save the last 5 minutes",
         }
+    }
+
+    /// An action of empecord's own, saved apart from baucord's
+    /// ([`Settings::more_keybinds`]).
+    #[must_use]
+    pub fn is_ours(self) -> bool {
+        matches!(self, BindableAction::SaveReplay)
     }
 }
 
@@ -168,6 +181,40 @@ pub struct UiSettings {
     /// arrives or "Message" is picked on that person again.
     #[serde(default)]
     pub hidden_dms: Vec<String>,
+    /// The colour theme: `"dark"` (the original), `"midnight"`,
+    /// `"forest"`, `"sunset"`, `"light"`, `"contrast"` or `"custom"`
+    /// (the three colours below). A key this version does not know is
+    /// `"dark"`.
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    /// The custom theme's three colours, `#RRGGBB`.
+    #[serde(default)]
+    pub theme_colors: ThemeColors,
+}
+
+/// The custom theme: a background, a text colour and an accent, from
+/// which the frontend derives the rest (`frontend::theme`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ThemeColors {
+    pub background: String,
+    pub text: String,
+    pub accent: String,
+}
+
+impl Default for ThemeColors {
+    /// The original dark's three, as a place to start from.
+    fn default() -> Self {
+        Self {
+            background: "#1A1D21".into(),
+            text: "#D1D2D3".into(),
+            accent: "#1264A3".into(),
+        }
+    }
+}
+
+fn default_theme() -> String {
+    "dark".to_string()
 }
 
 fn default_sidebar_width() -> u16 {
@@ -189,6 +236,8 @@ impl Default for UiSettings {
             sidebar_width: default_sidebar_width(),
             messages_height: default_messages_height(),
             hidden_dms: Vec::new(),
+            theme: default_theme(),
+            theme_colors: ThemeColors::default(),
         }
     }
 }
@@ -540,6 +589,22 @@ pub struct AudioSettings {
     /// `"crisp"`, `"bass_boost"` (`audio::VoiceTone`).
     #[serde(default)]
     pub voice_tone: audio::VoiceTone,
+    /// Keep the last five minutes of the call in memory, for the Save
+    /// button (`audio::replay`). Nothing reaches the disk until it is
+    /// pressed.
+    #[serde(default = "default_true")]
+    pub replay_buffer: bool,
+    /// The soundboard's volume, 0…1 (what the others hear; our own
+    /// copy follows the output volume as well).
+    #[serde(default = "default_soundboard_volume")]
+    pub soundboard_volume: f32,
+    /// Hear the soundboard's clips ourselves, too.
+    #[serde(default = "default_true")]
+    pub soundboard_hear: bool,
+}
+
+fn default_soundboard_volume() -> f32 {
+    0.7
 }
 
 impl Default for AudioSettings {
@@ -556,6 +621,9 @@ impl Default for AudioSettings {
             space_distance: DEFAULT_SPACE_DISTANCE,
             space_width: audio::DEFAULT_SPATIAL_WIDTH,
             voice_tone: audio::VoiceTone::Natural,
+            replay_buffer: true,
+            soundboard_volume: default_soundboard_volume(),
+            soundboard_hear: true,
         }
     }
 }
@@ -590,6 +658,10 @@ impl Default for WindowSettings {
 // A key missing from the file takes its default, not the whole file
 // with it (review 2026-10, P3-43).
 #[serde(default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one key per switch in settings.json, as in AudioSettings"
+)]
 pub struct ShareSettings {
     /// Quality preset key (`video::Quality::key()`, e.g. "fhd30").
     /// Stored as a string so settings files survive preset reordering
@@ -676,6 +748,12 @@ pub struct Settings {
     pub window: WindowSettings,
     #[serde(default = "default_keybinds")]
     pub keybinds: Vec<KeybindEntry>,
+    /// The keybinds of empecord's own actions
+    /// ([`BindableAction::is_ours`]). Apart from `keybinds` because
+    /// baucord, sharing this file, ignores a key it does not know but
+    /// fails on an action it does not know.
+    #[serde(default)]
+    pub more_keybinds: Vec<KeybindEntry>,
     #[serde(default)]
     pub peer_settings: HashMap<String, PeerAudioSettings>,
     /// UI language as a BCP-47 code (e.g. "es-AR"). `None` = follow the
@@ -761,6 +839,7 @@ impl Default for Settings {
             audio: AudioSettings::default(),
             window: WindowSettings::default(),
             keybinds: default_keybinds(),
+            more_keybinds: Vec::new(),
             peer_settings: HashMap::new(),
             language: None,
             share: ShareSettings::default(),
@@ -1050,18 +1129,41 @@ impl Settings {
 
     #[must_use]
     pub fn bind_for(&self, action: BindableAction) -> &str {
-        self.keybinds
-            .iter()
+        self.all_keybinds()
             .find(|e| e.action == action)
             .map_or("", |e| e.bind.as_str())
     }
 
     pub fn set_bind(&mut self, action: BindableAction, bind: String) {
-        if let Some(entry) = self.keybinds.iter_mut().find(|e| e.action == action) {
+        let binds = if action.is_ours() {
+            &mut self.more_keybinds
+        } else {
+            &mut self.keybinds
+        };
+        if let Some(entry) = binds.iter_mut().find(|e| e.action == action) {
             entry.bind = bind;
         } else {
-            self.keybinds.push(KeybindEntry { action, bind });
+            binds.push(KeybindEntry { action, bind });
         }
+    }
+
+    /// Every keybind: baucord's and empecord's own.
+    pub fn all_keybinds(&self) -> impl Iterator<Item = &KeybindEntry> {
+        self.keybinds.iter().chain(&self.more_keybinds)
+    }
+
+    /// Where the soundboard's clips are: the files dropped in it are
+    /// the buttons (`soundboard/` next to settings.json).
+    #[must_use]
+    pub fn soundboard_dir() -> PathBuf {
+        config_base_dir().join("soundboard")
+    }
+
+    /// Where the replay buffer's saves go, one folder each (`replays/`
+    /// next to settings.json).
+    #[must_use]
+    pub fn replays_dir() -> PathBuf {
+        config_base_dir().join("replays")
     }
 }
 
@@ -1616,6 +1718,37 @@ mod tests {
         let s = parse("{}");
         assert_eq!(s.server, "baucord");
         assert_eq!(s.servers, vec![ServerEntry::official()]);
+    }
+
+    /// The replay hotkey goes to `more_keybinds`: baucord, reading the
+    /// same file, would fail on an action in `keybinds` it does not know.
+    #[test]
+    fn our_keybinds_stay_out_of_baucords_list() {
+        let mut s = Settings::default();
+        s.set_bind(BindableAction::SaveReplay, "F10".into());
+        s.set_bind(BindableAction::ToggleMute, "F6".into());
+        assert_eq!(s.bind_for(BindableAction::SaveReplay), "F10");
+        assert_eq!(s.bind_for(BindableAction::ToggleMute), "F6");
+        let json = serde_json::to_value(&s).expect("serialize");
+        let theirs = json["keybinds"].to_string();
+        assert!(!theirs.contains("save_replay"), "{theirs}");
+        assert!(json["more_keybinds"].to_string().contains("save_replay"));
+        let back = parse(&json.to_string());
+        assert_eq!(back.bind_for(BindableAction::SaveReplay), "F10");
+        assert_eq!(
+            back.all_keybinds().filter(|e| !e.bind.is_empty()).count(),
+            4,
+            "mute, deafen, share and save"
+        );
+    }
+
+    #[test]
+    fn empecords_own_settings_have_their_defaults() {
+        let s = parse("{}");
+        assert!(s.audio.replay_buffer);
+        assert!(s.audio.soundboard_hear);
+        assert_eq!(s.ui.theme, "dark");
+        assert_eq!(s.ui.theme_colors, ThemeColors::default());
     }
 
     #[test]

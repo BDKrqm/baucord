@@ -31,7 +31,7 @@ use std::time::Duration;
 use audioadapter_buffers::direct::SequentialSliceOfVecs;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig, SupportedStreamConfig};
-use crossbeam_channel::{Sender, TrySendError};
+use crossbeam_channel::{Receiver as ChannelReceiver, Sender, TrySendError};
 use dasp_sample::{FromSample, Sample as DaspSample, ToSample};
 use log::{error, info};
 use rtrb::{Consumer, Producer, RingBuffer};
@@ -44,9 +44,20 @@ use crate::processor::compressor::Compressor;
 use crate::processor::gate::NoiseGate;
 use crate::processor::speaking::{SpeakingFlag, SpeakingIndicator};
 use crate::processor::{FrameContext, InputChain};
+use crate::replay::{self, Hangover, ReplayTap};
 use crate::resampler::build_input_resampler;
+use crate::soundboard::{ClipCmd, ClipMixer};
 use crate::stats::AudioStats;
 use crate::{PcmFrame, FRAME_SIZE, OPUS_SAMPLE_RATE};
+
+/// What the capture worker does with the frame after the chain: the
+/// soundboard's clips added to it (the others hear them; the gate,
+/// denoiser and compressor do not touch them), and the replay buffer's
+/// copy of it, as it goes out.
+pub struct MicTaps {
+    pub replay: ReplayTap,
+    pub clips: ChannelReceiver<ClipCmd>,
+}
 
 pub struct AudioInput {
     /// cpal's device and the config it opens at: asked in `start_cpal`,
@@ -90,6 +101,9 @@ pub struct AudioInput {
     aec_verdict: Option<Result<(), &'static str>>,
     encoder_tx: Sender<PcmFrame>,
     loopback_tx: Sender<PcmFrame>,
+    /// The soundboard and replay taps, handed to the worker when it
+    /// starts.
+    taps: Option<MicTaps>,
 
     ring_producer: Option<Producer<f32>>,
     ring_consumer: Option<Consumer<f32>>,
@@ -118,7 +132,7 @@ pub struct AudioInput {
 
 impl AudioInput {
     // Opens nothing (see the `cpal` field): the `Result` is the callers'.
-    #[allow(clippy::unnecessary_wraps)]
+    #[allow(clippy::unnecessary_wraps, clippy::too_many_arguments)]
     pub fn new(
         device_name: Option<&str>,
         encoder_tx: Sender<PcmFrame>,
@@ -127,6 +141,7 @@ impl AudioInput {
         config: Arc<InputConfig>,
         is_speaking: Arc<SpeakingFlag>,
         voice: bool,
+        taps: MicTaps,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // cpal is asked only by the cpal path (`start_cpal`): a phone on
         // the call path, or Windows' native capture, never needs it, and
@@ -162,6 +177,7 @@ impl AudioInput {
             aec_verdict: None,
             encoder_tx,
             loopback_tx,
+            taps: Some(taps),
             ring_producer: Some(ring_producer),
             ring_consumer: Some(ring_consumer),
             stop_ring: Some(wake_tx.clone()),
@@ -461,6 +477,7 @@ impl AudioInput {
             .take()
             .ok_or("Ring consumer already taken")?;
         let wake_rx = self.wake_rx.take().ok_or("Wake receiver already taken")?;
+        let taps = self.taps.take().ok_or("Taps already taken")?;
 
         let should_stop = self.should_stop.clone();
         let stats = self.stats.clone();
@@ -483,6 +500,7 @@ impl AudioInput {
                 chain,
                 is_speaking,
                 device_sample_rate,
+                taps,
             );
         }));
         Ok(())
@@ -526,6 +544,7 @@ fn worker_loop(
     mut chain: InputChain,
     is_speaking: Arc<SpeakingFlag>,
     device_sample_rate: u32,
+    mut taps: MicTaps,
 ) {
     // ── Resampler setup ─────────────────────────────────────
     let needs_resample = device_sample_rate != OPUS_SAMPLE_RATE;
@@ -556,6 +575,10 @@ fn worker_loop(
     let mut read_buf = vec![0.0f32; 4096];
     let mut accumulator: Vec<f32> = Vec::with_capacity(FRAME_SIZE * 4);
     let mut frame: PcmFrame = [0.0; FRAME_SIZE];
+    let mut clips = ClipMixer::new();
+    let mut rec_hang = Hangover::default();
+    // Samples processed so far: the replay tap's own clock.
+    let mut rec_local: u64 = 0;
 
     // Ask the OS for audio-class scheduling. Keeps small buffers glitch-
     // free under load.
@@ -582,6 +605,10 @@ fn worker_loop(
             }
             muted = true;
             is_speaking.set(false);
+            // A clip asked for while nothing goes out would play late,
+            // on unmute: forget it.
+            while taps.clips.try_recv().is_ok() {}
+            clips.handle(ClipCmd::Stop);
             // Discard whatever landed while muted.
             let stale = ring_consumer.slots();
             if let Ok(chunk) = ring_consumer.read_chunk(stale) {
@@ -687,13 +714,30 @@ fn worker_loop(
             stats.gate_active.store(ctx.gate_open, Ordering::Relaxed);
             stats.vad_active.store(ctx.is_speech, Ordering::Relaxed);
 
+            // The soundboard: after the chain, which would gate, denoise
+            // and compress a clip as if it were a voice. Limited here,
+            // not by the chain's compressor.
+            while let Ok(cmd) = taps.clips.try_recv() {
+                clips.handle(cmd);
+            }
+            if !clips.is_idle() {
+                clips.mix_into(&mut frame);
+                for s in &mut frame {
+                    *s = s.clamp(-0.99, 0.99);
+                }
+            }
+
             if config.loopback_enabled.load(Ordering::Relaxed) {
                 // Frames are `Copy`: no clone, no allocation.
                 let _ = loopback_tx.try_send(frame);
             }
+            let local = rec_local;
+            rec_local += FRAME_SIZE as u64;
             if !config.transmit.load(Ordering::Relaxed) {
                 continue;
             }
+            // What the others hear of this side, for the replay buffer.
+            taps.replay.push(replay::ME, local, &frame, &mut rec_hang);
 
             // Every frame goes to the encoder: the gate has already
             // zeroed non-speech, and Opus DTX (in the encoder thread)
@@ -818,6 +862,10 @@ mod tests {
                     chain,
                     speaking,
                     OPUS_SAMPLE_RATE,
+                    MicTaps {
+                        replay: crate::replay::Replay::new(false).tap(crate::replay::INPUT_RING),
+                        clips: bounded(1).1,
+                    },
                 );
             })
         };

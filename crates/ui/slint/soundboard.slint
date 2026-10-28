@@ -1,0 +1,92 @@
+// soundboard.slint — the soundboard (empecord): the files in the
+// soundboard folder, one button each. A press plays the file into the
+// call through the microphone path — after the denoiser and the gate,
+// so they do not touch it — and into our own ears if wanted (`audio`'s
+// soundboard.rs, `app/soundboard.rs`). Local only: the server sees an
+// ordinary voice stream. main.slint puts the body in a `Modal`.
+
+import { Theme } from "theme.slint";
+import { Tr } from "tr.slint";
+import { State, Logic } from "globals.slint";
+import { Btn, CheckRow, HSlider, Hint } from "widgets.slint";
+
+/// The dialog's body: the title, the buttons, the volume, and the
+/// folder.
+export component SoundboardBody inherits VerticalLayout {
+    spacing: Theme.gap-md;
+    Text {
+        text: Tr.soundboard-title;
+        color: Theme.text-primary;
+        font-size: Theme.font-md;
+        font-weight: 600;
+    }
+    Hint { text: Tr.soundboard-hint; }
+    if State.soundboard-clips.length == 0 : Text {
+        text: Tr.soundboard-empty;
+        color: Theme.text-secondary;
+        font-size: Theme.font-sm;
+        horizontal-alignment: center;
+        wrap: word-wrap;
+    }
+    VerticalLayout {
+        spacing: Theme.gap-xs;
+        for clip[i] in State.soundboard-clips : Btn {
+            text: clip.name;
+            clicked => { Logic.soundboard-play(i); }
+        }
+    }
+    VerticalLayout {
+        spacing: 2px;
+        HorizontalLayout {
+            spacing: Theme.gap-sm;
+            Text {
+                text: Tr.soundboard-volume;
+                color: Theme.text-primary;
+                font-size: Theme.font-body;
+                vertical-alignment: center;
+            }
+            HSlider {
+                horizontal-stretch: 1;
+                minimum: 0.0;
+                maximum: 1.0;
+                value <=> State.soundboard-volume;
+                released(v) => { Logic.soundboard-volume-released(v); }
+            }
+            Text {
+                width: 44px;
+                text: "\{Math.round(State.soundboard-volume * 100)}%";
+                color: Theme.text-muted;
+                font-size: Theme.font-sm;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+            }
+        }
+    }
+    CheckRow {
+        text: Tr.soundboard-hear;
+        checked <=> State.soundboard-hear;
+        toggled(on) => { Logic.soundboard-hear-toggled(on); }
+    }
+    Hint { text: Tr.soundboard-folder-line + " " + State.soundboard-folder; }
+    HorizontalLayout {
+        spacing: Theme.gap-sm;
+        Btn {
+            text: Tr.soundboard-open-folder;
+            clicked => { Logic.soundboard-folder(); }
+        }
+        Btn {
+            text: Tr.soundboard-refresh;
+            clicked => { Logic.soundboard-refresh(); }
+        }
+        Btn {
+            text: Tr.soundboard-stop;
+            clicked => { Logic.soundboard-stop(); }
+        }
+        Rectangle { horizontal-stretch: 1; }
+        Btn {
+            text: Tr.space-done;
+            accent: true;
+            clicked => { Logic.soundboard-close(); }
+        }
+    }
+}

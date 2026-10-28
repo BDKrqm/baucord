@@ -133,6 +133,10 @@ export global SettingsState {
     /// boosted (audio::VoiceTone::ALL order).
     in property <[string]> voice-tones;
     in-out property <int> voice-tone-index: 0;
+    /// empecord's replay buffer (the last five minutes in memory) and
+    /// where its saves go.
+    in-out property <bool> replay-buffer: true;
+    in property <string> replays-path;
     /// Windows is lowering the user's other apps because of our call
     /// streams and would not be asked not to (AEC-SPEC.md E15).
     in property <bool> aec-lowering;
@@ -246,6 +250,8 @@ export global SettingsLogic {
     callback transmission-selected(int);
     callback aec-selected(int);
     callback voice-tone-selected(int);
+    callback replay-buffer-changed(bool);
+    callback open-replays-folder();
     /// Open the system's sound settings (Windows: Communications tab).
     callback open-sound-settings();
 
@@ -1243,6 +1249,28 @@ component AudioPanel inherits VerticalLayout {
             options: SettingsState.voice-tones;
             current <=> SettingsState.voice-tone-index;
             selected(i) => { SettingsLogic.voice-tone-selected(i); }
+        }
+    }
+    // empecord: the last five minutes, kept in memory for the bar's
+    // Save button. Nobody else is told; nothing is written until then.
+    if !State.touch-host : VerticalLayout {
+        spacing: Theme.gap-sm;
+        Sep { }
+        SectionHeader { text: Tr.replay-header; }
+        CheckRow {
+            text: Tr.replay-toggle;
+            hint: Tr.replay-toggle-hint;
+            checked <=> SettingsState.replay-buffer;
+            toggled(on) => { SettingsLogic.replay-buffer-changed(on); }
+        }
+        Hint { text: Tr.replay-folder-line + " " + SettingsState.replays-path; }
+        HorizontalLayout {
+            spacing: Theme.gap-sm;
+            Btn {
+                text: Tr.replay-open-folder;
+                clicked => { SettingsLogic.open-replays-folder(); }
+            }
+            Rectangle { }   // keep the button its natural width
         }
     }
     Rectangle { }

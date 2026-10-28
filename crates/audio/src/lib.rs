@@ -70,8 +70,10 @@ mod native;
 mod output;
 mod platform;
 pub mod processor;
+pub mod replay;
 pub mod resampler;
 pub mod route;
+pub mod soundboard;
 pub mod sounds;
 mod spatial;
 pub mod stats;
@@ -94,6 +96,8 @@ use log::{debug, error, info};
 pub use loopback::LOOPBACK_DELAY;
 pub use platform::TimerResolutionGuard;
 pub use processor::eq::{VoiceTone, EQ_BANDS, EQ_BAND_HZ, EQ_MAX_DB};
+pub use replay::{ClipInfo, ReplayError, SaveJob};
+pub use soundboard::{Clip, ClipCmd, ClipError};
 pub use sounds::SoundType;
 pub use stats::AudioStats;
 pub use transport::packet::{AudioPacket, PayloadType};
@@ -449,6 +453,15 @@ pub struct VoiceChat {
     /// The chimes, decoded once here for every output this engine
     /// opens (review 2026-10, P3-25).
     sounds: Arc<sounds::SoundBank>,
+    /// The soundboard's clips, to the microphone's worker (what the
+    /// others hear) and to the output's (what we hear). Receivers are
+    /// shared: a worker that is reopened picks the same ones up.
+    clip_mic_tx: Sender<soundboard::ClipCmd>,
+    clip_mic_rx: Receiver<soundboard::ClipCmd>,
+    clip_ear_tx: Sender<soundboard::ClipCmd>,
+    clip_ear_rx: Receiver<soundboard::ClipCmd>,
+    /// The last five minutes of the call (`replay.rs`).
+    replay: replay::Replay,
 
     // ── Thread handles ───────────────────────────────────────────────
     encoder_thread: Option<std::thread::JoinHandle<()>>,
@@ -681,6 +694,8 @@ impl VoiceChat {
         let (network_to_output_tx, network_to_output_rx) = bounded::<Incoming>(max_peers * 8);
         let (loopback_tx, loopback_rx) = bounded::<PcmFrame>(8);
         let (sound_tx, sound_rx) = bounded::<sounds::SoundType>(4);
+        let (clip_mic_tx, clip_mic_rx) = bounded::<soundboard::ClipCmd>(8);
+        let (clip_ear_tx, clip_ear_rx) = bounded::<soundboard::ClipCmd>(8);
 
         // ── Shared atomics (created once, passed to children) ───────
         let output_gain = Arc::new(AtomicU32::new(config.output_gain.to_bits()));
@@ -714,6 +729,11 @@ impl VoiceChat {
             input_config,
             sound_rx: Some(sound_rx),
             sounds: Arc::new(sounds::SoundBank::new()),
+            clip_mic_tx,
+            clip_mic_rx,
+            clip_ear_tx,
+            clip_ear_rx,
+            replay: replay::Replay::new(config.replay),
             encoder_thread: Some(encoder_thread),
             peers: {
                 let table = transport::jitter_buffer::PeerTable::with_spatial(config.spatial_voice);
@@ -1118,6 +1138,10 @@ impl VoiceChat {
             self.input_config.clone(),
             self.is_speaking.clone(),
             self.voice_streams,
+            input::MicTaps {
+                replay: self.replay.tap(replay::INPUT_RING),
+                clips: self.clip_mic_rx.clone(),
+            },
         )?;
         #[cfg(windows)]
         {
@@ -1191,6 +1215,10 @@ impl VoiceChat {
             self.stats.clone(),
             self.config.output_gain,
             self.voice_streams,
+            output::EarTaps {
+                replay: self.replay.tap(replay::OUTPUT_RING),
+                clips: self.clip_ear_rx.clone(),
+            },
         )?;
         #[cfg(windows)]
         output.set_communications_default(self.comms_default);
@@ -1722,6 +1750,40 @@ impl VoiceChat {
     /// The colour over everyone's voice (`processor::eq`).
     pub fn set_voice_tone(&self, tone: VoiceTone) {
         self.peers.set_tone(tone);
+    }
+
+    /// Keep the last five minutes of the call in memory (`true`), or
+    /// stop and forget them (`replay.rs`).
+    pub fn set_replay(&self, on: bool) {
+        self.replay.set_enabled(on);
+    }
+
+    /// Write the last five minutes of the call: one file per person and
+    /// a mix, in `job.dir`. Returns at once; `job.done` runs when the
+    /// files are written (or it failed), on the thread that wrote them.
+    pub fn save_replay(&self, job: SaveJob) {
+        self.replay.save(job);
+    }
+
+    /// Play a soundboard clip into the call (what the others hear) and,
+    /// with `hear_it`, into our own ears. `gain` is 0–2. Nothing is
+    /// heard by the others while we are muted or out of a voice room,
+    /// as with the microphone itself.
+    pub fn play_clip(&self, clip: &Clip, gain: f32, hear_it: bool) {
+        let cmd = ClipCmd::Play {
+            clip: clip.samples.clone(),
+            gain,
+        };
+        let _ = self.clip_mic_tx.try_send(cmd.clone());
+        if hear_it {
+            let _ = self.clip_ear_tx.try_send(cmd);
+        }
+    }
+
+    /// Stop every soundboard clip.
+    pub fn stop_clips(&self) {
+        let _ = self.clip_mic_tx.try_send(ClipCmd::Stop);
+        let _ = self.clip_ear_tx.try_send(ClipCmd::Stop);
     }
 
     /// How wide the voice space sounds: 0 a real head's width … 1 the

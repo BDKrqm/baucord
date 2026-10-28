@@ -13,6 +13,7 @@ import { Tr } from "tr.slint";
 import { State, Logic, Phase, UserRow, ChatRow, EmojiRow, KeybindRow, ServerRow, ModAction, ToastKind, MenuEntry, SpacePerson } from "globals.slint";
 import { VoiceSpaceDialog } from "space.slint";
 import { EqBody } from "equalizer.slint";
+import { SoundboardBody } from "soundboard.slint";
 import { ConnectView } from "connect.slint";
 import { StartupView } from "startup.slint";
 import { Sidebar } from "sidebar.slint";
@@ -1056,6 +1057,14 @@ export component MainWindow inherits Window {
         card-width: 420px;
         dismissed => { Logic.eq-close(); }
         EqBody { }
+    }
+
+    // ── The soundboard (soundboard.slint) ──────────────────────────
+    if State.soundboard-open : Modal {
+        page: root.page-rect;
+        card-width: 440px;
+        dismissed => { Logic.soundboard-close(); }
+        SoundboardBody { }
     }
 
     // ── Invite dialog (spec §3.1) ──────────────────────────────────

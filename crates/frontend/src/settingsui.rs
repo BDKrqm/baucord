@@ -568,6 +568,7 @@ fn action_label(action: BindableAction) -> String {
         BindableAction::ToggleDeafen => t!("action-toggle-deafen"),
         BindableAction::ToggleScreenShare => t!("action-toggle-share"),
         BindableAction::PushToTalk => t!("action-push-to-talk"),
+        BindableAction::SaveReplay => t!("action-save-replay"),
     }
 }
 
@@ -801,6 +802,13 @@ pub fn populate(app: &mut AppState) {
         .collect();
     s.set_voice_tones(ModelRc::new(VecModel::from(tones)));
     s.set_voice_tone_index(i32::try_from(settings.audio.voice_tone.index()).unwrap_or(0));
+    s.set_replay_buffer(settings.audio.replay_buffer);
+    s.set_replays_path(
+        client::config::Settings::replays_dir()
+            .display()
+            .to_string()
+            .into(),
+    );
     let report = app.voice_aec().lock().ok().and_then(|g| g.clone());
     s.set_aec_status(aec_status(report.as_ref()).into());
     s.set_aec_lowering(
@@ -1219,6 +1227,12 @@ fn wire(sf: SettingsSurface<'_>) {
             app.voice_tx().send(VoiceControl::SetVoiceTone(tone)).ok();
         });
     });
+    // The replay buffer: on or off at once; Close without saving puts
+    // it back (`apply_settings_live`).
+    logic.on_replay_buffer_changed(|on| {
+        app::with_current(move |app| app.set_replay_buffer(on));
+    });
+    logic.on_open_replays_folder(app::AppState::open_replays_folder);
 
     // ── Servers tab ─────────────────────────────────────────────
     logic.on_server_selected(|_index| {

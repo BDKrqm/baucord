@@ -292,6 +292,9 @@ impl AppState {
         if now.voice_tone != was.voice_tone {
             controls.push(VoiceControl::SetVoiceTone(now.voice_tone));
         }
+        if now.replay_buffer != was.replay_buffer {
+            controls.push(VoiceControl::SetReplay(now.replay_buffer));
+        }
         for control in controls {
             self.voice.tx.send(control).ok();
         }

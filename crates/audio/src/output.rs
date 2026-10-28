@@ -23,7 +23,9 @@ use rubato::{Async, Resampler};
 use crate::latch::{Ring, Wait};
 use crate::loopback::{LoopbackDelay, LOOPBACK_DELAY};
 use crate::processor::limiter::Limiter;
+use crate::replay::ReplayTap;
 use crate::resampler::build_output_resampler;
+use crate::soundboard::{ClipCmd, ClipMixer};
 use crate::sounds::{SoundBank, SoundType};
 use crate::stats::AudioStats;
 use crate::transport::jitter_buffer::{AdaptiveJitterBuffer, PeerTable};
@@ -48,6 +50,14 @@ const ADAPT_TICK: Duration = Duration::from_millis(10);
 /// Ticks one wake may catch up: the safety wait's worth. Past that (a
 /// device that stopped calling back for longer) the cadence restarts.
 const MAX_CATCH_UP_TICKS: u32 = 20;
+
+/// What the output worker does besides playing: the soundboard's clips
+/// the listener asked to hear themselves, and the replay buffer's copy of
+/// every peer's voice.
+pub struct EarTaps {
+    pub replay: ReplayTap,
+    pub clips: Receiver<ClipCmd>,
+}
 
 pub struct AudioOutput {
     /// cpal's device and the config it opens at: asked in `start_cpal`,
@@ -95,6 +105,8 @@ pub struct AudioOutput {
     /// built the 630 KB bank again, a phone at each join and leave (review
     /// 2026-10, P3-25).
     sounds: Arc<SoundBank>,
+    /// Handed to the worker when it starts.
+    taps: Option<EarTaps>,
 
     ring_producer: Option<Producer<f32>>,
     ring_consumer: Option<Consumer<f32>>,
@@ -142,6 +154,7 @@ impl AudioOutput {
         stats: Arc<AudioStats>,
         output_gain: f32,
         voice: bool,
+        taps: EarTaps,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Asked by `start_cpal` only (see the field). The native backends
         // run at 48 kHz (the engine converts); `start_cpal` grows the
@@ -185,6 +198,7 @@ impl AudioOutput {
             loopback_rx: Some(loopback_rx),
             sound_rx: Some(sound_rx),
             sounds,
+            taps: Some(taps),
         })
     }
 
@@ -431,7 +445,11 @@ impl AudioOutput {
             self.sound_rx.take(),
             self.wake_rx.take(),
         ) {
+            let Some(taps) = self.taps.take() else {
+                return;
+            };
             let handle = Self::spawn_worker(WorkerParts {
+                taps,
                 ring_producer,
                 packet_rx,
                 loopback_rx,
@@ -539,6 +557,7 @@ impl AudioOutput {
 /// Everything the output worker owns, bundled so `spawn_worker` stays
 /// under the argument-count lint without losing the names.
 struct WorkerParts {
+    taps: EarTaps,
     ring_producer: Producer<f32>,
     packet_rx: Receiver<(AudioPacket, Instant)>,
     loopback_rx: Receiver<PcmFrame>,
@@ -562,6 +581,7 @@ struct WorkerParts {
 #[allow(clippy::too_many_lines)] // one straight-line real-time loop
 fn worker_loop(parts: WorkerParts) {
     let WorkerParts {
+        taps,
         mut ring_producer,
         packet_rx,
         loopback_rx,
@@ -588,6 +608,15 @@ fn worker_loop(parts: WorkerParts) {
 
     let mut jitter_buffer = AdaptiveJitterBuffer::new(OPUS_SAMPLE_RATE as usize, 10, peers);
     jitter_buffer.set_stereo(stereo);
+    let EarTaps {
+        replay,
+        clips: clip_rx,
+    } = taps;
+    jitter_buffer.set_replay(replay);
+    // The clips the listener hears themselves: one mono hop, into both
+    // ears with the notification sounds.
+    let mut clips = ClipMixer::new();
+    let mut clip_hop = vec![0.0f32; HOP];
 
     // Decoded once per engine, shared by every output it opens.
     let sound_bank = &*sounds;
@@ -738,6 +767,20 @@ fn worker_loop(parts: WorkerParts) {
             }
             if sound_finished {
                 playing = None;
+            }
+
+            // The soundboard's clips, when the listener asked to hear
+            // them: like a notification, they play deafened too.
+            while let Ok(cmd) = clip_rx.try_recv() {
+                clips.handle(cmd);
+            }
+            if !clips.is_idle() {
+                clip_hop.fill(0.0);
+                clips.mix_into(&mut clip_hop);
+                for ((l, r), &s) in hop_l.iter_mut().zip(hop_r.iter_mut()).zip(&clip_hop) {
+                    *l += s;
+                    *r += s;
+                }
             }
 
             // Apply master output gain (always — notifications

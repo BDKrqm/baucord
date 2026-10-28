@@ -541,6 +541,7 @@ dependencies = [
  "rtrb",
  "rubato",
  "serde",
+ "symphonia",
  "wasapi",
  "windows",
 ]

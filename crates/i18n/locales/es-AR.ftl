@@ -674,6 +674,41 @@ audio-voice-tone-hint = Se aplica a la voz de todos; las notificaciones y las tr
 audio-tone-natural = Natural
 audio-tone-crisp = Nítido
 audio-tone-bass = Graves realzados
+# empecord: el búfer de repetición. Los últimos cinco minutos de la
+# llamada quedan en memoria; el botón los guarda, un archivo por
+# persona y una mezcla. No se le avisa a nadie. Solo en este equipo.
+replay-save = Guardar los últimos 5 minutos
+replay-header = Búfer de repetición
+replay-toggle = Guardar en memoria los últimos 5 minutos de la llamada
+replay-toggle-hint = Solo en memoria, para el botón Guardar al lado del micrófono (o su tecla). No se escribe nada hasta que lo apretás, y no se le avisa a nadie.
+replay-folder-line = Se guardan en:
+replay-open-folder = Abrir la carpeta de grabaciones
+replay-off = El búfer de repetición está apagado. Prendelo en Ajustes → Audio.
+replay-nothing = Nadie habló en los últimos 5 minutos.
+replay-me = yo
+replay-saved = Se guardaron { $seconds } s ({ $people ->
+    [one] 1 persona
+   *[other] { $people } personas
+}) en { $folder }
+replay-failed = No se pudo guardar la grabación: { $error }
+action-save-replay = Guardar los últimos 5 minutos
+# empecord: la botonera de sonidos. Los archivos de su carpeta, que
+# suenan en la llamada a través de tu micrófono.
+soundboard-title = Botonera
+soundboard-hint = Cada archivo de sonido de la carpeta de abajo es un botón (WAV, MP3, OGG, FLAC o M4A, hasta 60 segundos). Los demás lo escuchan por tu micrófono, así que no mientras estés silenciado.
+soundboard-empty = Todavía no hay sonidos. Poné archivos en la carpeta y tocá Actualizar.
+soundboard-volume = Volumen
+soundboard-hear = Escucharlos yo también
+soundboard-folder-line = Carpeta:
+soundboard-open-folder = Abrir la carpeta
+soundboard-refresh = Actualizar
+soundboard-stop = Detener
+soundboard-not-in-room = Entrá a un canal de voz para reproducir sonidos.
+soundboard-muted = Estás silenciado: nadie más lo va a escuchar.
+soundboard-too-big = el archivo pesa más de 25 MB
+soundboard-too-long = dura más de 60 segundos
+soundboard-unreadable = no es un archivo de sonido que se pueda leer
+soundboard-failed = No se puede reproducir { $file }: { $reason }
 card-offline = Desconectado
 invite-dialog-title = Invitar usuarios
 invite-role = Entra como

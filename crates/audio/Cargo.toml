@@ -17,8 +17,12 @@ workspace = true
 cpal = "0.18.2"
 dasp_sample = "0.11"
 
-# Wav reading
+# Wav reading and writing (the replay buffer's tracks)
 hound = "3.5"
+
+# The soundboard's clips (soundboard.rs): wav, mp3, aac/m4a, flac,
+# ogg/vorbis, decoded in-process like the gateway's music example.
+symphonia = { version = "0.6", features = ["mp3", "aac", "isomp4"] }
 
 # Lock-free ring buffer (RT-safe)
 rtrb = "0.4"

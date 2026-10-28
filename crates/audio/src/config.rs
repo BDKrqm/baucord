@@ -80,6 +80,12 @@ pub struct VoiceChatConfig {
     /// Changed at runtime via
     /// [`VoiceChat::set_voice_tone`](crate::VoiceChat::set_voice_tone).
     pub voice_tone: crate::VoiceTone,
+    /// Keep the last five minutes of the call in memory so a button can
+    /// save them (`replay.rs`). Default: on. Nothing reaches the disk
+    /// until it is asked to; turning it off forgets what it had.
+    /// Changed at runtime via
+    /// [`VoiceChat::set_replay`](crate::VoiceChat::set_replay).
+    pub replay: bool,
 }
 
 impl Default for VoiceChatConfig {
@@ -94,6 +100,7 @@ impl Default for VoiceChatConfig {
             spatial_voice: true,
             spatial_width: DEFAULT_SPATIAL_WIDTH,
             voice_tone: crate::VoiceTone::Natural,
+            replay: true,
         }
     }
 }

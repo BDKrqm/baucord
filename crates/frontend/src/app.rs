@@ -67,6 +67,7 @@ mod presence;
 mod profiles;
 mod safety;
 mod session;
+mod soundboard;
 mod space;
 mod stats;
 
@@ -516,6 +517,9 @@ pub struct AppState {
     /// rise plays the viewer-joined sound (`StreamHealth` is the only
     /// word the sharer gets, and it goes to the screen thread).
     stream_viewers_seen: u32,
+    /// The soundboard dialog's buttons, in its order: the files found in
+    /// the soundboard folder when it opened (`soundboard.rs`).
+    soundboard_files: Vec<std::path::PathBuf>,
 
     // Chat
     history: ChatHistory,
@@ -850,6 +854,7 @@ pub fn run() {
         is_testing_mic_shared,
         audio_tab_open: false,
         stream_viewers_seen: 0,
+        soundboard_files: Vec::new(),
         history: ChatHistory::new(),
         chat_model,
         activity_model: Rc::new(VecModel::default()),
@@ -1344,6 +1349,31 @@ fn wire_logic(state: &Rc<RefCell<AppState>>) {
     logic.on_eq_reset(move || with_app(&w, AppState::peer_eq_reset));
     let w = Rc::downgrade(state);
     logic.on_eq_close(move || with_app(&w, AppState::close_peer_eq));
+
+    // ── The replay buffer and the soundboard ────────────────────
+    let w = Rc::downgrade(state);
+    logic.on_replay_save(move || with_app(&w, AppState::save_replay));
+    let w = Rc::downgrade(state);
+    logic.on_soundboard_open(move || with_app(&w, AppState::open_soundboard));
+    let w = Rc::downgrade(state);
+    logic.on_soundboard_close(move || with_app(&w, AppState::close_soundboard));
+    let w = Rc::downgrade(state);
+    logic.on_soundboard_play(move |index| {
+        with_app(&w, |app| app.soundboard_play(index));
+    });
+    let w = Rc::downgrade(state);
+    logic.on_soundboard_stop(move || with_app(&w, AppState::soundboard_stop));
+    let w = Rc::downgrade(state);
+    logic.on_soundboard_refresh(move || with_app(&w, AppState::soundboard_refresh));
+    logic.on_soundboard_folder(AppState::open_soundboard_folder);
+    let w = Rc::downgrade(state);
+    logic.on_soundboard_volume_released(move |volume| {
+        with_app(&w, |app| app.soundboard_volume(volume));
+    });
+    let w = Rc::downgrade(state);
+    logic.on_soundboard_hear_toggled(move |on| {
+        with_app(&w, |app| app.soundboard_hear(on));
+    });
 
     let w = Rc::downgrade(state);
     logic.on_dm_clicked(move |index| {
