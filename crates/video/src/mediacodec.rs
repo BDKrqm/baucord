@@ -33,25 +33,19 @@
 //!   codec at the next keyframe (P-frames until then are dropped and
 //!   the jitter buffer's keyframe request does the rest).
 
-use std::{
-    collections::VecDeque,
-    time::{Duration, Instant},
-};
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 use log::{debug, info, warn};
-use ndk::media::{
-    media_codec::{
-        DequeuedInputBufferResult, DequeuedOutputBufferInfoResult, MediaCodec, MediaCodecDirection,
-        OutputBuffer,
-    },
-    media_format::MediaFormat,
+use ndk::media::media_codec::{
+    DequeuedInputBufferResult, DequeuedOutputBufferInfoResult, MediaCodec, MediaCodecDirection,
+    OutputBuffer,
 };
+use ndk::media::media_format::MediaFormat;
 
-use crate::{
-    held::HeldPictures,
-    yuv::{self, ColorSpec, Matrix, Range, Yuv420Layout},
-    CodecError, DecodeTiming, DecodedFrame, EncodedFrame, PictureFormat, VideoDecoder,
-};
+use crate::held::HeldPictures;
+use crate::yuv::{self, ColorSpec, Matrix, Range, Yuv420Layout};
+use crate::{CodecError, DecodeTiming, DecodedFrame, EncodedFrame, PictureFormat, VideoDecoder};
 
 const MIME: &str = "video/avc";
 /// `MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible`: let

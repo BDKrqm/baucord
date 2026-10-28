@@ -42,13 +42,9 @@
 //! handshake with it so activation failures surface synchronously to the
 //! caller — that is what makes the runtime fallback possible.
 
-use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    thread,
-};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
 
 use crossbeam_channel::{bounded, Sender};
 use log::{debug, error, info};

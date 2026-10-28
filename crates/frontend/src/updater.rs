@@ -4,14 +4,10 @@
 // Ported from the FLTK `ui/splash.rs` + `ui/update.rs`; URL building
 // and version comparison live in app-core, the side effects stay here.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use app_core::update::{download_url, is_newer, PLATFORM_SUFFIX, VERSION_URL};
 use i18n::t;

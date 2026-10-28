@@ -1,23 +1,19 @@
 //! Acceptance scenarios (spec §10) that need no NIC.
 
-use std::{
-    net::SocketAddr,
-    time::{Duration, Instant},
-};
+use std::net::SocketAddr;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use protocol::Lane;
 use rcgen::PublicKeyData;
 
 use super::{LinkSpec, NodeId, SimNet};
-use crate::{
-    config::Budget,
-    driver::{
-        DisconnectReason, Driver, Event, PeerId, Shared, TrackStats, VideoItem, WaitingRoom,
-        OWN_TRACK, VIDEO_GROUP_DEADLINE,
-    },
-    identity::{Fingerprint, Observation, ServerIdentity, Trust},
+use crate::config::Budget;
+use crate::driver::{
+    DisconnectReason, Driver, Event, PeerId, Shared, TrackStats, VideoItem, WaitingRoom, OWN_TRACK,
+    VIDEO_GROUP_DEADLINE,
 };
+use crate::identity::{Fingerprint, Observation, ServerIdentity, Trust};
 
 const TICK: Duration = Duration::from_millis(2);
 const SERVER_ADDR: &str = "10.0.0.1:4433";

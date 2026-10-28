@@ -6,7 +6,8 @@
 //! slash command sends — after which the tab refreshes itself.
 
 use app_core::menu::Action;
-use client::{network::NetworkControl, AdminCommand, AdminOutcome, AdminTarget};
+use client::network::NetworkControl;
+use client::{AdminCommand, AdminOutcome, AdminTarget};
 use i18n::t;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use ui::{

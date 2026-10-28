@@ -6,13 +6,11 @@
 //! Every acceptance scenario in §10 that does not need a real NIC runs
 //! here, in-process, in `cargo test`.
 
-use std::{
-    any::Any,
-    cmp::Reverse,
-    collections::{BinaryHeap, HashMap},
-    net::SocketAddr,
-    time::{Duration, Instant},
-};
+use std::any::Any;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
+use std::net::SocketAddr;
+use std::time::{Duration, Instant};
 
 use bytes::BytesMut;
 use rand::{RngExt, SeedableRng};

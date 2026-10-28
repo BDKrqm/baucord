@@ -12,12 +12,10 @@
 
 use std::sync::atomic::Ordering;
 
-use crate::{
-    aec::{self, AecMode, OutputKind},
-    fake::{Clock, Machine},
-    route::{self, kinds, RouteDevice},
-    StartOutcome, Traits, VoiceChat, VoiceChatConfig,
-};
+use crate::aec::{self, AecMode, OutputKind};
+use crate::fake::{Clock, Machine};
+use crate::route::{self, kinds, RouteDevice};
+use crate::{StartOutcome, Traits, VoiceChat, VoiceChatConfig};
 
 /// An engine on a machine, and a clock for its supervision.
 struct Rig {

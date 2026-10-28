@@ -63,14 +63,10 @@
 //! to the screen share viewer's audio output rather than mixing with
 //! voice chat.
 
-use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    thread,
-    time::Duration,
-};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 use audioadapter_buffers::direct::SequentialSliceOfVecs;
 use log::{debug, error, info, warn};
@@ -84,7 +80,8 @@ use rubato::{
 
 #[cfg(target_os = "windows")]
 use crate::latch::Ring;
-use crate::{latch::Wait, OPUS_SAMPLE_RATE};
+use crate::latch::Wait;
+use crate::OPUS_SAMPLE_RATE;
 
 /// Opus bitrate for system audio (bits/s).
 /// 128 kbps stereo gives excellent quality for music/game audio.

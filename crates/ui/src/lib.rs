@@ -18,11 +18,9 @@ slint::include_modules!();
 pub mod convert {
     //! app-core → generated-struct conversions.
 
-    use app_core::{
-        chat::{ChatItem, Meta},
-        menu,
-        roster::{split_id, ChannelRow, RosterItem, RosterRow},
-    };
+    use app_core::chat::{ChatItem, Meta};
+    use app_core::menu;
+    use app_core::roster::{split_id, ChannelRow, RosterItem, RosterRow};
 
     use super::{ChatRow, MenuEntry, UserRow};
 

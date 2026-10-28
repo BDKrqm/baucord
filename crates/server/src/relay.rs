@@ -19,10 +19,8 @@
 //! keyframe pokes of its own; the transport's counters say how often
 //! each viewer fell behind, and that is what `StreamHealth` reports.
 
-use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    time::{Duration, Instant},
-};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::{Duration, Instant};
 
 use log::{debug, info};
 use protocol::{parse_system_audio, parse_video_header, parse_voice, ClientId, Lane, ShareScope};

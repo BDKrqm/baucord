@@ -53,10 +53,8 @@
 //! relays it (the sender calls `VideoEncoder::force_keyframe`). The
 //! flag is rate-limited here so a broken stream cannot spam requests.
 
-use std::{
-    collections::VecDeque,
-    time::{Duration, Instant},
-};
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 /// How long the buffer will wait, unprimed, watching undecodable delta
 /// frames stream past before asking the sender for a keyframe. Covers

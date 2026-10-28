@@ -15,11 +15,9 @@ use protocol::{
 };
 
 use super::{hex, ChatServer};
-use crate::{
-    config::{validate_channel_list, ChannelSettings, MAX_CHANNELS},
-    persistence::Command,
-    policy::UserChannelRecord,
-};
+use crate::config::{validate_channel_list, ChannelSettings, MAX_CHANNELS};
+use crate::persistence::Command;
+use crate::policy::UserChannelRecord;
 
 /// A channel name's length cap; the file has none, the UI needs one.
 const MAX_CHANNEL_NAME: usize = 40;

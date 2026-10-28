@@ -18,7 +18,8 @@ use protocol::{
     RestrictionKind, ServerMessage, UploadRejectReason, UserId,
 };
 
-use super::{dms::PendingDm, ChatServer, Waiting};
+use super::dms::PendingDm;
+use super::{ChatServer, Waiting};
 use crate::persistence::{Command, MessageRow, Query, GENERAL_CONV};
 
 /// A UTC day, for the allowance.

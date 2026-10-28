@@ -17,24 +17,21 @@
 //! deadline. Wall time comes from a [`Clock`] anchored to the tick's
 //! `Instant`, so the simulator's fake clock advances it too.
 
-use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    net::{IpAddr, SocketAddr},
-    path::PathBuf,
-    time::{Duration, Instant, SystemTime},
-};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
+use std::time::{Duration, Instant, SystemTime};
 
 use log::{debug, info, warn};
+use protocol::permissions::{self, RoleId, RANK_ADMIN, RANK_GUEST, ROLE_ADMIN};
 use protocol::{
-    features,
-    permissions::{self, RoleId, RANK_ADMIN, RANK_GUEST, ROLE_ADMIN},
-    AdminCommand, Auth, ChannelDenyReason, ChannelInfo, ChatMessage, ClientId, ClientKeyProof,
-    ClientMessage, DenyReason, InviteDenyReason, InviteInvalidReason, Lane, NeedInviteReason,
-    RefusedReason, RemovedKind, RestrictionKind, ServerMessage, ShareScope, TelemetryEvent,
-    TelemetrySample, UserId,
+    features, AdminCommand, Auth, ChannelDenyReason, ChannelInfo, ChatMessage, ClientId,
+    ClientKeyProof, ClientMessage, DenyReason, InviteDenyReason, InviteInvalidReason, Lane,
+    NeedInviteReason, RefusedReason, RemovedKind, RestrictionKind, ServerMessage, ShareScope,
+    TelemetryEvent, TelemetrySample, UserId,
 };
+use transport::identity::{verify_ed25519, CLIENT_AUTH_EXPORTER_BYTES, CLIENT_AUTH_EXPORTER_LABEL};
 use transport::{
-    identity::{verify_ed25519, CLIENT_AUTH_EXPORTER_BYTES, CLIENT_AUTH_EXPORTER_LABEL},
     Budget, DisconnectReason, Driver, DriverHost, Event, Fingerprint, LinkStats, ServerIdentity,
     Shared, WaitingRoom,
 };
@@ -48,21 +45,20 @@ mod moderation;
 mod profiles;
 mod safety;
 
-use crate::{
-    clock::{Clock, WallMs},
-    config::{channel_infos_of, validate_channel_list, ChannelSettings, Config},
-    link_stats::VoiceWindow,
-    persistence::{
-        AskId, AuditRow, Command, MessageRow, Notice, Persist, ProgressDelta, TelemetryEventRow,
-        TelemetryRow, GENERAL_CONV,
-    },
-    policy::{
-        self, InviteRecord, KeyHash, KeyLookup, Policy, Restriction, BOOTSTRAP_INVITE_TTL_MS,
-        DEFAULT_INVITE_TTL_MS,
-    },
-    relay::{ShareInfo, VideoRelay, VoiceRelay},
-    server::{dms::PendingDm, profiles::AnnouncedUpload},
+use crate::clock::{Clock, WallMs};
+use crate::config::{channel_infos_of, validate_channel_list, ChannelSettings, Config};
+use crate::link_stats::VoiceWindow;
+use crate::persistence::{
+    AskId, AuditRow, Command, MessageRow, Notice, Persist, ProgressDelta, TelemetryEventRow,
+    TelemetryRow, GENERAL_CONV,
 };
+use crate::policy::{
+    self, InviteRecord, KeyHash, KeyLookup, Policy, Restriction, BOOTSTRAP_INVITE_TTL_MS,
+    DEFAULT_INVITE_TTL_MS,
+};
+use crate::relay::{ShareInfo, VideoRelay, VoiceRelay};
+use crate::server::dms::PendingDm;
+use crate::server::profiles::AnnouncedUpload;
 
 /// Announced share dimensions must fall in this range (per-chunk
 /// dimensions are additionally validated by the shared header parser).
@@ -3774,7 +3770,8 @@ mod wake_tests {
     use transport::ServerIdentity;
 
     use super::{ChatServer, ASK_POLL, MAX_IDLE_WAIT};
-    use crate::{config::Config, persistence::Query};
+    use crate::config::Config;
+    use crate::persistence::Query;
 
     /// An idle server sleeps until its next periodic job, not on a
     /// millisecond tick; a database read out shortens the sleep to the

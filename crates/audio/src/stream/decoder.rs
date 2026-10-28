@@ -19,26 +19,18 @@
 //! in Settings ([`OutputSelection`]), and reopens when that pick changes
 //! or its device goes away (an Android reroute reports "Disconnected").
 
-use std::{
-    sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
-        Arc, Mutex, PoisonError,
-    },
-    time::{Duration, Instant},
-};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{bounded, Receiver, Sender};
 use log::{debug, error, info, warn};
 use opus::{Channels, Decoder};
 
-use crate::{
-    stream::{
-        downmix::Downmix,
-        mix::{self, MixSource},
-        output::StreamAudioOutput,
-    },
-    OPUS_SAMPLE_RATE,
-};
+use crate::stream::downmix::Downmix;
+use crate::stream::mix::{self, MixSource};
+use crate::stream::output::StreamAudioOutput;
+use crate::OPUS_SAMPLE_RATE;
 
 /// Samples per channel per frame (20 ms at 48 kHz).
 const STREAM_FRAME_SIZE: usize = 960;

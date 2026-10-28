@@ -1,23 +1,17 @@
 // settingsui.rs — the Settings page: populate, wire, and the two live
 // loops (the level meters, keybind capture).
 
-use std::{
-    cell::{Cell, OnceCell, RefCell},
-    collections::HashSet,
-    time::{Duration, Instant},
-};
+use std::cell::{Cell, OnceCell, RefCell};
+use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
-use app_core::{
-    chat::human_size,
-    logfile,
-    meter::{Meter, Run as MeterRun},
-};
-use client::{
-    config::{build_bind_string, BindableAction, ServerEntry, Settings},
-    network::{NetworkControl, LOG_UPLOAD_MIN_INTERVAL},
-    protocol::MAX_LOG_UPLOAD_BYTES,
-    voice::VoiceControl,
-};
+use app_core::chat::human_size;
+use app_core::logfile;
+use app_core::meter::{Meter, Run as MeterRun};
+use client::config::{build_bind_string, BindableAction, ServerEntry, Settings};
+use client::network::{NetworkControl, LOG_UPLOAD_MIN_INTERVAL};
+use client::protocol::MAX_LOG_UPLOAD_BYTES;
+use client::voice::VoiceControl;
 use i18n::t;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use ui::{

@@ -20,22 +20,18 @@
 //! the time in the file name, which survives copies and restores; a
 //! `<stem>.key` retired by an older build falls back to the file's mtime.
 
-use std::{
-    fmt, fs,
-    io::Write,
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use std::{fmt, fs};
 
 use base64::Engine;
 use log::info;
-use rustls::{
-    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
-    crypto::CryptoProvider,
-    pki_types::{CertificateDer, ServerName, UnixTime},
-    DigitallySignedStruct, SignatureScheme,
-};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::crypto::CryptoProvider;
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{DigitallySignedStruct, SignatureScheme};
 
 use crate::der;
 
@@ -524,10 +520,8 @@ mod tests {
 
     use rcgen::{KeyPair, PublicKeyData, SigningKey, PKCS_ED25519};
 
-    use super::{
-        server::{retired_at_from_name, unix_secs, KEY_FILE, RETIRED_DIR},
-        *,
-    };
+    use super::server::{retired_at_from_name, unix_secs, KEY_FILE, RETIRED_DIR};
+    use super::*;
 
     #[test]
     fn client_key_roundtrips_and_signs_verifiably() {

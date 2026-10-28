@@ -14,14 +14,14 @@
 //!   resetting — turned into the stream-failed flags `VoiceChat::service`
 //!   already reopens on. cpal's own streams handle these themselves.
 
-use std::{
-    ptr::NonNull,
-    sync::{atomic::Ordering, Arc},
-};
+use std::ptr::NonNull;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use block2::RcBlock;
 use log::{debug, info, warn};
-use objc2::{rc::Retained, runtime::ProtocolObject};
+use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
 use objc2_avf_audio::{
     AVAudioSession, AVAudioSessionCategoryOptions, AVAudioSessionCategoryPlayAndRecord,
     AVAudioSessionInterruptionNotification, AVAudioSessionInterruptionType,
@@ -36,10 +36,8 @@ use objc2_foundation::{
     NSNotification, NSNotificationCenter, NSNumber, NSObjectProtocol, NSString,
 };
 
-use crate::{
-    aec::{self, ApplePort, OutputKind},
-    stats::AudioStats,
-};
+use crate::aec::{self, ApplePort, OutputKind};
+use crate::stats::AudioStats;
 
 /// The host's category options (`crates/ios/src/session.rs`), set again
 /// with the mode: the loudspeaker rather than the earpiece, a Bluetooth

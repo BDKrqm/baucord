@@ -21,10 +21,8 @@
 //!
 //! Platform-free so it is tested on the host; `mediacodec` uses it.
 
-use std::{
-    collections::VecDeque,
-    time::{Duration, Instant},
-};
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 use crate::{pool, DecodedFrame};
 

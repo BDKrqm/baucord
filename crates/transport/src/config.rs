@@ -6,7 +6,8 @@
 //! against measured footprint at M5; the shape is what matters: every
 //! real-time queue has a byte bound *and* (in the driver) a time bound.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use quinn_proto::{AckFrequencyConfig, IdleTimeout, MtuDiscoveryConfig, TransportConfig, VarInt};
 

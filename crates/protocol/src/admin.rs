@@ -5,10 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    messages::{BlobId, ClientId, UserId},
-    permissions::RoleId,
-};
+use crate::messages::{BlobId, ClientId, UserId};
+use crate::permissions::RoleId;
 
 /// What a restriction takes away (spec §4.2). The discriminants are the
 /// database encoding; never renumber.

@@ -7,21 +7,15 @@
 //! and voice datagrams back. The client is the real network thread,
 //! driven through its channels.
 
-use std::{
-    net::SocketAddr,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
-    thread,
-    time::{Duration, Instant},
-};
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use audio::{VoiceChat, VoiceChatConfig};
-use client::{
-    network::{self, NetworkControl, NetworkThreadHandle, VoiceLink},
-    voice::VoiceControl,
-};
+use client::network::{self, NetworkControl, NetworkThreadHandle, VoiceLink};
+use client::voice::VoiceControl;
 use protocol::Lane;
 use transport::{Budget, ClientKey, Driver, Event, PeerId, ServerIdentity, UdpIo};
 

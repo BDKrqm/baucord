@@ -14,26 +14,23 @@
 //! drained, pending stream writes are flushed and transmits are polled
 //! until `None`. A missed step here stalls a connection silently.
 
-use std::{
-    collections::{HashMap, VecDeque},
-    net::{IpAddr, SocketAddr},
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::collections::{HashMap, VecDeque};
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use log::{debug, info, warn};
 use protocol::{frame, Lane};
+use quinn_proto::crypto::rustls::QuicClientConfig;
 use quinn_proto::{
-    crypto::rustls::QuicClientConfig, ClientConfig, Connection, ConnectionError, ConnectionHandle,
-    DatagramEvent, Dir, Endpoint, EndpointConfig, Event as QuicEvent, FinishError, ReadError,
-    SendDatagramError, StreamEvent, StreamId, VarInt, WriteError,
+    ClientConfig, Connection, ConnectionError, ConnectionHandle, DatagramEvent, Dir, Endpoint,
+    EndpointConfig, Event as QuicEvent, FinishError, ReadError, SendDatagramError, StreamEvent,
+    StreamId, VarInt, WriteError,
 };
 
-use crate::{
-    config::Budget,
-    identity::{Fingerprint, IdentityError, Observation, PinnedVerifier},
-};
+use crate::config::Budget;
+use crate::identity::{Fingerprint, IdentityError, Observation, PinnedVerifier};
 
 /// Transport-level identity of a connection. The server uses it as the
 /// application's `ClientId`: random, non-zero, assigned at admission.
@@ -857,7 +854,8 @@ impl Driver {
         max_peers: usize,
         budget: Budget,
     ) -> Result<Self, IdentityError> {
-        use quinn_proto::{crypto::rustls::QuicServerConfig, ServerConfig};
+        use quinn_proto::crypto::rustls::QuicServerConfig;
+        use quinn_proto::ServerConfig;
         let crypto = identity.server_crypto()?;
         let quic = QuicServerConfig::try_from(crypto).map_err(|e| {
             IdentityError::Tls(rustls::Error::General(format!("quic server config: {e}")))

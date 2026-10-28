@@ -12,21 +12,17 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use log::{info, warn};
-use protocol::{
-    admin::{
-        AdminCommand, AdminError, AdminOutcome, AdminTarget, InviteSummary, KeySummary,
-        RestrictionSummary, UserSummary,
-    },
-    permissions::{self, RoleId},
-    ClientId, RemovedKind, RestrictionKind, RoleInfo, ServerMessage, UserId,
+use protocol::admin::{
+    AdminCommand, AdminError, AdminOutcome, AdminTarget, InviteSummary, KeySummary,
+    RestrictionSummary, UserSummary,
 };
+use protocol::permissions::{self, RoleId};
+use protocol::{ClientId, RemovedKind, RestrictionKind, RoleInfo, ServerMessage, UserId};
 
 use super::{hex, ChatServer};
-use crate::{
-    clock::WallMs,
-    persistence::Command,
-    policy::{KeyRecord, Policy, Restriction},
-};
+use crate::clock::WallMs;
+use crate::persistence::Command;
+use crate::policy::{KeyRecord, Policy, Restriction};
 
 /// What a restriction of each kind subtracts (spec §4.2).
 fn permission_removed_by(kind: RestrictionKind) -> u64 {

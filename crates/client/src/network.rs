@@ -21,16 +21,12 @@
 // by the server from the authenticated transport, so it cannot be
 // spoofed by other clients. See `protocol::relayed`.
 
-use std::{
-    collections::{HashMap, HashSet},
-    net::SocketAddr,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    thread,
-    time::{Duration, Instant},
-};
+use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use audio::{AudioPacket, IncomingSender, PayloadType};
 use crossbeam_channel::{Receiver, RecvError, Sender, TryRecvError};
@@ -44,19 +40,17 @@ use protocol::{
     SharingSample, TelemetryEvent, TelemetrySample, UserId, VideoReassembler, ViewingSample,
     VOICE_FLAG_RED,
 };
+use transport::identity::{CLIENT_AUTH_EXPORTER_BYTES, CLIENT_AUTH_EXPORTER_LABEL};
 use transport::{
-    identity::{CLIENT_AUTH_EXPORTER_BYTES, CLIENT_AUTH_EXPORTER_LABEL},
     Budget, ClientKey, DisconnectReason, Driver, Event, Fingerprint, LinkStats, Observation,
     PeerId, Trust, UdpIo, UploadId, VideoItem, OWN_TRACK,
 };
 
-use crate::{
-    inbound_wake::InboundWake,
-    screen::{ScreenControl, ScreenTx},
-    upload_turns::{QueuedBlob, UploadTurns},
-    voice::VoiceControl,
-    WakeFn,
-};
+use crate::inbound_wake::InboundWake;
+use crate::screen::{ScreenControl, ScreenTx};
+use crate::upload_turns::{QueuedBlob, UploadTurns};
+use crate::voice::VoiceControl;
+use crate::WakeFn;
 
 // The voice encoder keeps its packets within what the relay accepts:
 // the two crates must agree on the size (review 2026-10, P2-7).

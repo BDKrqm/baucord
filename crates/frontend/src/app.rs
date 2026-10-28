@@ -23,42 +23,34 @@
 //
 // Speaking state is driven by voice events, not inferred from packet flow.
 
-use std::{
-    cell::{Cell, RefCell},
-    collections::{BTreeMap, HashMap, HashSet},
-    net::SocketAddr,
-    rc::{Rc, Weak},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    time::{Duration, Instant},
-};
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::net::SocketAddr;
+use std::rc::{Rc, Weak};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use app_core::{
-    chat::{ChatHistory, Meta},
-    menu,
-    roster::{self, ChannelMeta, PeerAudio, Role, UserState},
-};
+use app_core::chat::{ChatHistory, Meta};
+use app_core::menu;
+use app_core::roster::{self, ChannelMeta, PeerAudio, Role, UserState};
 use audio::{PeerAudioSettings, SoundType};
-use client::{
-    config::{peer_key, BindableAction, Settings},
-    network::{DisconnectKind, LossKind, NetworkControl, NetworkMessage, NetworkThreadHandle},
-    protocol::ClientMessage,
-    screen::{ScreenControl, ScreenEvent, ScreenThreadHandle},
-    voice::{VoiceControl, VoiceEvent, VoiceThreadHandle},
-    AdminCommand, AdminTarget,
+use client::config::{peer_key, BindableAction, Settings};
+use client::network::{
+    DisconnectKind, LossKind, NetworkControl, NetworkMessage, NetworkThreadHandle,
 };
+use client::protocol::ClientMessage;
+use client::screen::{ScreenControl, ScreenEvent, ScreenThreadHandle};
+use client::voice::{VoiceControl, VoiceEvent, VoiceThreadHandle};
+use client::{AdminCommand, AdminTarget};
 use i18n::t;
 use log::{error, info, warn};
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use ui::{ChatRow, DmRow, Logic, MainWindow, ModAction, Phase, State, ToastKind, Tr, UserRow};
 
-use crate::{
-    hotkeys::HotkeyManager,
-    media::{self, GifPlayer},
-    viewers::Viewer,
-};
+use crate::hotkeys::HotkeyManager;
+use crate::media::{self, GifPlayer};
+use crate::viewers::Viewer;
 
 mod activity;
 mod alerts;
@@ -1084,7 +1076,8 @@ fn center_on_monitor(_win: &slint::Window) {}
 /// mixed-DPI setups land where they look centred.
 #[cfg(feature = "desktop")]
 fn center_on_monitor(win: &slint::Window) {
-    use slint::winit_030::{winit::dpi::PhysicalPosition, WinitWindowAccessor};
+    use slint::winit_030::winit::dpi::PhysicalPosition;
+    use slint::winit_030::WinitWindowAccessor;
     win.with_winit_window(|w| {
         let Some(monitor) = w.current_monitor().or_else(|| w.primary_monitor()) else {
             return;

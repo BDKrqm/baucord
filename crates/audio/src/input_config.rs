@@ -10,10 +10,8 @@
 //! compressor's [`compressor::Params`], the AGC's
 //! [`agc::TARGET_RMS`] (review 2026-10, P2-50).
 
-use std::sync::{
-    atomic::{AtomicBool, AtomicU32, Ordering},
-    Arc,
-};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
 
 use crate::processor::gate;
 #[cfg(doc)]

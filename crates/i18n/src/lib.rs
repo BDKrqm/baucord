@@ -16,9 +16,10 @@
 
 use std::sync::RwLock;
 
+use fluent_bundle::concurrent::FluentBundle;
 /// Re-export used by the `t!` macro expansion.
 pub use fluent_bundle::FluentArgs as Args;
-use fluent_bundle::{concurrent::FluentBundle, FluentArgs, FluentResource};
+use fluent_bundle::{FluentArgs, FluentResource};
 use unic_langid::LanguageIdentifier;
 
 type Bundle = FluentBundle<FluentResource>;

@@ -13,10 +13,8 @@
 //! The desktop keeps the live monitor it had: its users are mostly on
 //! headsets, where there is no loop to break.
 
-use std::{
-    collections::VecDeque,
-    time::{Duration, Instant},
-};
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 use crate::PcmFrame;
 

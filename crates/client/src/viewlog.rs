@@ -17,17 +17,13 @@
 //! Bookkeeping and formatting only, no I/O: `client::screen` feeds it
 //! and logs what it returns.
 
-use std::{
-    fmt::Write,
-    time::{Duration, Instant},
-};
+use std::fmt::Write;
+use std::time::{Duration, Instant};
 
 use audio::stream::decoder::StreamAudioStats;
 use log::Level;
-use video::{
-    buffer::{JitterBufferStats, VideoJitterBuffer},
-    DecodeTiming,
-};
+use video::buffer::{JitterBufferStats, VideoJitterBuffer};
+use video::DecodeTiming;
 
 /// How often each watched stream gets its summary line.
 pub(crate) const SUMMARY_EVERY: Duration = Duration::from_secs(5);

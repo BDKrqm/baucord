@@ -26,8 +26,9 @@
 //! instead, so on a 44.1 kHz Windows mixer the OS does the resampling and
 //! this crate's resampler stays idle either way.
 
+use cpal::traits::DeviceTrait;
 use cpal::{
-    traits::DeviceTrait, BufferSize, Device, SampleFormat, StreamConfig, SupportedStreamConfig,
+    BufferSize, Device, SampleFormat, StreamConfig, SupportedStreamConfig,
     SupportedStreamConfigRange,
 };
 use log::{debug, info};

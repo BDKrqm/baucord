@@ -21,13 +21,11 @@
 
 use std::time::{Duration, Instant};
 
-use jni::{
-    errors::Result as JniResult,
-    objects::{JObject, JObjectArray, JString, JValue},
-    refs::{Global, Reference},
-    sys::jobject,
-    Env, JavaVM,
-};
+use jni::errors::Result as JniResult;
+use jni::objects::{JObject, JObjectArray, JString, JValue};
+use jni::refs::{Global, Reference};
+use jni::sys::jobject;
+use jni::{Env, JavaVM};
 use log::{info, warn};
 
 use crate::route::{self, RouteDevice};

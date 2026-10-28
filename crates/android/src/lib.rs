@@ -24,10 +24,8 @@ mod hello;
 
 use std::sync::OnceLock;
 
-use slint::android::{
-    android_activity::{MainEvent, PollEvent},
-    AndroidApp,
-};
+use slint::android::android_activity::{MainEvent, PollEvent};
+use slint::android::AndroidApp;
 
 /// Runtime permissions asked for at startup: the microphone, and from
 /// Android 13 the notification that comes with staying connected in the

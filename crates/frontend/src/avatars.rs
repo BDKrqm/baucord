@@ -10,13 +10,9 @@
 //! worker starts when there is a picture to decode and ends when the
 //! queue is empty: nothing stays behind, nothing wakes while idle.
 
-use std::{
-    collections::VecDeque,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
-};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use client::protocol::BlobId;
 use log::warn;

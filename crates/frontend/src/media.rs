@@ -7,15 +7,11 @@
 // `set_row_data`. Autoplay policy is unchanged: ~3 loops (≤30 s),
 // freeze to frame 0 (dropping the decoded frames), replay on hover.
 
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use app_core::{
-    gif,
-    images::{self, ImageError},
-};
+use app_core::gif;
+use app_core::images::{self, ImageError};
 use i18n::t;
 use log::{info, warn};
 use slint::{ComponentHandle, Model};

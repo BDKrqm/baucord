@@ -24,20 +24,14 @@
 //! behind an atomic flag, and a half the callback lets go of goes back
 //! through a channel to be freed on the control side.
 
-use std::{
-    ptr::{self, addr_of},
-    slice,
-    sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, Mutex, PoisonError, Weak,
-    },
-};
+use std::ptr::{self, addr_of};
+use std::slice;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
-use coreaudio::audio_unit::{
-    audio_format::LinearPcmFlags,
-    render_callback::{data, ActionFlags, Args},
-    AudioUnit, Element, IOType, SampleFormat, Scope, StreamFormat,
-};
+use coreaudio::audio_unit::audio_format::LinearPcmFlags;
+use coreaudio::audio_unit::render_callback::{data, ActionFlags, Args};
+use coreaudio::audio_unit::{AudioUnit, Element, IOType, SampleFormat, Scope, StreamFormat};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use log::{debug, info, warn};
 use objc2_audio_toolbox::{
@@ -49,14 +43,13 @@ use objc2_audio_toolbox::{
 use objc2_core_audio_types::AudioBufferList;
 use rtrb::{Consumer, Producer};
 
-use super::{
-    avsession,
-    pump::{CapturePump, RenderPump},
-    CaptureStartError, RenderStartError,
-};
-use crate::{
-    aec::reasons, input_config::InputConfig, latch::Ring, stats::AudioStats, OPUS_SAMPLE_RATE,
-};
+use super::pump::{CapturePump, RenderPump};
+use super::{avsession, CaptureStartError, RenderStartError};
+use crate::aec::reasons;
+use crate::input_config::InputConfig;
+use crate::latch::Ring;
+use crate::stats::AudioStats;
+use crate::OPUS_SAMPLE_RATE;
 
 /// The largest slice the unit may ask for: with the screen locked iOS
 /// moves to 4096-frame buffers, and a unit left at its default refuses

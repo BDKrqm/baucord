@@ -43,14 +43,10 @@
 //! 22H2+), and reads the effect list back to report whether an AEC
 //! effect is actually on (D5).
 
-use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    thread::JoinHandle,
-    time::{Duration, Instant},
-};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{bounded, Sender};
 use log::{debug, error, info, warn};
@@ -60,21 +56,16 @@ use wasapi::{
     DeviceEventCallbacks, DeviceEventRegistration, Direction, Handle, Role, SampleType,
     StreamCategory, StreamMode, WasapiError, WaveFormat,
 };
-use windows::Win32::Media::{
-    Audio::AUDIO_EFFECT_STATE_ON, KernelStreaming::AUDIO_EFFECT_TYPE_ACOUSTIC_ECHO_CANCELLATION,
-};
+use windows::Win32::Media::Audio::AUDIO_EFFECT_STATE_ON;
+use windows::Win32::Media::KernelStreaming::AUDIO_EFFECT_TYPE_ACOUSTIC_ECHO_CANCELLATION;
 
-use super::{
-    pump::{CapturePump, RenderPump},
-    CaptureStartError, RenderStartError,
-};
-use crate::{
-    aec::{self, OutputKind},
-    input_config::InputConfig,
-    latch::Ring,
-    stats::AudioStats,
-    OPUS_SAMPLE_RATE,
-};
+use super::pump::{CapturePump, RenderPump};
+use super::{CaptureStartError, RenderStartError};
+use crate::aec::{self, OutputKind};
+use crate::input_config::InputConfig;
+use crate::latch::Ring;
+use crate::stats::AudioStats;
+use crate::OPUS_SAMPLE_RATE;
 
 /// Capture engine buffer: tolerance, not latency (see module docs).
 const CAPTURE_BUFFER_HNS: i64 = 50 * 10_000;
@@ -504,10 +495,8 @@ pub fn keep_own_volume_on(name: Option<&str>) {
 /// it: 0 mute, 1 reduce by 80 %, 2 reduce by 50 %, 3 do nothing. `None`
 /// until the user changes it; Windows' default is 80 %.
 fn ducking_preference() -> Option<u32> {
-    use windows::{
-        core::w,
-        Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD},
-    };
+    use windows::core::w;
+    use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
     let mut value = 0u32;
     let mut size = 4u32;
     // SAFETY: `value` and `size` outlive the call, `size` is `value`'s
@@ -662,15 +651,11 @@ pub fn output_kind(name: Option<&str>, communications: bool) -> OutputKind {
 /// `windows` crate directly: `wasapi` reads properties but keeps the
 /// accessor private (AEC-SPEC.md §4.2). COM must be initialised.
 fn form_factor(id: &str) -> windows::core::Result<u32> {
-    use windows::{
-        core::HSTRING,
-        Win32::{
-            Media::Audio::{
-                IMMDeviceEnumerator, MMDeviceEnumerator, PKEY_AudioEndpoint_FormFactor,
-            },
-            System::Com::{CoCreateInstance, CLSCTX_ALL, STGM_READ},
-        },
+    use windows::core::HSTRING;
+    use windows::Win32::Media::Audio::{
+        IMMDeviceEnumerator, MMDeviceEnumerator, PKEY_AudioEndpoint_FormFactor,
     };
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL, STGM_READ};
     // SAFETY: plain COM calls on interfaces this function owns; the
     // HSTRING outlives the call that borrows it.
     unsafe {

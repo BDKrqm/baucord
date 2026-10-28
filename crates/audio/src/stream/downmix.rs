@@ -24,7 +24,8 @@
 
 use std::sync::Arc;
 
-use realfft::{num_complex::Complex, ComplexToReal, RealFftPlanner, RealToComplex};
+use realfft::num_complex::Complex;
+use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
 
 /// FFT length: 21.3 ms at 48 kHz, 47 Hz per bin.
 const N: usize = 1024;

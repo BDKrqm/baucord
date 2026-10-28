@@ -28,26 +28,19 @@
 //! deferred underrun classification, per-peer clock-drift compensation)
 //! is unchanged and lives on in the comments below.
 
-use std::{
-    collections::{hash_map::Entry, HashMap, HashSet, VecDeque},
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
-};
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use crate::{
-    config::PeerAudioSettings,
-    processor::{
-        eq::{PeerEq, ToneFilter, VoiceTone},
-        limiter::Limiter,
-    },
-    spatial::Spatializer,
-    transport::{
-        packet::{AudioPacket, PayloadType},
-        packet_buffer::{PacketBuffer, Push},
-        red,
-    },
-    FRAME_SIZE, OPUS_SAMPLE_RATE,
-};
+use crate::config::PeerAudioSettings;
+use crate::processor::eq::{PeerEq, ToneFilter, VoiceTone};
+use crate::processor::limiter::Limiter;
+use crate::spatial::Spatializer;
+use crate::transport::packet::{AudioPacket, PayloadType};
+use crate::transport::packet_buffer::{PacketBuffer, Push};
+use crate::transport::red;
+use crate::{FRAME_SIZE, OPUS_SAMPLE_RATE};
 
 /// Deferred underrun classification: a peer that ran dry and then receives
 /// audio again within this window was genuinely starved mid-stream (the

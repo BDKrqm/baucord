@@ -235,25 +235,21 @@ fn format_score(width: u32, height: u32, fps: f32, quality: Quality) -> (bool, b
 
 #[cfg(target_os = "windows")]
 mod mf {
-    use windows::{
-        core::{Interface, GUID, PWSTR},
-        Win32::{
-            Media::MediaFoundation::{
-                IMF2DBuffer, IMFActivate, IMFAttributes, IMFMediaSource, IMFMediaType, IMFSample,
-                IMFSourceReader, MFCreateAttributes, MFCreateMediaType,
-                MFCreateSourceReaderFromMediaSource, MFEnumDeviceSources, MFMediaType_Video,
-                MFShutdown, MFStartup, MFVideoFormat_RGB32, MFSTARTUP_LITE,
-                MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
-                MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
-                MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, MF_MT_DEFAULT_STRIDE,
-                MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
-                MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED, MF_SOURCE_READERF_ENDOFSTREAM,
-                MF_SOURCE_READERF_ERROR, MF_SOURCE_READER_ALL_STREAMS,
-                MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-                MF_VERSION,
-            },
-            System::Com::{CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED},
-        },
+    use windows::core::{Interface, GUID, PWSTR};
+    use windows::Win32::Media::MediaFoundation::{
+        IMF2DBuffer, IMFActivate, IMFAttributes, IMFMediaSource, IMFMediaType, IMFSample,
+        IMFSourceReader, MFCreateAttributes, MFCreateMediaType,
+        MFCreateSourceReaderFromMediaSource, MFEnumDeviceSources, MFMediaType_Video, MFShutdown,
+        MFStartup, MFVideoFormat_RGB32, MFSTARTUP_LITE, MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
+        MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
+        MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, MF_MT_DEFAULT_STRIDE,
+        MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
+        MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED, MF_SOURCE_READERF_ENDOFSTREAM,
+        MF_SOURCE_READERF_ERROR, MF_SOURCE_READER_ALL_STREAMS,
+        MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_VERSION,
+    };
+    use windows::Win32::System::Com::{
+        CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED,
     };
 
     use super::{format_score, lock, CameraInfo, Shared};

@@ -13,21 +13,15 @@
 //! together still lost the first against a real server. The client is
 //! the real network thread, driven through its channels.
 
-use std::{
-    collections::{BTreeSet, HashMap},
-    net::SocketAddr,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
-    thread,
-    time::{Duration, Instant},
-};
+use std::collections::{BTreeSet, HashMap};
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
-use client::{
-    network::{NetworkControl, NetworkMessage, NetworkThreadHandle, UploadKey},
-    voice::VoiceControl,
-};
+use client::network::{NetworkControl, NetworkMessage, NetworkThreadHandle, UploadKey};
+use client::voice::VoiceControl;
 use protocol::{ClientMessage, Lane, ServerMessage, UploadRejectReason};
 use transport::{Budget, ClientKey, Driver, Event, PeerId, ServerIdentity, UdpIo};
 

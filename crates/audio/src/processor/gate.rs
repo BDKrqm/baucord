@@ -36,10 +36,8 @@
 //!   resuming speech is never dulled; release is smoothed to avoid
 //!   zipper noise.
 
-use std::sync::{
-    atomic::{AtomicU32, Ordering},
-    Arc,
-};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 use super::{compute_rms, AudioProcessor, FrameContext};
 

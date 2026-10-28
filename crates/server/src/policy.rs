@@ -10,16 +10,12 @@
 //! Nothing here touches disk or the network: pure data and the rules
 //! over it, so admission decisions are unit-testable without a wire.
 
-use std::{
-    collections::{BTreeSet, HashMap, HashSet},
-    net::IpAddr,
-};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::net::IpAddr;
 
+use protocol::permissions::{self, Rank, RoleId, BUILTIN_ROLES, RANK_GUEST};
 pub use protocol::RestrictionKind;
-use protocol::{
-    permissions::{self, Rank, RoleId, BUILTIN_ROLES, RANK_GUEST},
-    BlobId, InviteInvalidReason, Profile, UserId,
-};
+use protocol::{BlobId, InviteInvalidReason, Profile, UserId};
 
 use crate::clock::WallMs;
 

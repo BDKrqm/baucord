@@ -78,13 +78,9 @@ pub mod stats;
 pub mod stream;
 pub mod transport;
 
-use std::{
-    sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
-        Arc, Mutex,
-    },
-    time::Instant,
-};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 /// The 10 s device-enumeration cache: when it was taken and what it saw.
 type DeviceListCache = Mutex<Option<(Instant, Vec<(String, bool)>)>>;

@@ -15,11 +15,9 @@
 //! Lives outside `AppState`: Slint calls the pane's callback while it
 //! lays out or draws, which may be inside a call on the app.
 
-use std::{
-    cell::RefCell,
-    collections::HashMap,
-    sync::{mpsc, Arc},
-};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::{mpsc, Arc};
 
 use log::warn;
 

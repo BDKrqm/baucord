@@ -15,15 +15,13 @@
 //! everywhere, while a refused bind means different things per OS
 //! (a corpse file on macOS, a held pipe name on Windows).
 
-use std::{
-    io::{self, prelude::*, BufReader},
-    path::Path,
-    time::{Duration, Instant},
-};
+use std::io::prelude::*;
+use std::io::{self, BufReader};
+use std::path::Path;
+use std::time::{Duration, Instant};
 
-use interprocess::local_socket::{
-    prelude::*, GenericNamespaced, Listener, ListenerOptions, Name, Stream,
-};
+use interprocess::local_socket::prelude::*;
+use interprocess::local_socket::{GenericNamespaced, Listener, ListenerOptions, Name, Stream};
 use log::{debug, info, warn};
 
 /// Set by the updater on the process it relaunches after an install:

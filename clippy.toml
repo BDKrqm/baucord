@@ -1,0 +1,10 @@
+# Clippy's own configuration (the lint levels are in Cargo.toml,
+# `[workspace.lints.clippy]`).
+
+# `undocumented_unsafe_blocks`: a `// SAFETY:` comment above the
+# statement that holds the block counts (`let x = unsafe { .. };` with
+# the comment above the `let`), as does one above the block's
+# attributes. Without this the comment would have to sit inside the
+# expression, between `=` and `unsafe`.
+accept-comment-above-statement = true
+accept-comment-above-attributes = true

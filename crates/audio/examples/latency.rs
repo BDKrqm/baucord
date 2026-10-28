@@ -14,10 +14,8 @@
 //    and prints the measured latency
 // 4. Wait 1–2 seconds between snaps for clean measurements
 
-use std::{
-    sync::atomic::Ordering,
-    time::{Duration, Instant},
-};
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 use audio::{AudioStats, VoiceChat, VoiceChatConfig};
 

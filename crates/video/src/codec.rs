@@ -56,19 +56,17 @@
 
 extern crate ffmpeg_next as ffmpeg;
 
-use std::{
-    collections::VecDeque,
-    ffi::c_int,
-    ptr,
-    time::{Duration, Instant},
-};
+use std::collections::VecDeque;
+use std::ffi::c_int;
+use std::ptr;
+use std::time::{Duration, Instant};
 
-use ffmpeg::{
-    codec::{self, encoder, packet::Packet},
-    software::scaling::{Context as SwsContext, Flags},
-    util::{format::Pixel, frame::video::Video as VideoFrame},
-    Dictionary, Rational,
-};
+use ffmpeg::codec::packet::Packet;
+use ffmpeg::codec::{self, encoder};
+use ffmpeg::software::scaling::{Context as SwsContext, Flags};
+use ffmpeg::util::format::Pixel;
+use ffmpeg::util::frame::video::Video as VideoFrame;
+use ffmpeg::{Dictionary, Rational};
 
 use crate::{
     CodecError, DecodedFrame, EncodedFrame, Frame, PixelFormat, Quality, VideoDecoder, VideoEncoder,

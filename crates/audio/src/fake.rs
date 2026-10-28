@@ -13,21 +13,17 @@
 //!
 //! Nothing here is compiled outside `cfg(test)`.
 
-use std::{
-    cell::RefCell,
-    collections::HashMap,
-    error::Error,
-    fmt::Write as _,
-    sync::atomic::Ordering,
-    time::{Duration, Instant},
-};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::error::Error;
+use std::fmt::Write as _;
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
-use crate::{
-    aec::{AecMode, OutputKind},
-    route::{self, RouteDevice},
-    stats::AudioStats,
-    Survey, Traits,
-};
+use crate::aec::{AecMode, OutputKind};
+use crate::route::{self, RouteDevice};
+use crate::stats::AudioStats;
+use crate::{Survey, Traits};
 
 thread_local! {
     static WORLD: RefCell<Option<World>> = const { RefCell::new(None) };

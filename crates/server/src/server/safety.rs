@@ -17,11 +17,9 @@
 //! - **Delete account** is the admin purge, done by the owner, with
 //!   one difference: the last admin is told to hand over first.
 
-use std::{
-    collections::{HashMap, HashSet},
-    path::PathBuf,
-    time::{Duration, Instant},
-};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use log::{info, warn};
 use protocol::{

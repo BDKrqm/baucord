@@ -34,14 +34,10 @@
 //! rarely enough that each one sat at 4 Hz for most of a session
 //! (review 2026-10, P2-34).
 
-use std::{
-    sync::{
-        atomic::{AtomicBool, AtomicU8, Ordering},
-        mpsc, Arc,
-    },
-    thread::JoinHandle,
-    time::Duration,
-};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{mpsc, Arc};
+use std::thread::JoinHandle;
+use std::time::Duration;
 
 use log::{info, warn};
 

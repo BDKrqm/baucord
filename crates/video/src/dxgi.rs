@@ -38,53 +38,37 @@
 //! reported with `LastPresentTime == 0` and skipped (matching xcap) —
 //! callers seed the first picture from a screenshot.
 
-use std::{
-    collections::VecDeque,
-    sync::{
-        atomic::{AtomicBool, AtomicU8, Ordering},
-        Arc, Mutex,
-    },
-    thread::JoinHandle,
-    time::{Duration, Instant},
-};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
-use windows::{
-    core::{Interface, BOOL},
-    Win32::{
-        Foundation::{HMODULE, LPARAM, RECT},
-        Graphics::{
-            Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN},
-            Direct3D11::{
-                D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Resource,
-                ID3D11ShaderResourceView, ID3D11Texture2D, D3D11_BIND_RENDER_TARGET,
-                D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_CPU_ACCESS_READ,
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_SINGLETHREADED,
-                D3D11_FORMAT_SUPPORT_MIP_AUTOGEN, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
-                D3D11_RESOURCE_MISC_GENERATE_MIPS, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
-                D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
-            },
-            Dxgi::{
-                Common::{
-                    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_MODE_ROTATION_IDENTITY,
-                    DXGI_MODE_ROTATION_UNSPECIFIED,
-                },
-                CreateDXGIFactory1, IDXGIAdapter1, IDXGIDevice, IDXGIFactory1, IDXGIOutput,
-                IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource, DXGI_ERROR_WAIT_TIMEOUT,
-                DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_POINTER_SHAPE_INFO,
-                DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR,
-                DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR,
-                DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME,
-            },
-            Gdi::{EnumDisplayMonitors, HDC, HMONITOR},
-        },
-        System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED},
-    },
+use windows::core::{Interface, BOOL};
+use windows::Win32::Foundation::{HMODULE, LPARAM, RECT};
+use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN};
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11ShaderResourceView,
+    ID3D11Texture2D, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BOX,
+    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_SINGLETHREADED,
+    D3D11_FORMAT_SUPPORT_MIP_AUTOGEN, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
+    D3D11_RESOURCE_MISC_GENERATE_MIPS, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
 };
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_MODE_ROTATION_IDENTITY, DXGI_MODE_ROTATION_UNSPECIFIED,
+};
+use windows::Win32::Graphics::Dxgi::{
+    CreateDXGIFactory1, IDXGIAdapter1, IDXGIDevice, IDXGIFactory1, IDXGIOutput, IDXGIOutput1,
+    IDXGIOutputDuplication, IDXGIResource, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
+    DXGI_OUTDUPL_POINTER_SHAPE_INFO, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR,
+    DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME,
+};
+use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR};
+use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 
-use crate::{
-    pointer::{Kind, Shape, Under},
-    CaptureError, Quality,
-};
+use crate::pointer::{Kind, Shape, Under};
+use crate::{CaptureError, Quality};
 
 /// How long `AcquireNextFrame` waits before reporting "no change".
 /// Also bounds worker shutdown latency (the exit flag is checked each

@@ -9,11 +9,9 @@
 //! to send (`WouldBlock`, `ENOBUFS`) are treated as a dropped datagram —
 //! QUIC recovers, and blocking the media thread would be worse.
 
-use std::{
-    io::{self, IoSliceMut},
-    net::{SocketAddr, UdpSocket},
-    time::Duration,
-};
+use std::io::{self, IoSliceMut};
+use std::net::{SocketAddr, UdpSocket};
+use std::time::Duration;
 
 use bytes::BytesMut;
 use quinn_udp::{RecvMeta, UdpSockRef, UdpSocketState};
@@ -458,20 +456,16 @@ mod windows_qos {
     //! administrator rights Windows picks the DSCP itself (voice ⇒ 56,
     //! CS7); that is still a top-priority class for every `QoS` engine.
 
-    use std::{
-        net::{SocketAddr, UdpSocket},
-        os::windows::io::AsRawSocket,
-    };
+    use std::net::{SocketAddr, UdpSocket};
+    use std::os::windows::io::AsRawSocket;
 
-    use windows_sys::Win32::{
-        Foundation::{CloseHandle, HANDLE},
-        NetworkManagement::QoS::{
-            QOSAddSocketToFlow, QOSCreateHandle, QOSRemoveSocketFromFlow, QOSTrafficTypeVoice,
-            QOS_NON_ADAPTIVE_FLOW, QOS_VERSION,
-        },
-        Networking::WinSock::{
-            AF_INET, AF_INET6, IN6_ADDR, IN_ADDR, SOCKADDR, SOCKADDR_IN, SOCKADDR_IN6,
-        },
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::NetworkManagement::QoS::{
+        QOSAddSocketToFlow, QOSCreateHandle, QOSRemoveSocketFromFlow, QOSTrafficTypeVoice,
+        QOS_NON_ADAPTIVE_FLOW, QOS_VERSION,
+    };
+    use windows_sys::Win32::Networking::WinSock::{
+        AF_INET, AF_INET6, IN6_ADDR, IN_ADDR, SOCKADDR, SOCKADDR_IN, SOCKADDR_IN6,
     };
 
     pub struct VoiceFlow {

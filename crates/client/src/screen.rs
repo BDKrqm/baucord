@@ -19,36 +19,26 @@
 // bitrate ladder on the encoder; viewer keyframe-request distress drives
 // a small fps pacer. See the "Sender-side adaptation" section below.
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
-        Arc, Mutex,
-    },
-    thread,
-    time::{Duration, Instant},
-};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
-use audio::stream::{
-    decoder::{self as stream_decoder, StreamAudioPacket, StreamDecoder},
-    input::{PacketSink, SystemAudioCapture},
-};
+use audio::stream::decoder::{self as stream_decoder, StreamAudioPacket, StreamDecoder};
+use audio::stream::input::{PacketSink, SystemAudioCapture};
 use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, SendError, Sender, TrySendError};
 use log::{info, warn};
+use video::buffer::{BufferedPacket, VideoJitterBuffer};
+use video::capture::{CaptureStatus, Capturer};
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use video::codec::FfmpegDecoder;
-use video::{
-    buffer::{BufferedPacket, VideoJitterBuffer},
-    capture::{CaptureStatus, Capturer},
-    codec::FfmpegEncoder,
-    CodecError, EncodedFrame, Quality, VideoDecoder, VideoEncoder,
-};
+use video::codec::FfmpegEncoder;
+use video::{CodecError, EncodedFrame, Quality, VideoDecoder, VideoEncoder};
 
+use crate::network::{MediaOut, NetworkControl};
 pub use crate::viewlog::PresentTally;
-use crate::{
-    network::{MediaOut, NetworkControl},
-    viewlog::{ShareState, Sharing, Viewing},
-};
+use crate::viewlog::{ShareState, Sharing, Viewing};
 
 /// What the UI did with each watched stream's frames since its last
 /// summary line, by sharer (see [`PresentTally`]).

@@ -20,21 +20,19 @@
 //! are called from. Photos hands its file over on a background queue;
 //! the pick's callback is `Send` and hops back to the UI itself.
 
-use std::{
-    cell::RefCell,
-    path::{Path, PathBuf},
-    ptr::NonNull,
-};
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
+use std::ptr::NonNull;
 
 use app_core::files::{safe_name, write_new, PickSlot};
 use block2::RcBlock;
 use frontend::host::{ChimeRoute, Hooks, KeepAlive, Notice, NoticeKind, OnPick, Saved};
 use i18n::t;
+use objc2::rc::{Allocated, Retained};
+use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{
-    define_class, extern_class, extern_methods, msg_send,
-    rc::{Allocated, Retained},
-    runtime::{NSObject, NSObjectProtocol, ProtocolObject},
-    DefinedClass, MainThreadMarker, MainThreadOnly,
+    define_class, extern_class, extern_methods, msg_send, DefinedClass, MainThreadMarker,
+    MainThreadOnly,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{NSArray, NSDictionary, NSError, NSString, NSURL};

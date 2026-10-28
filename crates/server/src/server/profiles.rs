@@ -11,7 +11,8 @@
 //! and in memory for the run when it is off. Files as cards ride the
 //! same messages later.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use log::{debug, info, warn};
 use protocol::{
@@ -20,10 +21,8 @@ use protocol::{
 };
 
 use super::{fold_upload, ChatServer, Folded, Waiting};
-use crate::{
-    persistence::{Answer, BlobRecord, Command, Outcome, Query},
-    policy::{BlobMeta, Restriction},
-};
+use crate::persistence::{Answer, BlobRecord, Command, Outcome, Query};
+use crate::policy::{BlobMeta, Restriction};
 
 /// One profile change (and one rename) per this long, per user.
 pub(super) const PROFILE_RATE: Duration = Duration::from_secs(30);

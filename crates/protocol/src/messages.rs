@@ -15,11 +15,9 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    admin::{AdminCommand, AdminError, AdminOutcome, RestrictionKind},
-    lanes::Lane,
-    permissions::{Rank, RoleId},
-};
+use crate::admin::{AdminCommand, AdminError, AdminOutcome, RestrictionKind};
+use crate::lanes::Lane;
+use crate::permissions::{Rank, RoleId};
 
 /// Transport-assigned identity of a connection, valid for its lifetime.
 /// The server assigns a random non-zero id at admission and every peer

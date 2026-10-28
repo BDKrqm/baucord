@@ -20,20 +20,15 @@
 //! voice engine ([`chime_route`]) rather than vanishing. Local
 //! notifications only — no push entitlement, no `aps-environment`.
 
-use std::{
-    path::Path,
-    ptr::NonNull,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use std::path::Path;
+use std::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use block2::{DynBlock, RcBlock};
 use frontend::host::{ChimeRoute, Notice};
-use objc2::{
-    define_class, msg_send,
-    rc::Retained,
-    runtime::{Bool, NSObject, NSObjectProtocol, ProtocolObject},
-    AllocAnyThread,
-};
+use objc2::rc::Retained;
+use objc2::runtime::{Bool, NSObject, NSObjectProtocol, ProtocolObject};
+use objc2::{define_class, msg_send, AllocAnyThread};
 use objc2_foundation::{NSArray, NSError, NSString};
 use objc2_user_notifications::{
     UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent, UNNotification,
