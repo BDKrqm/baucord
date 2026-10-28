@@ -111,6 +111,11 @@ pub(crate) struct OpenedWith {
     /// back to the default) is not put back by Close (review 2026-10,
     /// P2-3).
     devices_picked: bool,
+    /// The Stream tab changed a share setting (1.4.0). Untouched, the
+    /// share settings stay as they are now: the share dialog writes
+    /// its picks into the same fields, and a share started while the
+    /// page was open keeps them.
+    stream_edited: bool,
 }
 
 impl OpenedWith {
@@ -121,19 +126,28 @@ impl OpenedWith {
             profile_dirty: app.profile_dirty,
             servers_edited: false,
             devices_picked: false,
+            stream_edited: false,
         }
     }
 
     /// `now` with the page's fields as they were at open. What is not
     /// the page's stays as it is: the main window's layout (sidebar
     /// width, the Messages divider, hidden DMs), per-person volumes and
-    /// places, the share dialog's defaults, the ducking notice's flag,
-    /// the voice space's switches.
+    /// places, the share dialog's monitor or camera pick, the ducking
+    /// notice's flag, the voice space's switches.
     fn restored_onto(&self, now: &Settings) -> Settings {
         let mut restored = self.settings.clone();
         restored.window.clone_from(&now.window);
         restored.peer_settings.clone_from(&now.peer_settings);
-        restored.share.clone_from(&now.share);
+        if self.stream_edited {
+            // The Stream tab's fields go back; the monitor or camera
+            // pick is the dialog's alone.
+            restored.share.monitor = now.share.monitor;
+            restored.share.use_camera = now.share.use_camera;
+            restored.share.camera.clone_from(&now.share.camera);
+        } else {
+            restored.share.clone_from(&now.share);
+        }
         restored.audio.lowering_told = now.audio.lowering_told;
         restored.audio.spatial_voice = now.audio.spatial_voice;
         restored.audio.space_auto_spread = now.audio.space_auto_spread;
@@ -177,6 +191,13 @@ fn note_devices_picked(app: &mut AppState) {
     }
 }
 
+/// The Stream tab changed a share setting (`AppState::stream_edited`).
+pub(crate) fn note_stream_edited(app: &mut AppState) {
+    if let Some(opened) = &mut app.settings_opened {
+        opened.stream_edited = true;
+    }
+}
+
 /// A route's name as the picker shows it: the engine's English names
 /// for the built-in ones translated, a headset's own name as it is.
 fn route_label(name: &str) -> String {
@@ -190,7 +211,8 @@ fn route_label(name: &str) -> String {
 
 /// Nav index of the Servers tab (Profile 0, General 1, Audio 2,
 /// Sounds 3, Keyboard 4, Servers 5, Credits 6, About 7, Debug 8,
-/// Licenses 9) — the connect view's pencil jumps here. Mirrors the `NavItem`s in
+/// Licenses 9, Stream 10 — numbered as added, ordered by the nav) —
+/// the connect view's pencil jumps here. Mirrors the `NavItem`s in
 /// settings.slint.
 pub const TAB_SERVERS: i32 = 5;
 /// Nav index of the Audio tab, whose meters the settings timer drives.
@@ -292,6 +314,61 @@ pub const LOG_LEVELS: [(&str, &str); 5] = [
     ("log-level-debug", "debug"),
     ("log-level-trace", "trace"),
 ];
+
+/// The Stream tab's resolution choices (1.4.0): the label and the
+/// preset height, each height in `Quality::ALL` once, in its order.
+fn stream_resolutions() -> Vec<(String, u32)> {
+    let mut out: Vec<(String, u32)> = Vec::new();
+    for q in video::Quality::ALL {
+        if !out.iter().any(|(_, h)| *h == q.height()) {
+            out.push((format!("{}p", q.height()), q.height()));
+        }
+    }
+    out
+}
+
+/// The frame rates the presets offer at `height`, in `Quality::ALL`
+/// order (1440p has 30 only).
+fn stream_frame_rates(height: u32) -> Vec<u32> {
+    let mut out = Vec::new();
+    for q in video::Quality::ALL.iter().filter(|q| q.height() == height) {
+        if !out.contains(&q.fps()) {
+            out.push(q.fps());
+        }
+    }
+    out
+}
+
+/// The preset at `height` and `fps`; at `height` and the nearest rate
+/// when there is none at that pair; the default when the height is
+/// not a preset's.
+fn stream_quality(height: u32, fps: u32) -> video::Quality {
+    let at_height = || {
+        video::Quality::ALL
+            .iter()
+            .copied()
+            .filter(|q| q.height() == height)
+    };
+    at_height()
+        .find(|q| q.fps() == fps)
+        .or_else(|| at_height().min_by_key(|q| q.fps().abs_diff(fps)))
+        .unwrap_or(video::Quality::FHD30)
+}
+
+/// The saved preset; the default when the file names one this
+/// version does not have.
+fn saved_quality(settings: &Settings) -> video::Quality {
+    video::Quality::from_key(&settings.share.quality).unwrap_or(video::Quality::FHD30)
+}
+
+/// The Stream tab's encoder labels, in `EncoderPreference::ALL` order.
+fn encoder_label(preference: video::EncoderPreference) -> String {
+    match preference {
+        video::EncoderPreference::Auto => t!("stream-encoder-auto"),
+        video::EncoderPreference::Hardware => t!("stream-encoder-gpu"),
+        video::EncoderPreference::Software => t!("stream-encoder-cpu"),
+    }
+}
 
 /// `"ip:port"` → (ip, port). Splits on the *last* colon so
 /// `[::1]:5000` keeps its bracketed v6 host; no colon → all ip.
@@ -579,6 +656,8 @@ macro_rules! switches {
             set_notify_first_join, on_notify_first_join_changed => notifications.first_join;
             set_show_timestamps, on_show_timestamps_changed => ui.show_timestamps, push_ui_prefs;
             set_compact_rows, on_compact_rows_changed => ui.compact_rows, push_ui_prefs;
+            set_stream_pointer, on_stream_pointer_changed => share.pointer, stream_edited;
+            set_stream_gpu_priority, on_stream_gpu_priority_changed => share.gpu_priority, stream_edited;
         }
     };
 }
@@ -656,6 +735,37 @@ pub fn populate(app: &mut AppState) {
         .position(|(_, kb)| *kb >= settings.ui.image_max_kb)
         .unwrap_or(IMAGE_SIZES.len() - 1);
     s.set_image_size_index(i32::try_from(size_index).unwrap_or(0));
+
+    // Stream (1.4.0; the tab shows on the desktop only): the share's
+    // picture as two pickers, the encoder, and the platform's knob.
+    // The switches came with the table above.
+    let quality = saved_quality(settings);
+    let resolutions = stream_resolutions();
+    let labels: Vec<slint::SharedString> = resolutions
+        .iter()
+        .map(|(label, _)| label.as_str().into())
+        .collect();
+    s.set_stream_resolutions(ModelRc::new(VecModel::from(labels)));
+    let resolution_index = resolutions
+        .iter()
+        .position(|(_, h)| *h == quality.height())
+        .unwrap_or(0);
+    s.set_stream_resolution_index(i32::try_from(resolution_index).unwrap_or(0));
+    push_stream_frame_rates(&s, quality);
+    let encoders: Vec<slint::SharedString> = video::EncoderPreference::ALL
+        .iter()
+        .map(|p| encoder_label(*p).into())
+        .collect();
+    s.set_stream_encoders(ModelRc::new(VecModel::from(encoders)));
+    let encoder = video::EncoderPreference::from_key(&settings.share.encoder).unwrap_or_default();
+    let encoder_index = video::EncoderPreference::ALL
+        .iter()
+        .position(|p| *p == encoder)
+        .unwrap_or(0);
+    s.set_stream_encoder_index(i32::try_from(encoder_index).unwrap_or(0));
+    s.set_stream_visibility_index(i32::from(settings.share.everyone));
+    s.set_stream_gpu_priority_available(video::gpu_priority::available());
+
     // Audio: transmission mode and the PTT key as bound. A phone has no
     // key to hold, so it gets voice activity alone.
     let modes: Vec<slint::SharedString> = if app::SINGLE_WINDOW_HOST {
@@ -792,6 +902,20 @@ pub fn populate(app: &mut AppState) {
             )
         };
     refresh_devices(app, inputs, outputs);
+}
+
+/// The Stream tab's frame-rate picker: the rates `quality`'s
+/// resolution has, its own selected. Filled again when the resolution
+/// changes, since 1440p has 30 only.
+fn push_stream_frame_rates(s: &SettingsState, quality: video::Quality) {
+    let rates = stream_frame_rates(quality.height());
+    let labels: Vec<slint::SharedString> = rates
+        .iter()
+        .map(|fps| t!("stream-fps", "fps" => *fps).into())
+        .collect();
+    s.set_stream_frame_rates(ModelRc::new(VecModel::from(labels)));
+    let index = rates.iter().position(|f| *f == quality.fps()).unwrap_or(0);
+    s.set_stream_frame_rate_index(i32::try_from(index).unwrap_or(0));
 }
 
 /// The device pickers: "System default" first, the saved selection
@@ -1014,6 +1138,53 @@ fn wire(sf: SettingsSurface<'_>) {
             if let Some((_, kb)) = usize::try_from(index).ok().and_then(|i| IMAGE_SIZES.get(i)) {
                 app.settings.ui.image_max_kb = *kb;
             }
+        });
+    });
+    // ── Stream (1.4.0) ───────────────────────────────────────────
+    // The two pickers pair into one preset: a resolution keeps the
+    // frame rate it can, and refills the rate list with what it has.
+    logic.on_stream_resolution_selected(|index| {
+        app::with_current(move |app| {
+            let Some(height) = usize::try_from(index)
+                .ok()
+                .and_then(|i| stream_resolutions().get(i).map(|(_, h)| *h))
+            else {
+                return;
+            };
+            let quality = stream_quality(height, saved_quality(&app.settings).fps());
+            app.settings.share.quality = quality.key().to_string();
+            push_stream_frame_rates(&surface(app).state(), quality);
+            app.stream_edited();
+        });
+    });
+    logic.on_stream_frame_rate_selected(|index| {
+        app::with_current(move |app| {
+            let current = saved_quality(&app.settings);
+            let Some(fps) = usize::try_from(index)
+                .ok()
+                .and_then(|i| stream_frame_rates(current.height()).get(i).copied())
+            else {
+                return;
+            };
+            app.settings.share.quality = stream_quality(current.height(), fps).key().to_string();
+            app.stream_edited();
+        });
+    });
+    logic.on_stream_visibility_selected(|index| {
+        app::with_current(move |app| {
+            app.settings.share.everyone = index == 1;
+            app.stream_edited();
+        });
+    });
+    logic.on_stream_encoder_selected(|index| {
+        app::with_current(move |app| {
+            let preference = usize::try_from(index)
+                .ok()
+                .and_then(|i| video::EncoderPreference::ALL.get(i))
+                .copied()
+                .unwrap_or_default();
+            app.settings.share.encoder = preference.key().to_string();
+            app.stream_edited();
         });
     });
     logic.on_transmission_selected(|index| {

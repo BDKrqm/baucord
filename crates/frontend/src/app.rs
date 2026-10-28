@@ -1643,6 +1643,8 @@ fn wire_logic(state: &Rc<RefCell<AppState>>) {
                     } else {
                         client::ShareScope::Channel
                     },
+                    encoder: app.share_encoder(),
+                    gpu_priority: app.settings.share.gpu_priority,
                 })
                 .ok();
         });

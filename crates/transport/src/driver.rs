@@ -41,6 +41,7 @@ pub type PeerId = u64;
 /// harness pump the driver through this; the harness reaches the
 /// application by downcasting.
 pub trait DriverHost: std::any::Any {
+    /// The driver this host owns.
     fn driver(&mut self) -> &mut Driver;
 }
 
@@ -67,21 +68,29 @@ const TRACK_BYTES: usize = 8;
 /// A datagram on its way in.
 #[derive(Debug)]
 pub struct InboundDatagram {
+    /// Where the datagram came from.
     pub remote: SocketAddr,
+    /// The local address it arrived on, when the socket says.
     pub local_ip: Option<IpAddr>,
+    /// The ECN marking, when the socket reports one.
     pub ecn: Option<quinn_proto::EcnCodepoint>,
+    /// The bytes.
     pub data: BytesMut,
 }
 
 /// A datagram (or a GSO batch of them) on its way out.
 #[derive(Debug, Clone)]
 pub struct Transmit {
+    /// Where to send it.
     pub destination: SocketAddr,
+    /// The ECN marking to send it with, if any.
     pub ecn: Option<quinn_proto::EcnCodepoint>,
+    /// The bytes.
     pub contents: Bytes,
     /// `Some(n)`: `contents` is several datagrams of `n` bytes each
     /// (the last may be shorter) — send with GSO or split.
     pub segment_size: Option<usize>,
+    /// The local address to send from, when the path was bound to one.
     pub src_ip: Option<IpAddr>,
 }
 
@@ -95,7 +104,12 @@ pub enum DisconnectReason {
     /// We closed it.
     LocallyClosed,
     /// The peer closed it with an application code.
-    ApplicationClosed { code: u64, reason: String },
+    ApplicationClosed {
+        /// The application error code the peer sent.
+        code: u64,
+        /// The reason text the peer sent.
+        reason: String,
+    },
     /// No traffic for `max_idle_timeout`.
     TimedOut,
     /// The peer sent a stateless reset: it no longer knows this
@@ -112,7 +126,9 @@ pub enum DisconnectReason {
     /// The server's certificate did not match the pin and carried no
     /// valid successor proof.
     IdentityChanged {
+        /// The pinned key.
         expected: Fingerprint,
+        /// The key the server presented.
         observed: Fingerprint,
     },
     /// Anything else the transport reported.
@@ -157,19 +173,27 @@ pub enum Event {
     /// The handshake completed; lanes are usable. On the client side
     /// `identity` says how the server's certificate was accepted.
     Connected {
+        /// The peer's id for every later call.
         peer: PeerId,
+        /// The peer's address.
         remote: SocketAddr,
+        /// How the server's certificate was accepted (client side only).
         identity: Option<Observation>,
     },
     /// The connection is gone. Emitted exactly once per peer.
     Disconnected {
+        /// The peer that is gone.
         peer: PeerId,
+        /// Why.
         reason: DisconnectReason,
     },
     /// The datagram send buffer overflowed and the packet being sent
     /// was dropped. Emitted once per episode; the count is in
     /// [`LinkStats::datagram_send_drops`].
-    DatagramsBlocked { peer: PeerId },
+    DatagramsBlocked {
+        /// The peer whose datagram queue is full.
+        peer: PeerId,
+    },
 }
 
 /// Something read from the Video lane.
@@ -186,16 +210,23 @@ pub enum VideoItem {
     GroupReset,
 }
 
+/// Why a `send` was refused before anything left.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum SendError {
+    /// No peer has that id (it was never connected, or has been forgotten).
     #[error("unknown peer")]
     UnknownPeer,
+    /// The peer's handshake has not finished, or it is gone.
     #[error("peer is not connected")]
     NotConnected,
+    /// A datagram-lane packet larger than the lane's budget.
     #[error("a {0} packet of {1} bytes exceeds the datagram budget")]
     TooLarge(Lane, usize),
+    /// The stream lane's QUIC stream is not open yet (before the handshake
+    /// finished) or is closed.
     #[error("no open {0} stream")]
     NoStream(Lane),
+    /// A stream send on a datagram lane (voice, video, system audio).
     #[error("the {0} lane is not a stream lane")]
     NotAStreamLane(Lane),
 }
@@ -206,15 +237,25 @@ pub enum SendError {
 /// media decision (spec §6.1).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct LinkStats {
+    /// The smoothed round-trip time.
     pub rtt: Duration,
+    /// The congestion window, bytes.
     pub cwnd: u64,
+    /// Packets declared lost so far.
     pub lost_packets: u64,
+    /// Packets sent so far.
     pub sent_packets: u64,
+    /// Times the congestion controller backed off.
     pub congestion_events: u64,
+    /// The path MTU in use, bytes.
     pub current_mtu: u16,
+    /// Bytes sent on the connection so far.
     pub bytes_tx: u64,
+    /// Bytes received on the connection so far.
     pub bytes_rx: u64,
+    /// Datagrams sent so far.
     pub datagrams_tx: u64,
+    /// Datagrams received so far.
     pub datagrams_rx: u64,
     /// Voice / system-audio datagrams dropped because the send buffer
     /// was full.
@@ -699,6 +740,7 @@ impl Shared {
         self.len
     }
 
+    /// Whether the payload has no bytes.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len == 0
@@ -797,6 +839,26 @@ pub struct Driver {
 
 impl Driver {
     /// A client endpoint pinning `pin` (`None`: trust on first use).
+    ///
+    /// The driver is sans-IO: it never touches a socket. A connection
+    /// is a `connect`, then a loop of feeding it the clock and the
+    /// datagrams that arrived and sending the datagrams it hands back.
+    /// The first of those is the client's Initial, ready before any
+    /// packet has come in:
+    ///
+    /// ```
+    /// use std::time::Instant;
+    /// use transport::{Budget, Driver};
+    ///
+    /// let mut driver = Driver::new_client(None, Budget::client()).unwrap();
+    /// let now = Instant::now();
+    /// let peer = driver.connect(now, "127.0.0.1:51000".parse().unwrap()).unwrap();
+    /// driver.handle_timeouts(now);
+    ///
+    /// let first = driver.poll_transmit().expect("the client's Initial packet");
+    /// assert_eq!(first.destination, driver.remote_address(peer).unwrap());
+    /// assert!(first.contents.len() >= 1200, "an Initial is padded to the minimum MTU");
+    /// ```
     ///
     /// # Errors
     /// rustls configuration failure (should not happen with `ring`).
@@ -961,6 +1023,7 @@ impl Driver {
         self.max_gso_segments = segments.max(1);
     }
 
+    /// The buffer budgets this driver was built with.
     #[must_use]
     pub fn budget(&self) -> &Budget {
         &self.budget
@@ -976,21 +1039,26 @@ impl Driver {
             .collect()
     }
 
+    /// Peers with a live connection: connected or still handshaking, not
+    /// lost.
     #[must_use]
     pub fn peer_count(&self) -> usize {
         self.peers.values().filter(|p| !p.lost).count()
     }
 
+    /// Whether `peer` has finished its handshake and is not lost.
     #[must_use]
     pub fn is_connected(&self, peer: PeerId) -> bool {
         self.peer(peer).is_some_and(|p| p.connected && !p.lost)
     }
 
+    /// The address datagrams for `peer` go to, if the peer is known.
     #[must_use]
     pub fn remote_address(&self, peer: PeerId) -> Option<SocketAddr> {
         self.peer(peer).map(|p| p.conn.remote_address())
     }
 
+    /// The connection's counters for `peer`, if the peer is known.
     #[must_use]
     pub fn stats(&self, peer: PeerId) -> Option<LinkStats> {
         self.peer(peer).map(Peer::stats)

@@ -58,6 +58,7 @@ impl TimerResolutionGuard {
     #[must_use]
     pub fn acquire() -> Self {
         // TIMERR_NOERROR == 0
+        // SAFETY: a plain call with a constant; no pointers cross.
         let active = unsafe { timeBeginPeriod(1) } == 0;
         if !active {
             log::warn!("timeBeginPeriod(1) failed — timed waits may be coarse (~15 ms)");
@@ -78,6 +79,8 @@ impl Drop for TimerResolutionGuard {
     fn drop(&mut self) {
         #[cfg(windows)]
         if self.active {
+            // SAFETY: pairs with the `timeBeginPeriod(1)` that succeeded in
+            // `acquire` (`active` says it did).
             unsafe {
                 timeEndPeriod(1);
             }
@@ -117,6 +120,9 @@ impl Drop for RtGuard {
 #[cfg(windows)]
 impl Drop for RtGuard {
     fn drop(&mut self) {
+        // SAFETY: `handle` is the one `AvSetMmThreadCharacteristicsW`
+        // returned for this thread, non-null (checked at creation) and
+        // reverted once, here.
         unsafe {
             AvRevertMmThreadCharacteristics(self.handle);
         }
@@ -150,6 +156,8 @@ pub fn promote_current_thread(_buffer_frames: u32, _sample_rate: u32) -> Option<
     // UTF-16, NUL-terminated.
     let task: Vec<u16> = "Pro Audio\0".encode_utf16().collect();
     let mut index: u32 = 0;
+    // SAFETY: `task` is a NUL-terminated UTF-16 string that outlives the
+    // call; `index` is a local the call fills.
     let handle = unsafe { AvSetMmThreadCharacteristicsW(task.as_ptr(), &raw mut index) };
     if handle.is_null() {
         log::warn!("MMCSS registration failed — audio worker runs at normal priority");

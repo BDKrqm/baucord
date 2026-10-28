@@ -110,7 +110,7 @@ impl ChatServer {
             ts,
             user_id: from,
             body: msg.text.clone(),
-            name: self.get_username(client),
+            name: self.username_of(client),
             edited: false,
             blob_id: None,
         };
@@ -263,7 +263,7 @@ impl ChatServer {
     ) {
         info!(
             "[{}] → [{}] (dm, {} chars)",
-            self.get_username(sender),
+            self.username_of(sender),
             self.policy.users.get(to).map_or("?", |u| u.name.as_str()),
             msg.text.chars().count()
         );

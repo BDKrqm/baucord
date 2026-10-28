@@ -66,8 +66,12 @@ define_class!(
     #[unsafe(super(NSObject))]
     struct NoticeDelegate;
 
+    // SAFETY: the class is an `NSObject` subclass (`super(NSObject)` above),
+    // which is all the protocol asks.
     unsafe impl NSObjectProtocol for NoticeDelegate {}
 
+    // SAFETY: the methods below have the selectors and signatures the
+    // protocol declares, and each calls its completion handler exactly once.
     unsafe impl UNUserNotificationCenterDelegate for NoticeDelegate {
         /// A notice arriving while the app is on screen: a chime is
         /// played and not shown; anything else (posted in the

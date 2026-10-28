@@ -92,7 +92,7 @@ impl ChatServer {
             .map_or((None, String::new()), |r| (r.until, r.reason.clone()));
         info!(
             "{} ({client:#x}) refused: no {} ({})",
-            self.get_username(client),
+            self.username_of(client),
             kind.name(),
             if reason.is_empty() {
                 "not in their roles"
@@ -403,7 +403,7 @@ impl ChatServer {
             .and_then(|a| {
                 self.sessions_of(&a)
                     .first()
-                    .map(|c| self.get_username(*c))
+                    .map(|c| self.username_of(*c))
                     .or_else(|| self.policy.users.get(&a).map(|u| u.name.clone()))
             })
             .unwrap_or_else(|| "server".to_string())
@@ -433,7 +433,7 @@ impl ChatServer {
                 Err(AdminError::NoPermission)
             }
         };
-        let actor_name = self.get_username(client);
+        let actor_name = self.username_of(client);
         info!("{actor_name} ({client:#x}) admin: {command:?}");
         if let Some(result) = self.handle_panel_command(actor, perms, &command) {
             return result;

@@ -1,7 +1,8 @@
 name: PR check
-# The gate for pull requests (Dependabot's and yours) and for pushes to
-# the default branch: formatting, a type-check of everything the desktop
-# and the phones share, the lints, and every test that needs no display.
+# The gate for pull requests (Dependabot's and yours), for pushes to
+# the default branch, and for every release: formatting, a type-check
+# of everything the desktop and the phones share, the lints, and every
+# test that needs no display.
 #
 # It runs in a Debian 13 container with the distro's FFmpeg 7.1 and
 # PipeWire, which is the environment these exact commands were last run
@@ -10,16 +11,32 @@ name: PR check
 # are not reproduced here. Windows-only code is type-checked by a cross
 # check from Linux (`windows`); macOS-, Android- and iOS-only code is
 # not compiled by this workflow.
+#
+# The release workflows call it (`workflow_call`) and publish nothing
+# until it passed: a tag is never checked by the push and pull-request
+# runs, and a push's run is cancelled by the next push, so a tag on a
+# commit whose check never finished released untested (review
+# 2026-10-27, P1-4). Called, it checks out the caller's commit, or the
+# tag the caller was given (`ref`).
 on:
   pull_request:
   push:
     branches:
       - "main"
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Ref to check out (empty = the calling workflow's commit)"
+        type: string
+        default: ""
 
+# A newer push cancels the run its predecessor started; a release's
+# check runs to the end (the group is the caller's name and the tag,
+# which nothing else uses).
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -39,6 +56,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-10-10
@@ -74,6 +93,8 @@ jobs:
             libudev-dev libfontconfig1-dev libfreetype-dev
 
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
 
       # The toolchain rust-toolchain.toml pins, as in release.yml.
       - name: Read the pinned Rust toolchain
@@ -124,6 +145,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
       - name: System dependencies
         run: |
           sudo apt-get update
@@ -165,6 +188,8 @@ jobs:
             gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix \
             libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
       - name: Read the pinned Rust toolchain
         id: toolchain
         run: |

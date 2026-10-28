@@ -117,6 +117,7 @@ impl Lane {
         }
     }
 
+    /// The lane's name in logs and config (`control`, `voice`, ...).
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {

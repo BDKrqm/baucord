@@ -1,10 +1,19 @@
 # Builds the desktop app (Windows, macOS, Linux) with the bundled server on
 # release, attaches the zips to the release and uploads them to R2 with the
 # version file. Pushes to the default branch only build, to warm the caches.
+# *Run workflow* with a release's tag does what the release event did,
+# for a release whose run failed or was cancelled (the tag's commit is
+# built, checked and published to that release, which has to exist);
+# with anything else it is a dry run, like a push.
 name: Build and Release
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "A release tag (v1.4.0) to rebuild and publish to that release (zips, disk image, R2, the version file); anything else is a dry run (workflow artifacts only)"
+        default: "manual"
   push:
     branches:
       # The default branch: a tag build can only restore caches saved on
@@ -27,12 +36,22 @@ on:
       - "Dockerfile"
 
 # A newer push to main supersedes a cache-warming build still running;
-# a release always runs to the end.
+# a release always runs to the end. A manual run for a tag is grouped
+# by the tag, not by the branch it was started from, so a push to main
+# meanwhile does not cancel it.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'push' }}
 
 env:
+  # The tag being published: the release's, or the one a manual run
+  # names. Empty on a push and on a dry run — every step that packages,
+  # notarizes, attaches or uploads looks at this, never at the event.
+  # (Jobs cannot read `env` in their `if:`; those spell the same test.)
+  PUBLISH_TAG: ${{ github.event.release.tag_name || (startsWith(github.event.inputs.tag, 'v') && github.event.inputs.tag || '') }}
+  # What to check out: the tag on a manual run, the triggering commit
+  # otherwise (a release event already runs on its tag).
+  CHECKOUT_REF: ${{ github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.tag, 'v') && github.event.inputs.tag || '' }}
   # FFmpeg stays on 7.1.x: ffmpeg-next 8.1 does not build against FFmpeg 8+.
   VCPKG_COMMIT: 34823ada10080ddca99b60e85f80f55e18a44eea # ffmpeg 7.1.2
   # The Linux and macOS builds take the same release as vcpkg, checked
@@ -40,12 +59,31 @@ env:
   # 2026-10-16). Must match the FFmpeg entry in scripts/licenses.py.
   FFMPEG_VERSION: 7.1.2
   FFMPEG_SHA256: 089bc60fb59d6aecc5d994ff530fd0dcb3ee39aa55867849a2bbc4e555f9c304
+  # The Windows build's prebuilt FFmpeg (the vcpkg zip in R2, see the
+  # download step), checked against this digest before it is unpacked:
+  # the zip becomes every Windows user's encoder, and the bucket's key
+  # can rewrite it (review 2026-10-27, P1-5). Empty = not pinned yet: a
+  # push's build prints the digest and goes on, a release's refuses.
+  # Pin it from that line; re-pin when build-ffmpeg-windows.yml makes a
+  # new zip.
+  FFMPEG_WIN_SHA256: "ea0f35adcfc3dfa863c4c0691c6b7b6b9deaa372b26b4e16877b1013ca6dcf5d"
   # Must match the x264 entry in scripts/licenses.py.
   X264_COMMIT: 31e19f92f00c7003fa115047ce50978bc98c3a0d
 
 jobs:
   licenses:
     uses: ./.github/workflows/licenses.yml
+    with:
+      ref: ${{ github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.tag, 'v') && github.event.inputs.tag || '' }}
+
+  # The checks (format, lints, tests) on the tagged commit, beside the
+  # builds: nothing is attached to the release until they passed. A push
+  # to main is checked by pr-check's own run (review 2026-10-27, P1-4).
+  check:
+    if: ${{ github.event_name == 'release' || startsWith(github.event.inputs.tag, 'v') }}
+    uses: ./.github/workflows/pr-check.yaml
+    with:
+      ref: ${{ github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.tag, 'v') && github.event.inputs.tag || '' }}
 
   # A release's tag has to be the workspace's version. Checked first:
   # it used to be the last job's business, after an hour of builds.
@@ -54,12 +92,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Check out source
-        if: github.event_name == 'release'
+        if: env.PUBLISH_TAG != ''
         uses: actions/checkout@v7
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
       - name: Check tag matches crate version
-        if: github.event_name == 'release'
+        if: env.PUBLISH_TAG != ''
         env:
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ env.PUBLISH_TAG }}
         run: |
           VERSION=$(awk -F'"' '/^version = "/ { print $2; exit }' Cargo.toml)
           if [ "$TAG" != "v$VERSION" ]; then
@@ -97,6 +137,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v7
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
 
       - name: Download license files
         uses: actions/download-artifact@v8
@@ -141,7 +183,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-          save-if: ${{ github.event_name != 'release' }}
+          save-if: ${{ env.PUBLISH_TAG == '' }}
 
       # Restored everywhere, saved only from main: a release's cache is
       # scoped to its tag, where no later run can read it, and it could
@@ -173,7 +215,7 @@ jobs:
           meson install -C build
 
       - name: Save PipeWire headers (Linux)
-        if: runner.os == 'Linux' && steps.pipewire-cache.outputs.cache-hit != 'true' && github.event_name != 'release'
+        if: runner.os == 'Linux' && steps.pipewire-cache.outputs.cache-hit != 'true' && env.PUBLISH_TAG == ''
         uses: actions/cache/save@v6
         with:
           path: ~/pw
@@ -216,7 +258,7 @@ jobs:
           make install
 
       - name: Save static FFmpeg (Linux)
-        if: runner.os == 'Linux' && steps.ffmpeg-static-linux-cache.outputs.cache-hit != 'true' && github.event_name != 'release'
+        if: runner.os == 'Linux' && steps.ffmpeg-static-linux-cache.outputs.cache-hit != 'true' && env.PUBLISH_TAG == ''
         uses: actions/cache/save@v6
         with:
           path: ~/ffmpeg-static
@@ -274,7 +316,7 @@ jobs:
           make install
 
       - name: Save static FFmpeg (macOS)
-        if: runner.os == 'macOS' && steps.ffmpeg-static-cache.outputs.cache-hit != 'true' && github.event_name != 'release'
+        if: runner.os == 'macOS' && steps.ffmpeg-static-cache.outputs.cache-hit != 'true' && env.PUBLISH_TAG == ''
         uses: actions/cache/save@v6
         with:
           path: ~/ffmpeg-static
@@ -293,9 +335,27 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
+          $ErrorActionPreference = "Stop"
           $obj = "ci/ffmpeg-$($env:VCPKG_COMMIT.Substring(0,10))-avcodec-avformat-swscale-x264-gpl-nvcodec-amf-x64-windows-static-md.zip"
           aws s3 cp "s3://baucord/$obj" ffmpeg-prebuilt.zip --endpoint-url https://6bcc35de83e46a771896026baf11b4ac.r2.cloudflarestorage.com
+          if ($LASTEXITCODE -ne 0) { throw "could not download $obj" }
+          # Verified before anything is unpacked (P1-5). The digest is
+          # pinned in FFMPEG_WIN_SHA256 at the top of this file.
+          $hash = (Get-FileHash ffmpeg-prebuilt.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $want = "$env:FFMPEG_WIN_SHA256".Trim().ToLowerInvariant()
+          Write-Host "ffmpeg-prebuilt.zip SHA-256: $hash ($obj)"
+          if ($want -eq "") {
+            if ("$env:PUBLISH_TAG" -ne "") {
+              Write-Host "::error::FFMPEG_WIN_SHA256 is not pinned in release.yml; the zip's digest is $hash — pin it and release again"
+              exit 1
+            }
+            Write-Host "::warning::FFMPEG_WIN_SHA256 is not pinned in release.yml; a release will refuse. The zip's digest is $hash"
+          } elseif ($hash -ne $want) {
+            Write-Host "::error::ffmpeg-prebuilt.zip is not the pinned file: SHA-256 $hash, release.yml says $want"
+            exit 1
+          }
           7z x ffmpeg-prebuilt.zip -oC:\ffmpeg-prebuilt
+          if ($LASTEXITCODE -ne 0) { throw "could not unpack ffmpeg-prebuilt.zip" }
           echo "FFMPEG_DIR=C:\ffmpeg-prebuilt\x64-windows-static-md" >> $env:GITHUB_ENV
 
       # No sccache: the Rust cache above restores `target/` from the
@@ -371,7 +431,7 @@ jobs:
         run: echo "version=$(awk -F'"' '/^version = "/ { print $2; exit }' Cargo.toml)" >> "$GITHUB_OUTPUT"
 
       - name: Package zip (Linux/macOS)
-        if: runner.os != 'Windows' && github.event_name == 'release'
+        if: runner.os != 'Windows' && env.PUBLISH_TAG != ''
         run: |
           mkdir -p staging
           cp target/${{ matrix.target }}/deploy/baucord staging/baucord
@@ -380,7 +440,7 @@ jobs:
           zip -r ../baucord-v${{ steps.version.outputs.version }}-${{ matrix.suffix }}.zip baucord dedicated-server
 
       - name: Package zip (Windows)
-        if: runner.os == 'Windows' && github.event_name == 'release'
+        if: runner.os == 'Windows' && env.PUBLISH_TAG != ''
         shell: pwsh
         run: |
           mkdir staging
@@ -390,32 +450,189 @@ jobs:
           Compress-Archive -Path baucord.exe,dedicated-server.exe -DestinationPath ..\baucord-v${{ steps.version.outputs.version }}-${{ matrix.suffix }}.zip
 
       - name: Upload zip artifact
-        if: github.event_name == 'release'
+        if: env.PUBLISH_TAG != ''
         uses: actions/upload-artifact@v7
         with:
           name: baucord-v${{ steps.version.outputs.version }}-${{ matrix.suffix }}
           path: baucord-v${{ steps.version.outputs.version }}-${{ matrix.suffix }}.zip
 
-  release:
+      # The macOS binary on every run, for the macos-app job's universal
+      # baucord.app (macos/README.md). Artifacts drop the executable bit;
+      # macos/package.sh sets it again.
+      - name: Upload binary for the app bundle (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-bin-${{ matrix.suffix }}
+          path: target/${{ matrix.target }}/deploy/baucord
+          retention-days: 7
+          if-no-files-found: error
+
+  # baucord.app: one universal bundle from the two macOS builds, in a
+  # disk image to drag into Applications, and zipped for the updater of
+  # an installed copy (macos/package.sh, macos/README.md). With the
+  # Developer ID secrets it is signed, and on a release also notarized;
+  # without them it is signed ad hoc. On a push the result is a workflow
+  # artifact to try; on a release the release job publishes it.
+  # Secrets (optional): MACOS_DEVELOPER_ID_P12_BASE64,
+  #   MACOS_DEVELOPER_ID_PASSWORD; notarizing uses the App Store Connect
+  #   API key of ios-release.yml (ASC_API_KEY_P8_BASE64, ASC_API_KEY_ID,
+  #   ASC_API_ISSUER_ID).
+  macos-app:
     needs: build
-    if: github.event_name == 'release'
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      DEVID_P12_B64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
+      # Notarized on a release only: it waits on Apple, and a push's
+      # build is for trying, not for handing out.
+      NOTARIZE: ${{ (github.event_name == 'release' || startsWith(github.event.inputs.tag, 'v')) && '1' || '' }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
+
+      - name: Download the macOS binaries
+        uses: actions/download-artifact@v8
+        with:
+          path: bins
+          pattern: macos-bin-*
+
+      - name: Read version
+        id: version
+        run: echo "version=$(awk -F'"' '/^version = "/ { print $2; exit }' Cargo.toml)" >> "$GITHUB_OUTPUT"
+
+      - name: Install the Developer ID certificate
+        if: ${{ env.DEVID_P12_B64 != '' }}
+        env:
+          P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/baucord-devid.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
+          echo "$DEVID_P12_B64" | base64 --decode > "$RUNNER_TEMP/devid.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/devid.p12" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/devid.p12"
+          # The identity by its SHA-1: a name could match more than one.
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | awk '/"Developer ID Application: / { print $2; exit }')"
+          if [ -z "$IDENTITY" ]; then
+            security find-identity -v -p codesigning "$KEYCHAIN"
+            echo "::error::the .p12 holds no \"Developer ID Application\" identity with its key — export the certificate *with* its private key (Keychain Access → My Certificates)"
+            exit 1
+          fi
+          security find-identity -v -p codesigning "$KEYCHAIN" | grep "$IDENTITY"
+          {
+            echo "KEYCHAIN=$KEYCHAIN"
+            echo "SIGN_IDENTITY=$IDENTITY"
+          } >> "$GITHUB_ENV"
+
+      - name: Install the App Store Connect API key
+        if: ${{ env.NOTARIZE == '1' && env.SIGN_IDENTITY != '' }}
+        env:
+          ASC_KEY_B64: ${{ secrets.ASC_API_KEY_P8_BASE64 }}
+          ASC_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          for NAME in ASC_KEY_B64 ASC_KEY_ID ASC_ISSUER_ID; do
+            if [ -z "${!NAME}" ]; then
+              echo "::error::notarizing needs the App Store Connect API key: ASC_API_KEY_P8_BASE64, ASC_API_KEY_ID and ASC_API_ISSUER_ID (ios/README.md §3c)"
+              exit 1
+            fi
+          done
+          KEY="$RUNNER_TEMP/AuthKey_${ASC_KEY_ID}.p8"
+          (umask 077 && echo "$ASC_KEY_B64" | base64 --decode > "$KEY")
+          {
+            echo "ASC_KEY_PATH=$KEY"
+            echo "ASC_KEY_ID=$ASC_KEY_ID"
+            echo "ASC_ISSUER_ID=$ASC_ISSUER_ID"
+          } >> "$GITHUB_ENV"
+
+      - name: Build baucord.app, the disk image and the updater's zip
+        run: |
+          set -euo pipefail
+          # Unsigned builds are not notarized: there is nothing to vouch for.
+          if [ -z "${SIGN_IDENTITY:-}" ]; then
+            NOTARIZE=""
+          fi
+          NOTARIZE="$NOTARIZE" bash macos/package.sh "${{ steps.version.outputs.version }}" \
+            bins/macos-bin-macos-arm64/baucord bins/macos-bin-macos-intel/baucord out
+
+      - name: Upload the disk image and zip (release)
+        if: env.PUBLISH_TAG != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: baucord-v${{ steps.version.outputs.version }}-macos
+          path: |
+            out/baucord-v${{ steps.version.outputs.version }}-macos.dmg
+            out/baucord-v${{ steps.version.outputs.version }}-macos.zip
+          if-no-files-found: error
+
+      - name: Upload the disk image to try (push, dry run)
+        if: env.PUBLISH_TAG == ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-dmg-${{ github.sha }}
+          path: out/baucord-v${{ steps.version.outputs.version }}-macos.dmg
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Delete the keychain and the key
+        if: always()
+        run: |
+          if [ -n "${KEYCHAIN:-}" ]; then security delete-keychain "$KEYCHAIN" || true; fi
+          if [ -n "${ASC_KEY_PATH:-}" ]; then rm -f "$ASC_KEY_PATH"; fi
+
+  release:
+    # macos-app too: its disk image and the updater's zip go up with the
+    # rest, before the version file names them. And the checks: a build
+    # that passed them is the only one handed out (P1-4).
+    needs: [build, macos-app, check]
+    if: ${{ github.event_name == 'release' || startsWith(github.event.inputs.tag, 'v') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - name: Check out source
         uses: actions/checkout@v7
-      - name: Download build zips
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
+      # A manual run publishes to a release that exists: attaching to a
+      # tag without one would create a release unannounced. (The release
+      # event is its own proof.)
+      - name: The release exists, and is it a pre-release?
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ env.PUBLISH_TAG }}
+        run: |
+          set -euo pipefail
+          if ! PRERELEASE=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq '.isPrerelease'); then
+            echo "::error::no release $TAG on GitHub — create the release for the tag first, then run this again"
+            exit 1
+          fi
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+      - name: Download build zips and the macOS disk image
         uses: actions/download-artifact@v8
         with:
           path: artifacts
           pattern: baucord-v*
           merge-multiple: true
-      - name: Attach zips to release
+      - name: Attach zips and disk image to release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ github.event.release.tag_name }}
-          files: artifacts/*.zip
+          tag_name: ${{ env.PUBLISH_TAG }}
+          files: |
+            artifacts/*.zip
+            artifacts/*.dmg
       # The version file tells every client what to update to, and the
       # site which version to offer: only the newest stable release
       # writes it, never a backport or a rebuilt older tag (review
@@ -424,8 +641,8 @@ jobs:
         id: newest
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name }}
-          PRERELEASE: ${{ github.event.release.prerelease }}
+          TAG: ${{ env.PUBLISH_TAG }}
+          PRERELEASE: ${{ steps.release.outputs.prerelease }}
         run: |
           set -euo pipefail
           NEWEST=$(gh api "repos/$GITHUB_REPOSITORY/tags" --paginate --jq '.[].name' \
@@ -440,7 +657,7 @@ jobs:
         run: |
           VERSION=$(awk -F'"' '/^version = "/ { print $2; exit }' Cargo.toml)
           mkdir -p r2-upload r2-version
-          cp artifacts/*.zip r2-upload/
+          cp artifacts/*.zip artifacts/*.dmg r2-upload/
           echo "$VERSION" > r2-version/version
       - name: Upload zips to R2
         uses: jakejarvis/s3-sync-action@v0.5.1

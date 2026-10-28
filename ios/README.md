@@ -138,9 +138,9 @@ IDs & Profiles):
 5. Repository → Settings → Secrets and variables → Actions → *New
    repository secret*, three times:
    ```sh
-   base64 -i baucord-distribution.p12 | pbcopy        # → IOS_CERTIFICATE_P12_BASE64
+   base64 < baucord-distribution.p12 | tr -d "\n" | pbcopy        # → IOS_CERTIFICATE_P12_BASE64
                                                       #   IOS_CERTIFICATE_PASSWORD: the .p12's password
-   base64 -i baucord_Ad_Hoc.mobileprovision | pbcopy  # → IOS_PROFILE_BASE64
+   base64 < baucord_Ad_Hoc.mobileprovision | tr -d "\n" | pbcopy  # → IOS_PROFILE_BASE64
    ```
 
 Then publish a release (`v1.2.0`, the crates' version — the workflow
@@ -160,8 +160,74 @@ phone says it is, turn it on as in 3a, step 4):
   onto the phone's tile.
 
 A phone that is not in the profile refuses it ("unable to install");
-add its UDID (steps 2 and 4). To give it to people without USB, the
-next step is TestFlight (spec M5).
+add its UDID (steps 2 and 4). To give it to people without USB or
+UDIDs: TestFlight, §3c.
+
+### 3c. TestFlight (the same workflow)
+
+With an App Store profile and an App Store Connect API key in the
+secrets as well, the workflow also uploads the build to App Store
+Connect, and it appears in TestFlight once Apple has processed it
+(IOS-SPEC D67). Testers install the TestFlight app and need neither a
+UDID nor a cable; a build lasts 90 days. The Ad Hoc `.ipa` of §3b goes
+on being made while its profile is there.
+
+Once, besides §3b's app id (step 1) and Apple Distribution `.p12`
+(step 3), which serve both:
+
+1. **App Store Connect** (appstoreconnect.apple.com) → Apps → **+** →
+   New App: iOS, a name (it has to be free on the App Store), the
+   language, the bundle id from step 1, any SKU.
+2. developer.apple.com → Profiles → **+** → *App Store Connect* (under
+   Distribution) → the app id → the certificate → download the
+   `.mobileprovision`.
+3. App Store Connect → Users and Access → Integrations → **App Store
+   Connect API** → Team Keys → **+** → access *App Manager* → download
+   the `.p8` (Apple lets you download it once). Note its Key ID and the
+   Issuer ID shown above the list.
+4. Four more repository secrets:
+   ```sh
+   base64 < baucord_App_Store.mobileprovision | tr -d "\n" | pbcopy  # → IOS_APPSTORE_PROFILE_BASE64
+   base64 < AuthKey_XXXXXXXXXX.p8 | tr -d "\n" | pbcopy             # → ASC_API_KEY_P8_BASE64
+                                                       #   ASC_API_KEY_ID: the key's ID
+                                                       #   ASC_API_ISSUER_ID: the Issuer ID
+   ```
+
+Then Actions → ios-release → Run workflow → tick **testflight**; a
+published release uploads by itself. Checks before the upload: the
+profiles' kinds, app id and team, and the privacy manifest against what
+the binary calls (a missing declaration fails the run with the API's
+name, see `Resources/PrivacyInfo.xcprivacy`).
+
+After the upload, in App Store Connect → the app → **TestFlight**:
+
+- The build shows *Processing* for a while, then *Ready to Submit*.
+  The encryption question is answered in the Info.plist
+  (`ITSAppUsesNonExemptEncryption`, IOS-SPEC D68): standard algorithms,
+  not on the App Store in France. Before France is ever added to the
+  app's countries, that answer has to change (D68).
+- **Internal testing**: up to 100 people with a role on the App Store
+  Connect team; no review. Someone outside the team can be one too:
+  invite them under Users and Access with a low role (Customer
+  Support), limited to this app, then add them to the internal group.
+- **External testing** (anyone with an email or a public link): Beta App
+  Review first, which wants a description, a feedback email, a privacy
+  policy URL (`web/privacy.html`'s page) and, in the review notes, a
+  server and an invite code to get in with. The lobby's background
+  audio is an open question for that review (PRODUCTION-PLAN §6, 2).
+  An external group sees no build until the review approves one (its
+  testers show *No Builds Available*); submit from the group's Builds
+  tab. The first build of a version is reviewed, usually within a day;
+  later builds of it mostly are not. Each build's **What to Test** is
+  what testers read in the TestFlight app (what is new, what to try,
+  known limits, how to send a log); the reviewer's way in belongs in
+  the review notes, which testers never see.
+
+The build number is the workflow's run number, which only grows, and
+App Store Connect wants each upload of a version to carry a higher one.
+Upload from CI only: a build sent from a Mac would carry `run.sh`'s
+commit count, likely higher, and the next CI uploads of that version
+would be refused.
 
 ## 4. Logs
 

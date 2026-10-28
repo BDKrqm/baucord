@@ -35,7 +35,12 @@ pub fn prefix(len: usize) -> [u8; PREFIX_BYTES] {
 pub enum DecodeError {
     /// A prefix announced more than the lane's budget — the peer is
     /// misbehaving; the caller stops the stream.
-    Oversize { announced: usize, max: usize },
+    Oversize {
+        /// The length the prefix announced.
+        announced: usize,
+        /// The lane's budget it exceeds.
+        max: usize,
+    },
 }
 
 impl std::fmt::Display for DecodeError {

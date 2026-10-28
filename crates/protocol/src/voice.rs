@@ -70,7 +70,10 @@ pub const VOICE_MTU_BUDGET: usize = VOICE_HEADER_SIZE + VOICE_MAX_FRAME_SIZE;
 /// Parsed voice packet header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VoiceHeader {
+    /// The header version; parsers refuse any other.
     pub version: u8,
+    /// Bit 0 (`VOICE_FLAG_RED`): the payload is a redundant bundle. Other
+    /// bits are reserved and zero.
     pub flags: u8,
     /// Monotonic per-sender packet sequence number.
     pub seq: u32,

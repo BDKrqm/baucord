@@ -290,14 +290,14 @@ fn resolve(
     what: &str,
     selection: Option<&str>,
     present: &[String],
-    default: Option<&String>,
+    default: Option<&str>,
 ) -> Result<String, Box<dyn Error>> {
     match selection {
         Some(name) if present.iter().any(|p| p == name) => Ok(name.to_string()),
         Some(name) => Err(format!("{what} '{name}' is not there").into()),
         None => default
-            .filter(|d| present.contains(d))
-            .cloned()
+            .filter(|d| present.iter().any(|p| p == d))
+            .map(str::to_string)
             .ok_or_else(|| format!("no default {what}").into()),
     }
 }
@@ -314,9 +314,9 @@ pub(crate) fn open_playback(
 ) -> Option<Result<Side, Box<dyn Error>>> {
     with(|w| {
         let default = if comms {
-            w.comms_output.as_ref().or(w.default_output.as_ref())
+            w.comms_output.as_deref().or(w.default_output.as_deref())
         } else {
-            w.default_output.as_ref()
+            w.default_output.as_deref()
         };
         let opened = resolve("output", selection, &w.outputs, default);
         if opened.is_ok() || w.traits.reference {
@@ -355,9 +355,9 @@ pub(crate) fn open_capture(
 ) -> Option<Result<Side, Box<dyn Error>>> {
     with(|w| {
         let default = if comms {
-            w.comms_input.as_ref().or(w.default_input.as_ref())
+            w.comms_input.as_deref().or(w.default_input.as_deref())
         } else {
-            w.default_input.as_ref()
+            w.default_input.as_deref()
         };
         let opened = resolve("microphone", selection, &w.inputs, default);
         if opened.is_ok() || w.traits.reference {
@@ -425,6 +425,11 @@ impl Clock {
     /// The clock `by` later.
     pub(crate) fn step(&mut self, by: Duration) -> Instant {
         self.0 += by;
+        self.0
+    }
+
+    /// The last tick's time: what the engine's owner calls now.
+    pub(crate) fn now(&self) -> Instant {
         self.0
     }
 }

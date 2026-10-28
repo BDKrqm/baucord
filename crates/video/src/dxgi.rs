@@ -300,11 +300,15 @@ fn worker_loop(
     // Belt-and-braces COM init for DXGI interop from a bare thread.
     // Cheap, and one plausible mechanism for why worker-created
     // duplications behaved worse than consumer-created ones.
+    // SAFETY: a plain call, no pointers cross; COM takes one initialization
+    // per thread and this thread is the worker's own.
     let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
 
     // Persistent staging texture, recreated only when the source
     // dimensions change (mode switches).
     let mut staging: Option<(ID3D11Texture2D, u32, u32)> = None;
+    // SAFETY: `device` is a live D3D11 device this thread owns for the loop's
+    // lifetime.
     let mut halver = unsafe { Halver::new(&device) };
     let mut pointer = Pointer::default();
 
@@ -321,6 +325,8 @@ fn worker_loop(
         };
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource: Option<IDXGIResource> = None;
+        // SAFETY: `duplication` is live for the loop; `info` and `resource`
+        // are locals the call fills before it returns.
         let acquired =
             unsafe { duplication.AcquireNextFrame(timeout, &raw mut info, &raw mut resource) };
 
@@ -328,6 +334,8 @@ fn worker_loop(
             Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => {
                 // No screen change within the timeout — normal on a
                 // static desktop.
+                // SAFETY: the duplication is live; nothing was acquired on a
+                // timeout, and releasing then is allowed.
                 let _ = unsafe { duplication.ReleaseFrame() };
             }
             Err(e) => {
@@ -336,6 +344,8 @@ fn worker_loop(
                 // exit — the consumer recreates the whole duplicator on
                 // its own thread, where creation demonstrably works
                 // even while a fullscreen app owns the output.
+                // SAFETY: the duplication is live; whatever this pass
+                // acquired is released before the loop ends.
                 let _ = unsafe { duplication.ReleaseFrame() };
                 shared.lost(e.to_string());
                 break 'outer;
@@ -343,6 +353,9 @@ fn worker_loop(
             Ok(()) => {
                 // The pointer first: its shape can only be asked for
                 // while the frame is held.
+                // SAFETY: the frame is held (acquired above, not yet
+                // released), which is what reading its pointer shape
+                // requires.
                 unsafe { pointer.note(&duplication, &info) };
 
                 // The frame present at duplication creation reports
@@ -351,6 +364,8 @@ fn worker_loop(
                 // in which only the pointer moved: nothing to read from
                 // the desktop, and the pointer's frame is made below.
                 if info.LastPresentTime == 0 {
+                    // SAFETY: the frame this pass acquired is released; the
+                    // duplication is live.
                     let _ = unsafe { duplication.ReleaseFrame() };
                     pointer_moved(&shared, staging.is_some(), &mut pointer);
                     continue;
@@ -369,10 +384,14 @@ fn worker_loop(
                 // readbacks). See FRAME_QUEUE_DEPTH for why the queue
                 // is 2 deep rather than a single slot.
                 if shared.slot.lock().unwrap().len() >= FRAME_QUEUE_DEPTH {
+                    // SAFETY: as above: the frame this pass acquired is
+                    // released unread.
                     let _ = unsafe { duplication.ReleaseFrame() };
                     continue;
                 }
 
+                // SAFETY: the frame is held and `resource` is its texture;
+                // every handle passed is live for the call.
                 let grabbed = unsafe {
                     grab_frame(
                         &device,
@@ -395,6 +414,8 @@ fn worker_loop(
                     }
                     Ok(None) => {}
                     Err(GrabError::UnsupportedFormat(fmt)) => {
+                        // SAFETY: the frame this pass acquired is released;
+                        // the duplication is live.
                         let _ = unsafe { duplication.ReleaseFrame() };
                         shared.fail(format!(
                             "desktop pixel format {fmt} is not BGRA8 — HDR desktops are not \
@@ -406,6 +427,8 @@ fn worker_loop(
                     Err(GrabError::Windows(e)) => {
                         // Treat like a lost duplication: report + exit
                         // so the consumer recreates us.
+                        // SAFETY: the frame this pass acquired is released;
+                        // the duplication is live.
                         let _ = unsafe { duplication.ReleaseFrame() };
                         shared.lost(format!("frame readback failed: {e}"));
                         break 'outer;
@@ -421,6 +444,8 @@ fn worker_loop(
     }
 
     if com.is_ok() {
+        // SAFETY: paired with the `CoInitializeEx` that succeeded above, on
+        // the same thread.
         unsafe { CoUninitialize() };
     }
 }
@@ -486,6 +511,8 @@ impl Pointer {
         self.scratch.resize(info.PointerShapeBufferSize as usize, 0);
         let mut needed = 0u32;
         let mut described = DXGI_OUTDUPL_POINTER_SHAPE_INFO::default();
+        // SAFETY: the frame is held (the caller's contract); `scratch` holds
+        // `PointerShapeBufferSize` bytes and the two out-params are locals.
         let read = unsafe {
             duplication.GetFramePointerShape(
                 info.PointerShapeBufferSize,
@@ -625,6 +652,7 @@ struct Halver {
 
 impl Halver {
     unsafe fn new(device: &ID3D11Device) -> Self {
+        // SAFETY: a query on a live device; no pointers cross.
         let support = unsafe { device.CheckFormatSupport(DXGI_FORMAT_B8G8R8A8_UNORM) }.unwrap_or(0);
         let usable = support & D3D11_FORMAT_SUPPORT_MIP_AUTOGEN.0 as u32 != 0;
         if !usable {
@@ -654,6 +682,7 @@ impl Halver {
             return true;
         }
         self.target = None;
+        // SAFETY: `device` is live for the call (the caller's contract).
         match unsafe { Self::make(device, width, height) } {
             Ok(target) => {
                 log::info!(
@@ -693,10 +722,14 @@ impl Halver {
             MiscFlags: D3D11_RESOURCE_MISC_GENERATE_MIPS.0 as u32,
         };
         let mut tex = None;
+        // SAFETY: `desc` is a complete descriptor and `tex` a local the call
+        // fills.
         unsafe { device.CreateTexture2D(&raw const desc, None, Some(&raw mut tex)) }?;
         let tex =
             tex.ok_or_else(|| windows::core::Error::from_hresult(windows::core::HRESULT(-1)))?;
         let mut view = None;
+        // SAFETY: `tex` is the texture just created; `view` is a local the
+        // call fills.
         unsafe { device.CreateShaderResourceView(&tex, None, Some(&raw mut view)) }?;
         let view =
             view.ok_or_else(|| windows::core::Error::from_hresult(windows::core::HRESULT(-1)))?;
@@ -716,6 +749,9 @@ impl Halver {
             )));
         };
         let tex: ID3D11Resource = tex.cast()?;
+        // SAFETY: every resource is live for the call; the copies read whole
+        // subresources, and `view` was made from `tex` with mip generation
+        // enabled.
         unsafe {
             context.CopySubresourceRegion(Some(&tex), 0, 0, 0, 0, Some(source), 0, None);
             context.GenerateMips(view);
@@ -748,16 +784,21 @@ unsafe fn grab_frame(
     quality: Quality,
 ) -> Result<Option<CapturedFrame>, GrabError> {
     let Some(resource) = resource else {
+        // SAFETY: nothing to read: the frame this pass acquired is released;
+        // the duplication is live.
         let _ = unsafe { duplication.ReleaseFrame() };
         return Ok(None);
     };
     let source: ID3D11Texture2D = resource.cast()?;
     let mut desc = D3D11_TEXTURE2D_DESC::default();
+    // SAFETY: `source` is the frame's texture, alive while the frame is held;
+    // `desc` is a local the call fills.
     unsafe { source.GetDesc(&raw mut desc) };
 
     if desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM {
         return Err(GrabError::UnsupportedFormat(desc.Format.0));
     }
+    // SAFETY: `device` is live for the call (the caller's contract).
     let halved = unsafe { halver.ready(device, desc.Width, desc.Height, quality) };
     // The second level of a texture is half the first, rounded down.
     let (width, height) = if halved {
@@ -782,6 +823,8 @@ unsafe fn grab_frame(
         staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
 
         let mut tex = None;
+        // SAFETY: `staging_desc` is a complete descriptor and `tex` a local
+        // the call fills.
         unsafe { device.CreateTexture2D(&raw const staging_desc, None, Some(&raw mut tex)) }?;
         let tex = tex.ok_or_else(|| {
             GrabError::Windows(windows::core::Error::from_hresult(windows::core::HRESULT(
@@ -796,6 +839,8 @@ unsafe fn grab_frame(
     let staging_res: ID3D11Resource = staging_tex.cast()?;
     let source_res: ID3D11Resource = source.cast()?;
     if halved {
+        // SAFETY: the three resources are live, and the frame is still held,
+        // so `source` is readable.
         unsafe { halver.halve(context, &source_res, &staging_res) }?;
     } else {
         let region = D3D11_BOX {
@@ -806,6 +851,8 @@ unsafe fn grab_frame(
             front: 0,
             back: 1,
         };
+        // SAFETY: both resources are live and `region` lies within both
+        // textures (the staging one was made at `width` x `height`).
         unsafe {
             context.CopySubresourceRegion(
                 Some(&staging_res),
@@ -821,8 +868,12 @@ unsafe fn grab_frame(
     }
 
     // GPU copy is queued — the duplication frame is no longer needed.
+    // SAFETY: the copy is queued; the frame this pass acquired is released;
+    // the duplication is live.
     let _ = unsafe { duplication.ReleaseFrame() };
 
+    // SAFETY: `staging` is the texture the copy was queued into, on this
+    // `context`.
     let mut frame = unsafe { read_staging(context, staging) }?;
     frame.halved = halved;
     Ok(Some(frame))
@@ -839,6 +890,8 @@ unsafe fn read_staging(
     let staging_res: ID3D11Resource = staging_tex.cast()?;
 
     let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+    // SAFETY: the staging resource is live and was made with CPU read access;
+    // `mapped` is a local the call fills.
     unsafe {
         context.Map(
             Some(&staging_res),
@@ -857,12 +910,16 @@ unsafe fn read_staging(
     let mut data = crate::pool::take(row_bytes * height as usize);
     let src_ptr = mapped.pData as *const u8;
     for row in 0..height as usize {
+        // SAFETY: the map succeeded: `pData` points at `height` rows of
+        // `RowPitch` bytes, each at least `row_bytes` long, readable until
+        // `Unmap`.
         let src = unsafe {
             std::slice::from_raw_parts(src_ptr.add(row * mapped.RowPitch as usize), row_bytes)
         };
         data.extend_from_slice(src);
     }
 
+    // SAFETY: pairs with the `Map` above, on the same subresource.
     unsafe { context.Unmap(Some(&staging_res), 0) };
 
     Ok(CapturedFrame {
@@ -888,12 +945,17 @@ fn hmonitor_at(monitor_index: usize) -> Result<isize, CaptureError> {
         _rect: *mut RECT,
         state: LPARAM,
     ) -> BOOL {
+        // SAFETY: `state` is the `&mut list` handed to `EnumDisplayMonitors`
+        // below, which calls this on the same thread while `list` is lent to
+        // it.
         let list = unsafe { &mut *(state.0 as *mut Vec<isize>) };
         list.push(h_monitor.0 as isize);
         BOOL::from(true)
     }
 
     let mut list: Vec<isize> = Vec::new();
+    // SAFETY: `enum_proc` has the callback's signature and touches only
+    // `list`, which outlives the call.
     unsafe {
         EnumDisplayMonitors(None, None, Some(enum_proc), LPARAM(&raw mut list as isize))
             .ok()
@@ -914,6 +976,9 @@ fn open_duplication(
     h_monitor_raw: isize,
 ) -> Result<(ID3D11Device, ID3D11DeviceContext, IDXGIOutputDuplication), CaptureError> {
     let werr = |what: &str, e: windows::core::Error| CaptureError::Capture(format!("{what}: {e}"));
+    // SAFETY: a creation sequence of COM calls on handles this function owns;
+    // every out-pointer is a local, and a `None` after a successful call is
+    // treated as an error.
     unsafe {
         // The adapter that drives this monitor. On a machine with two
         // GPUs — a laptop's panel on the integrated one, a second
@@ -956,6 +1021,18 @@ fn open_duplication(
             .GetImmediateContext()
             .map_err(|e| werr("GetImmediateContext", e))?;
         let dxgi_device: IDXGIDevice = device.cast().map_err(|e| werr("cast IDXGIDevice", e))?;
+        // The share asked to go ahead of a game on the GPU
+        // (`crate::gpu_priority`, 1.4.0): this device's work at the
+        // highest thread priority, as OBS and Sunshine set theirs. A
+        // refusal is a hint lost, not a capture lost.
+        if crate::gpu_priority::requested() {
+            match dxgi_device.SetGPUThreadPriority(7) {
+                Ok(()) => log::info!(
+                    "GPU priority: the capture device's thread priority is at the maximum"
+                ),
+                Err(e) => log::debug!("GPU priority: SetGPUThreadPriority refused: {e}"),
+            }
+        }
 
         let output = match found {
             Some((_, output)) => output,
@@ -1004,13 +1081,18 @@ fn open_duplication(
 /// every adapter is asked, not only the default one. `None` when DXGI
 /// lists no such output (or no adapters at all).
 unsafe fn find_output(h_monitor_raw: isize) -> Option<(IDXGIAdapter1, IDXGIOutput)> {
+    // SAFETY: no pointers cross; the factory is a fresh COM object this
+    // function owns.
     let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.ok()?;
     let mut adapter_index = 0u32;
+    // SAFETY: a query on the live factory, at the loop's index.
     while let Ok(adapter) = unsafe { factory.EnumAdapters1(adapter_index) } {
         adapter_index += 1;
         let mut output_index = 0u32;
+        // SAFETY: a query on an adapter the factory just returned.
         while let Ok(output) = unsafe { adapter.EnumOutputs(output_index) } {
             output_index += 1;
+            // SAFETY: a query on an output the adapter just returned.
             let ours = unsafe { output.GetDesc() }
                 .is_ok_and(|desc| desc.Monitor.0 as isize == h_monitor_raw);
             if ours {

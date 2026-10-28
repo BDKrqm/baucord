@@ -19,36 +19,67 @@ on:
   workflow_run:
     workflows: ["Build and Release"]
     types: [completed]
+  # By hand, from main: the site as it stands, naming the version the
+  # version file says (a release whose site deploy was missed).
+  workflow_dispatch:
 
 jobs:
   # A release's deploy names its version on the site: only the newest
   # stable release's, never a backport's or a rebuilt older tag's
-  # (review 2026-10, P2-27). A push to main always deploys.
+  # (review 2026-10, P2-27). A push to main always deploys — and names
+  # the version people can download, not main's Cargo.toml: the commit
+  # that bumps the version rewrites Cargo.lock, which deploys here, and
+  # the site offered files that did not exist yet (review 2026-10-27,
+  # P1-3). The version file release.yml writes last says what is there;
+  # failing that, the newest stable tag. A "Build and Release" started
+  # by hand (a release repeated with *Run workflow*) is read the same
+  # way: its head branch is the branch it was started from, not the
+  # tag, and the version file it may have just written is the truth.
   newest:
     if: >-
-      github.event_name == 'push' ||
-      (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'release' &&
+      github.event_name == 'push' || github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' &&
+      (github.event.workflow_run.event == 'release' || github.event.workflow_run.event == 'workflow_dispatch') &&
       github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     outputs:
       deploy: ${{ steps.check.outputs.deploy }}
+      version: ${{ steps.check.outputs.version }}
     steps:
-      - name: Is this the newest release?
+      - name: Is this the newest release, and which version is downloadable?
         id: check
         env:
           GH_TOKEN: ${{ github.token }}
           # A release run's head branch is its tag.
           TAG: ${{ github.event.workflow_run.head_branch }}
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
         run: |
           set -euo pipefail
-          if [ "$GITHUB_EVENT_NAME" != "workflow_run" ]; then
-            echo "deploy=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
           NEWEST=$(gh api "repos/$GITHUB_REPOSITORY/tags" --paginate --jq '.[].name' \
             | { grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true; } | sort -V | tail -1)
+          if [ "$GITHUB_EVENT_NAME" != "workflow_run" ] || [ "$RUN_EVENT" = "workflow_dispatch" ]; then
+            LIVE=$(curl -fsS --max-time 20 https://baucord.com/version 2>/dev/null | tr -d '[:space:]' || true)
+            if [[ "$LIVE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              VERSION="$LIVE"
+              echo "version $VERSION, from the version file"
+            elif [ -n "$NEWEST" ]; then
+              VERSION="${NEWEST#v}"
+              echo "::warning::no version file at baucord.com/version; the site names the newest tag, $VERSION"
+            else
+              VERSION=""
+              echo "::warning::no version file and no release tag yet; the site names Cargo.toml's version"
+            fi
+            {
+              echo "deploy=true"
+              echo "version=$VERSION"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ "$TAG" = "$NEWEST" ]; then
-            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "deploy=true"
+              echo "version=${TAG#v}"
+            } >> "$GITHUB_OUTPUT"
           else
             echo "deploy=false" >> "$GITHUB_OUTPUT"
             echo "::notice::$TAG is not the newest stable release ($NEWEST): the site stays"
@@ -56,8 +87,9 @@ jobs:
 
   licenses:
     if: >-
-      github.event_name == 'push' ||
-      (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'release' &&
+      github.event_name == 'push' || github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' &&
+      (github.event.workflow_run.event == 'release' || github.event.workflow_run.event == 'workflow_dispatch') &&
       github.event.workflow_run.conclusion == 'success')
     uses: ./.github/workflows/licenses.yml
     with:
@@ -78,8 +110,16 @@ jobs:
           name: licenses
           path: .
       - name: Stamp version into pages
+        env:
+          VERSION: ${{ needs.newest.outputs.version }}
         run: |
-          VERSION=$(awk -F'"' '/^version = "/ { print $2; exit }' Cargo.toml)
+          set -eu
+          # The downloadable version (above); Cargo.toml's only on a site
+          # with no release yet.
+          if [ -z "$VERSION" ]; then
+            VERSION=$(awk -F'"' '/^version = "/ { print $2; exit }' Cargo.toml)
+          fi
+          echo "stamping $VERSION"
           sed -i "s/__VERSION__/$VERSION/g" web/index.html web/i18n/*.json
       - name: Stage hosting guide files
         run: |
@@ -100,7 +140,7 @@ jobs:
       - name: Upload website to R2
         uses: jakejarvis/s3-sync-action@v0.5.1
         with:
-          args: --exclude '*.zip' --exclude '*.apk' --exclude 'version' --exclude 'deploy/*'
+          args: --exclude '*.zip' --exclude '*.dmg' --exclude '*.apk' --exclude 'version' --exclude 'deploy/*'
         env:
           AWS_S3_BUCKET: baucord
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}

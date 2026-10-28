@@ -242,7 +242,7 @@ impl ChatServer {
                     fail(self, DmFailReason::Store);
                     return;
                 }
-                let username = self.get_username(client);
+                let username = self.username_of(client);
                 info!("[{username}] posted {}", fallback_text(&attachment));
                 self.stats.messages_count += 1;
                 self.note_activity(client);
@@ -306,7 +306,7 @@ impl ChatServer {
                     ts,
                     user_id: from,
                     body: String::new(),
-                    name: self.get_username(client),
+                    name: self.username_of(client),
                     edited: false,
                     blob_id: Some(blob_id),
                 };

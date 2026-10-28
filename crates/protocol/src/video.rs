@@ -68,12 +68,20 @@ const FLAG_KEYFRAME: u8 = 0b0000_0001;
 /// Parsed chunk header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VideoHeader {
+    /// The header version; parsers refuse any other.
     pub version: u8,
+    /// Bit 0: this chunk belongs to a keyframe. Other bits are reserved and
+    /// zero.
     pub flags: u8,
+    /// This chunk's index within its frame, from 0.
     pub chunk_idx: u8,
+    /// How many chunks the frame has.
     pub chunk_count: u8,
+    /// The frame's sequence number, per sender.
     pub seq: u32,
+    /// The frame's width in pixels.
     pub width: u16,
+    /// The frame's height in pixels.
     pub height: u16,
     /// Sender capture time, milliseconds on the sender's clock. Wraps
     /// every ~49 days; consumers compare with wrapping arithmetic.
@@ -81,6 +89,7 @@ pub struct VideoHeader {
 }
 
 impl VideoHeader {
+    /// Whether this chunk belongs to a keyframe (the `FLAG_KEYFRAME` bit).
     #[must_use]
     pub fn is_keyframe(&self) -> bool {
         self.flags & FLAG_KEYFRAME != 0
@@ -92,12 +101,17 @@ impl VideoHeader {
 pub struct ReassembledFrame {
     /// Authenticated sender (from the relay envelope).
     pub sender_id: u64,
+    /// The frame's sequence number, per sender.
     pub seq: u32,
+    /// Whether it is a keyframe (decodable on its own).
     pub is_keyframe: bool,
+    /// The frame's width in pixels.
     pub width: u16,
+    /// The frame's height in pixels.
     pub height: u16,
     /// See [`VideoHeader::timestamp_ms`].
     pub timestamp_ms: u32,
+    /// The encoded frame, every chunk's payload in order.
     pub data: Vec<u8>,
 }
 
@@ -227,6 +241,7 @@ impl Default for VideoReassembler {
 }
 
 impl VideoReassembler {
+    /// An empty reassembler: no sender, no partial frame.
     #[must_use]
     pub fn new() -> Self {
         Self {

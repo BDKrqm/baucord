@@ -1135,6 +1135,7 @@ impl NetworkClient {
         client_key: Arc<ClientKey>,
         portable: bool,
     ) -> Result<Self, String> {
+        forget_hidden_streams();
         let budget = Budget::client();
         let bind: SocketAddr = if server_addr.is_ipv4() {
             "0.0.0.0:0".parse().expect("literal")
@@ -1897,9 +1898,12 @@ impl NetworkClient {
                 });
             }
             ServerMessage::ScreenShareStopped { client_id } => {
-                // Forget any partial frames from that stream.
+                // Forget any partial frames from that stream, and that
+                // its viewer was out of sight: the next share with this
+                // id starts seen (P1-2).
                 self.reassembler.forget_sender(client_id);
                 self.keyframe_requests_sent.remove(&client_id);
+                set_stream_hidden(client_id, false);
                 self.message_queue
                     .push(NetworkMessage::ScreenShareStopped { client_id });
             }
@@ -2923,6 +2927,9 @@ impl NetworkClient {
 
     pub fn send_unsubscribe_screen(&mut self, now: Instant, target_id: u64) {
         self.reassembler.forget_sender(target_id);
+        // Not watched: not hidden either, or watching again later
+        // starts black (P1-2).
+        set_stream_hidden(target_id, false);
         self.send_control(now, &ClientMessage::UnsubscribeScreen { target_id });
     }
 
@@ -3397,6 +3404,17 @@ fn stream_hidden(client_id: u64) -> bool {
         && HIDDEN_STREAMS
             .lock()
             .is_ok_and(|list| list.contains(&client_id))
+}
+
+/// A new session: nothing of the old one's viewers is hidden. The list
+/// is process-wide, and a sharer's next stream reuses their `client_id`
+/// — minimized once, their picture was dropped here for the rest of the
+/// run (review 2026-10-27, P1-2).
+fn forget_hidden_streams() {
+    if let Ok(mut list) = HIDDEN_STREAMS.lock() {
+        list.clear();
+    }
+    ANY_HIDDEN.store(false, Ordering::Relaxed);
 }
 
 /// Streams whose sound this thread hands to the decoder itself: it went

@@ -695,15 +695,21 @@
           <p class="dl-meta" x-show="!ready" x-cloak x-i18n="dl-meta-generic">
             Version __VERSION__ for Windows, macOS, Linux and Android.
           </p>
+          <p class="dl-mobile" x-show="macos" x-cloak x-i18n="dl-macos-hint">
+            For Apple Silicon and Intel Macs, macOS 11 or later. Open the disk
+            image and drag baucord into Applications. It updates itself from
+            there, and keeps your servers and identity.
+          </p>
           <p class="dl-mobile" x-show="android" x-cloak x-i18n="dl-android-hint">
             Android 10 or later. Open the downloaded file to install it;
             Android asks once to allow installs from your browser. To update,
             install the new version over the old one: your servers and
             identity stay.
           </p>
-          <p class="dl-mobile" x-show="mobile" x-cloak x-i18n="dl-ios">
-            There is no iPhone version to download yet. Open this page on a
-            computer or an Android phone.
+          <p class="dl-mobile" x-show="mobile" x-cloak x-i18n.html="dl-ios">
+            The iPhone app is in beta on TestFlight: install Apple's
+            TestFlight app, then
+            <a href="https://testflight.apple.com/join/9aU3gcTy">join the baucord beta</a>.
           </p>
         </div>
       </div>
@@ -953,7 +959,9 @@
           </div>
           <p class="host-note" x-i18n.html="host-note">
             Docker on a Linux host, configuration, backups and updates: it is
-            all in the <a href="deploy.html">hosting guide</a>.
+            all in the <a href="deploy.html">hosting guide</a>. A music bot,
+            or a bot of your own in thirty lines of Python: the
+            <a href="bots.html">bots guide</a>.
           </p>
         </div>
       </section>
@@ -1007,25 +1015,13 @@
                 </td>
               </tr>
               <tr>
-                <td><strong>macOS</strong> (Apple Silicon)</td>
-                <td class="file">baucord-v__VERSION__-macos-arm64.zip</td>
+                <td><strong>macOS</strong> (Apple Silicon and Intel)</td>
+                <td class="file">baucord-v__VERSION__-macos.dmg</td>
                 <td></td>
                 <td>
                   <a
                     class="btn solid"
-                    href="baucord-v__VERSION__-macos-arm64.zip"
-                    >Download</a
-                  >
-                </td>
-              </tr>
-              <tr>
-                <td><strong>macOS</strong> (Intel)</td>
-                <td class="file">baucord-v__VERSION__-macos-intel.zip</td>
-                <td></td>
-                <td>
-                  <a
-                    class="btn solid"
-                    href="baucord-v__VERSION__-macos-intel.zip"
+                    href="baucord-v__VERSION__-macos.dmg"
                     >Download</a
                   >
                 </td>
@@ -1058,7 +1054,8 @@
         <p class="dl-after" x-i18n.html="dl-after">
           Free and open source. The desktop app checks for updates on start and
           replaces itself in place; the server is updated by unzipping the new
-          one over it; on Android, install the new APK over the old one. Older
+          one over it; on Android, install the new APK over the old one. On
+          iPhone, <a href="https://testflight.apple.com/join/9aU3gcTy">join the beta on TestFlight</a>. Older
           versions and checksums are on the
           <a href="https://github.com/mpwsh/baucord/releases">releases page</a>.
         </p>
@@ -1223,16 +1220,17 @@
       // Downloads. One list of builds, shared by the hero control and the
       // table. The hero picks the visitor's platform:
       //   Windows / Linux  -> from the user agent
-      //   macOS            -> Chromium reports the CPU through UA client
-      //                       hints; Safari doesn't, so we look at the WebGL
-      //                       renderer string (Intel/AMD => Intel Mac) and
-      //                       default to Apple Silicon otherwise.
+      //   macOS            -> the disk image: one universal baucord.app
+      //                       for Apple Silicon and Intel (macos/README.md),
+      //                       with a drag-to-Applications hint
       //   Android          -> the APK (arm64; every Android 10+ phone that
       //                       is not 32-bit-only), with an install hint
-      //   iPhone/iPad      -> a "not yet" note, no button
+      //   iPhone/iPad      -> the TestFlight beta's public link, no button
       // Sizes come from a HEAD request to each file (same origin), so the
       // page never has to be edited when a build changes size. The APK
-      // reaches R2 from android-release.yml, the zips from release.yml.
+      // reaches R2 from android-release.yml, the zips and the disk image
+      // from release.yml. (The per-architecture macOS zips are still
+      // published, for the updater of copies installed from them.)
       document.addEventListener("alpine:init", function () {
         var VERSION = "__VERSION__";
         var PLATFORMS = [
@@ -1243,16 +1241,10 @@
             file: "baucord-v" + VERSION + "-win-x64.zip",
           },
           {
-            id: "macos-arm64",
+            id: "macos",
             name: "macOS",
-            arch: "Apple Silicon",
-            file: "baucord-v" + VERSION + "-macos-arm64.zip",
-          },
-          {
-            id: "macos-intel",
-            name: "macOS",
-            arch: "Intel",
-            file: "baucord-v" + VERSION + "-macos-intel.zip",
+            arch: "Apple Silicon, Intel",
+            file: "baucord-v" + VERSION + "-macos.dmg",
           },
           {
             id: "linux-x64",
@@ -1268,6 +1260,16 @@
           },
         ];
         var sizes = {}; // id -> "51 MB"
+        // Files the server says are not there (a HEAD answered 404 or
+        // 403): their rows are hidden rather than offered — the Android
+        // APK lands a few minutes after the zips, and a version named
+        // before its files were up gave a dead button (review
+        // 2026-10-27, P1-3). A failed request hides nothing.
+        var missing = {}; // id -> true
+        // The hero button names the detected platform only once its
+        // file's HEAD has answered: shown at once and taken back on a
+        // 404, it read "Download for macOS" for a blink, then "Download".
+        var checked = {}; // id -> true
 
         function formatSize(bytes) {
           var mb = bytes / 1048576;
@@ -1283,24 +1285,18 @@
                 var len = r.ok && r.headers.get("content-length");
                 if (len) {
                   sizes[p.id] = formatSize(parseInt(len, 10));
-                  store.sizesVersion++;
+                } else if (r.status === 404 || r.status === 403) {
+                  missing[p.id] = true;
                 }
               })
-              .catch(function () {});
+              .catch(function () {})
+              .then(function () {
+                checked[p.id] = true;
+                store.sizesVersion++;
+              });
           });
         }
 
-        function webglGuess() {
-          try {
-            var c = document.createElement("canvas");
-            var gl =
-              c.getContext("webgl") || c.getContext("experimental-webgl");
-            var ext = gl && gl.getExtension("WEBGL_debug_renderer_info");
-            var r = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : "";
-            if (/intel|amd|radeon|nvidia/i.test(r)) return "macos-intel";
-          } catch (e) {}
-          return "macos-arm64";
-        }
         function detect(cb) {
           var ua = navigator.userAgent || "";
           var plat = (navigator.platform || "").toLowerCase();
@@ -1309,21 +1305,7 @@
           if (/iphone|ipad|ipod/i.test(ua) || touchMac) return cb("mobile");
           if (/windows/i.test(ua)) return cb("win-x64");
           if (/cros|linux|x11/i.test(ua)) return cb("linux-x64");
-          if (/mac/i.test(plat) || /macintosh/i.test(ua)) {
-            var uad = navigator.userAgentData;
-            if (uad && uad.getHighEntropyValues) {
-              uad
-                .getHighEntropyValues(["architecture"])
-                .then(function (v) {
-                  cb(v.architecture === "x86" ? "macos-intel" : "macos-arm64");
-                })
-                .catch(function () {
-                  cb(webglGuess());
-                });
-              return;
-            }
-            return cb(webglGuess());
-          }
+          if (/mac/i.test(plat) || /macintosh/i.test(ua)) return cb("macos");
           cb(null);
         }
 
@@ -1343,14 +1325,21 @@
           return {
             get platforms() {
               shared.sizesVersion; // subscribe
-              return PLATFORMS.map(function (p) {
+              return PLATFORMS.filter(function (p) {
+                return !missing[p.id];
+              }).map(function (p) {
                 return Object.assign({ size: sizes[p.id] || "" }, p);
               });
             },
             get current() {
+              shared.sizesVersion;
               return (
                 PLATFORMS.filter(function (p) {
-                  return p.id === shared.selected;
+                  return (
+                    p.id === shared.selected &&
+                    (!window.fetch || checked[p.id]) &&
+                    !missing[p.id]
+                  );
                 })[0] || null
               );
             },
@@ -1360,8 +1349,14 @@
             get mobile() {
               return shared.mobile;
             },
+            // The install hints go with the button that names the
+            // platform, not with the detection alone: on a missing file
+            // the Mac hint sat under a plain "Download".
             get android() {
-              return shared.selected === "android-arm64";
+              return this.ready && shared.selected === "android-arm64";
+            },
+            get macos() {
+              return this.ready && shared.selected === "macos";
             },
             get href() {
               return this.current ? this.current.file : "#download";
@@ -1385,7 +1380,7 @@
                 return p.id !== shared.selected;
               });
             },
-            // "Version 1.0.1, 51 MB. Also for Windows, Linux and macOS (Intel)."
+            // "Version 1.0.1, 51 MB. Also for Windows, Linux and Android."
             get metaText() {
               var i18n = Alpine.store("i18n");
               var cur = this.current;

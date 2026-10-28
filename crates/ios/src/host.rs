@@ -352,11 +352,16 @@ define_class!(
     #[ivars = u64]
     struct PhotosDelegate;
 
+    // SAFETY: the class is an `NSObject` subclass (`super(NSObject)` above),
+    // which is all the protocol asks.
     unsafe impl NSObjectProtocol for PhotosDelegate {}
 
     // The bindings declare the protocol's one (required) method for
     // macOS only; it is implemented here under the protocol all the
     // same, which is where objc2's debug check looks for it.
+    // SAFETY: the method below has the selector and signature the protocol
+    // declares, and the class is retained by the picker only while it is
+    // presented.
     unsafe impl PHPickerViewControllerDelegate for PhotosDelegate {
         #[unsafe(method(picker:didFinishPicking:))]
         fn picker_did_finish(
@@ -376,6 +381,8 @@ define_class!(
         }
     }
 
+    // SAFETY: the one method implemented has the protocol's selector and
+    // signature; the rest are optional.
     unsafe impl UIAdaptivePresentationControllerDelegate for PhotosDelegate {
         #[unsafe(method(presentationControllerDidDismiss:))]
         fn did_dismiss(&self, _controller: &UIPresentationController) {
@@ -492,8 +499,12 @@ define_class!(
     #[ivars = u64]
     struct FilesDelegate;
 
+    // SAFETY: the class is an `NSObject` subclass (`super(NSObject)` above),
+    // which is all the protocol asks.
     unsafe impl NSObjectProtocol for FilesDelegate {}
 
+    // SAFETY: the methods below have the selectors and signatures the
+    // protocol declares.
     unsafe impl UIDocumentPickerDelegate for FilesDelegate {
         #[unsafe(method(documentPicker:didPickDocumentsAtURLs:))]
         fn did_pick_documents(
@@ -530,6 +541,8 @@ define_class!(
         }
     }
 
+    // SAFETY: the one method implemented has the protocol's selector and
+    // signature; the rest are optional.
     unsafe impl UIAdaptivePresentationControllerDelegate for FilesDelegate {
         #[unsafe(method(presentationControllerDidDismiss:))]
         fn did_dismiss(&self, _controller: &UIPresentationController) {
@@ -612,8 +625,12 @@ define_class!(
     #[thread_kind = MainThreadOnly]
     struct PreviewDelegate;
 
+    // SAFETY: the class is an `NSObject` subclass (`super(NSObject)` above),
+    // which is all the protocol asks.
     unsafe impl NSObjectProtocol for PreviewDelegate {}
 
+    // SAFETY: the methods below have the selectors and signatures the
+    // protocol declares.
     unsafe impl UIDocumentInteractionControllerDelegate for PreviewDelegate {
         #[unsafe(method_id(documentInteractionControllerViewControllerForPreview:))]
         fn view_controller_for_preview(

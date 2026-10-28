@@ -223,7 +223,7 @@ impl ChatServer {
     fn deny_profile(&mut self, client: ClientId, reason: ProfileDenyReason) {
         info!(
             "{} ({client:#x}) profile refused: {}",
-            self.get_username(client),
+            self.username_of(client),
             reason.describe()
         );
         self.send_msg(client, &ServerMessage::ProfileDenied { reason });
@@ -339,7 +339,7 @@ impl ChatServer {
             );
             return;
         }
-        let old = self.get_username(client);
+        let old = self.username_of(client);
         info!("[{old}] is now [{name}]");
         for c in &own_sessions {
             self.usernames.insert(*c, name.clone());
@@ -529,7 +529,7 @@ impl ChatServer {
         } else {
             info!(
                 "[{}] uploaded a {} blob ({} KB)",
-                self.get_username(client),
+                self.username_of(client),
                 sniffed,
                 bytes.len() / 1024
             );
@@ -559,7 +559,7 @@ impl ChatServer {
     fn reject_upload(&mut self, client: ClientId, upload_id: u32, reason: UploadRejectReason) {
         debug!(
             "upload {upload_id} from {} rejected: {}",
-            self.get_username(client),
+            self.username_of(client),
             reason.describe()
         );
         self.send_msg(client, &ServerMessage::UploadRejected { upload_id, reason });

@@ -23,7 +23,13 @@ the commit being built, and every workflow that ships something calls
 that first — the desktop release, the Android and iOS releases, the
 website deploy — then lays its output over the committed copies before
 building. So every platform and the site carry the same list, made from
-the same `Cargo.lock`. The committed copies are only what a local build
+the same `Cargo.lock`. The workflow keeps its output in the Actions
+cache, keyed by everything the script reads (`Cargo.lock`, the
+workspace and crate manifests, `about.toml`, the script, the texts in
+`native/` and `LICENSE`): while none of those change, a run reuses it
+in seconds instead of running cargo-about for minutes. To force a fresh
+run anyway — say, to pick up a crate's corrected license metadata
+online — bump `licenses-v1` in the workflow's cache key. The committed copies are only what a local build
 shows; refreshing them is optional:
 
     cargo install cargo-about --features cli   # once

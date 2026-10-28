@@ -331,7 +331,8 @@ impl AudioStats {
         self.aec.lock().ok().and_then(|g| g.clone())
     }
 
-    pub fn get_summary(&self) -> String {
+    #[must_use]
+    pub fn summary(&self) -> String {
         let elapsed = self.start_time.elapsed().as_secs();
         let aec = self
             .aec_report()

@@ -81,4 +81,9 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
           $obj = "ci/ffmpeg-$($env:VCPKG_COMMIT.Substring(0,10))-avcodec-avformat-swscale-x264-gpl-nvcodec-amf-x64-windows-static-md.zip"
+          # release.yml checks the zip against FFMPEG_WIN_SHA256 before
+          # unpacking it (review 2026-10-27, P1-5): pin this digest there
+          # with the new name.
+          $hash = (Get-FileHash ffmpeg-prebuilt.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "::notice::$obj SHA-256 $hash — set FFMPEG_WIN_SHA256 in release.yml to it"
           aws s3 cp ffmpeg-prebuilt.zip "s3://baucord/$obj" --endpoint-url https://6bcc35de83e46a771896026baf11b4ac.r2.cloudflarestorage.com

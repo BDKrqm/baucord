@@ -53,6 +53,8 @@ pub fn list_cameras() -> Result<Vec<CameraInfo>, CaptureError> {
     // already be in an apartment that is not the one wanted here.
     std::thread::Builder::new()
         .name("camera-list".into())
+        // SAFETY: `enumerate` needs COM and Media Foundation up on the
+        // calling thread, which `with_mf` does around it.
         .spawn(|| mf::with_mf(|| unsafe { mf::enumerate() }))
         .map_err(|e| CaptureError::Capture(format!("camera list: {e}")))?
         .join()
@@ -262,6 +264,9 @@ mod mf {
 
     /// COM and Media Foundation up for `f` on this thread, down after.
     pub(super) fn with_mf<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, CaptureError> {
+        // SAFETY: plain init/teardown calls with no pointers; each
+        // successful init (COM, Media Foundation) is paired with its
+        // teardown on this same thread, after `f` is done with both.
         unsafe {
             let com = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
             let result = match MFStartup(MF_VERSION, MFSTARTUP_LITE) {
@@ -281,6 +286,10 @@ mod mf {
 
     /// Every video capture device, as activation objects.
     unsafe fn devices() -> Result<Vec<IMFActivate>, String> {
+        // SAFETY: the out-pointers are live locals. `MFEnumDeviceSources`
+        // returns an array of `count` owned entries allocated with
+        // CoTaskMemAlloc: each is read out exactly once (taking its
+        // reference), and the array is freed once, with CoTaskMemFree.
         unsafe {
             let mut attrs: Option<IMFAttributes> = None;
             MFCreateAttributes(&raw mut attrs, 1).map_err(|e| format!("attributes: {e}"))?;
@@ -312,6 +321,9 @@ mod mf {
 
     /// A string attribute, if it is there.
     unsafe fn string(attrs: &IMFAttributes, key: &GUID) -> Option<String> {
+        // SAFETY: `GetAllocatedString` writes a NUL-terminated string it
+        // allocated (CoTaskMemAlloc) into the live locals; it is read
+        // while alive and freed once, with CoTaskMemFree.
         unsafe {
             let mut value = PWSTR::null();
             let mut len = 0u32;
@@ -325,6 +337,8 @@ mod mf {
     }
 
     pub(super) unsafe fn enumerate() -> Result<Vec<CameraInfo>, String> {
+        // SAFETY: the caller has COM and Media Foundation up (this fn's
+        // contract, `with_mf`), which is all `devices` and `string` need.
         unsafe {
             Ok(devices()?
                 .iter()
@@ -341,6 +355,8 @@ mod mf {
 
     /// A packed `(hi, lo)` pair attribute (frame size, frame rate).
     unsafe fn pair(attrs: &IMFAttributes, key: &GUID) -> Option<(u32, u32)> {
+        // SAFETY: a COM call on a live interface, with a key that lives
+        // for the call.
         let v = unsafe { attrs.GetUINT64(key) }.ok()?;
         Some(((v >> 32) as u32, v as u32))
     }
@@ -349,12 +365,16 @@ mod mf {
     unsafe fn best_native(reader: &IMFSourceReader, quality: Quality) -> Option<IMFMediaType> {
         let mut best: Option<((bool, bool, i64, u32), IMFMediaType)> = None;
         for i in 0.. {
+            // SAFETY: a COM call on the live reader; an index past the
+            // last type is an error, not undefined behaviour.
             let Ok(t) = (unsafe { reader.GetNativeMediaType(VIDEO, i) }) else {
                 break;
             };
+            // SAFETY: `t` is a live media type (see `pair`).
             let Some((w, h)) = (unsafe { pair(&t, &MF_MT_FRAME_SIZE) }) else {
                 continue;
             };
+            // SAFETY: as above.
             let fps = unsafe { pair(&t, &MF_MT_FRAME_RATE) }
                 .filter(|&(_, den)| den > 0)
                 .map_or(30.0, |(num, den)| num as f32 / den as f32);
@@ -379,6 +399,10 @@ mod mf {
     }
 
     unsafe fn open(id: &str, quality: Quality) -> Result<Opened, String> {
+        // SAFETY: COM calls on interfaces this function owns, with live
+        // locals as out-pointers, on a thread with COM and Media
+        // Foundation up (this fn's contract). A source that opened is
+        // shut down on every failure after it.
         unsafe {
             let devices = devices()?;
             let activate = devices
@@ -454,6 +478,8 @@ mod mf {
 
     /// The RGB32 output's size and row stride, as the reader has it now.
     unsafe fn layout(reader: &IMFSourceReader) -> Result<(u32, u32, i32), String> {
+        // SAFETY: COM calls on the live reader and the media type it
+        // returns; no pointers of ours.
         unsafe {
             let actual = reader
                 .GetCurrentMediaType(VIDEO)
@@ -479,6 +505,7 @@ mod mf {
         ready: &std::sync::mpsc::SyncSender<Result<String, String>>,
     ) {
         let outcome = with_mf(|| {
+            // SAFETY: inside `with_mf`: COM and Media Foundation are up.
             let cam = match unsafe { open(id, quality) } {
                 Ok(cam) => cam,
                 Err(e) => {
@@ -493,6 +520,7 @@ mod mf {
                 cam.height
             );
             let _ = ready.send(Ok(cam.name.clone()));
+            // SAFETY: as for `open`, on the same thread.
             let result = unsafe { read(cam, shared) };
             if let Err(e) = result {
                 log::warn!("camera: {e}");
@@ -511,6 +539,8 @@ mod mf {
             while !shared.stop.load(std::sync::atomic::Ordering::Relaxed) {
                 let mut flags = 0u32;
                 let mut sample: Option<IMFSample> = None;
+                // SAFETY: a synchronous read on the live reader; the out-
+                // pointers are live locals it fills before returning.
                 unsafe {
                     cam.reader.ReadSample(
                         VIDEO,
@@ -530,12 +560,15 @@ mod mf {
                     return Err(format!("{} ended (unplugged?)", cam.name));
                 }
                 if flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED.0 != 0 {
+                    // SAFETY: the live reader (see `layout`).
                     (cam.width, cam.height, cam.stride) = unsafe { layout(&cam.reader) }?;
                 }
                 let Some(sample) = sample else {
                     continue;
                 };
                 let data = shared_buffer(shared, cam.width, cam.height);
+                // SAFETY: a live sample from this reader, and `cam`'s
+                // size and stride as the reader reports them now.
                 let data = unsafe { copy_picture(&sample, &cam, data) }?;
                 *lock(&shared.latest) = Some(Frame {
                     data,
@@ -548,6 +581,8 @@ mod mf {
             Ok(())
         })();
         // The light goes off.
+        // SAFETY: shutting down the source this function owns, once,
+        // after its last read.
         let _ = unsafe { cam.source.Shutdown() };
         result
     }
@@ -566,6 +601,12 @@ mod mf {
         cam: &Opened,
         mut data: Vec<u8>,
     ) -> Result<Vec<u8>, String> {
+        // SAFETY: the buffer is locked while it is read and unlocked
+        // after. Rows are copied only when the lock gave a non-null
+        // pointer and a pitch (2-D) or a length (plain) covering every
+        // row: `rows` rows of `row` bytes, `|pitch| >= row` apart, inside
+        // the locked memory; `data` holds `rows * row` bytes, and the
+        // two never overlap (the system's buffer and our Vec).
         unsafe {
             let buffer = sample
                 .ConvertToContiguousBuffer()

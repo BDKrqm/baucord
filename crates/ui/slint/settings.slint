@@ -1,8 +1,8 @@
 // settings.slint — Settings, a page over the main window.
 //
-// Left nav (Profile / General / Audio / Keyboard / Servers / Debug /
-// About),
-// scrollable content, Save & close + Reset row. Narrow (the Android
+// Left nav (Profile / General / Audio / Sounds / Keyboard / Stream /
+// Servers / Debug / Credits / About / Licenses), scrollable content,
+// Save & close + Reset row. Narrow (the Android
 // page on a phone held upright): the nav is a page of its own and a
 // section opens over it, with a back arrow (ANDROID-SPEC.md D28).
 //
@@ -137,6 +137,25 @@ export global SettingsState {
     /// streams and would not be asked not to (AEC-SPEC.md E15).
     in property <bool> aec-lowering;
 
+    // ── Stream (desktop only, 1.4.0): how a screen share starts ──
+    /// The resolutions the presets have (720p / 1080p / 1440p), and
+    /// the frame rates the chosen one has (1440p: 30 only). The host
+    /// pairs them into a `video::Quality`.
+    in property <[string]> stream-resolutions;
+    in-out property <int> stream-resolution-index: 1;
+    in property <[string]> stream-frame-rates;
+    in-out property <int> stream-frame-rate-index: 0;
+    /// Automatic / GPU / CPU (`video::EncoderPreference::ALL` order).
+    in property <[string]> stream-encoders;
+    in-out property <int> stream-encoder-index: 0;
+    /// My channel / Everyone (`share.everyone`), the share dialog's words.
+    in-out property <int> stream-visibility-index: 0;
+    in-out property <bool> stream-pointer: true;
+    /// Windows only: the GPU scheduling priority switch and whether
+    /// this platform has it.
+    in-out property <bool> stream-gpu-priority: true;
+    in property <bool> stream-gpu-priority-available: false;
+
     // ── Keyboard ──
     in property <[KeybindRow]> keybinds;
     /// macOS without the Accessibility permission: a bound key works
@@ -229,6 +248,14 @@ export global SettingsLogic {
     callback voice-tone-selected(int);
     /// Open the system's sound settings (Windows: Communications tab).
     callback open-sound-settings();
+
+    // Stream (1.4.0)
+    callback stream-resolution-selected(int);
+    callback stream-frame-rate-selected(int);
+    callback stream-encoder-selected(int);
+    callback stream-visibility-selected(int);
+    callback stream-pointer-changed(bool);
+    callback stream-gpu-priority-changed(bool);
 
     // Keyboard
     callback record-keybind(int);
@@ -703,7 +730,6 @@ component GeneralPanel inherits VerticalLayout {
         }
         CheckRow {
             text: Tr.startup-check-updates;
-            hint: Tr.startup-check-updates-hint;
             checked <=> SettingsState.check-updates;
             toggled(on) => { SettingsLogic.check-updates-changed(on); }
         }
@@ -928,7 +954,6 @@ component SoundsPanel inherits VerticalLayout {
     // greyed and inert while the switch is off.
     CheckRow {
         text: Tr.sounds-enabled;
-        hint: Tr.sounds-enabled-hint;
         checked <=> SettingsState.sounds-enabled;
         toggled(on) => { SettingsLogic.sounds-enabled-changed(on); }
     }
@@ -998,6 +1023,85 @@ component SoundsPanel inherits VerticalLayout {
                 checked <=> SettingsState.notify-first-join;
                 toggled(on) => { SettingsLogic.notify-first-join-changed(on); }
             }
+        }
+    }
+}
+
+/// How a screen share starts (desktop only, 1.4.0): the picture, the
+/// encoder, who sees it, and on Windows whether the share goes ahead
+/// of a game on the GPU. The share dialog opens on these and writes
+/// its own picks back, so the two never disagree.
+component StreamPanel inherits VerticalLayout {
+    spacing: Theme.gap-lg;
+    alignment: start;
+    PanelHeader { title: Tr.tab-stream; lead: Tr.stream-lead; }
+
+    SectionHeader { text: Tr.stream-picture-header; }
+    // Resolution and frame rate side by side: one choice in the
+    // sharer's mind ("1080p at 60"), two pickers on screen because the
+    // presets do not offer every pair — the rate list follows the
+    // resolution.
+    HorizontalLayout {
+        spacing: Theme.gap-md;
+        Setting {
+            label: Tr.stream-resolution;
+            horizontal-stretch: 1;
+            Dropdown {
+                options: SettingsState.stream-resolutions;
+                current <=> SettingsState.stream-resolution-index;
+                selected(i) => { SettingsLogic.stream-resolution-selected(i); }
+            }
+        }
+        Setting {
+            label: Tr.stream-frame-rate;
+            horizontal-stretch: 1;
+            Dropdown {
+                options: SettingsState.stream-frame-rates;
+                current <=> SettingsState.stream-frame-rate-index;
+                selected(i) => { SettingsLogic.stream-frame-rate-selected(i); }
+            }
+        }
+    }
+    Hint { text: Tr.stream-quality-hint; }
+    Setting {
+        label: Tr.stream-encoder;
+        hint: Tr.stream-encoder-hint;
+        Dropdown {
+            options: SettingsState.stream-encoders;
+            current <=> SettingsState.stream-encoder-index;
+            selected(i) => { SettingsLogic.stream-encoder-selected(i); }
+        }
+    }
+
+    Sep { }
+    SectionHeader { text: Tr.stream-sharing-header; }
+    // The share dialog's own words (Visibility: My channel / Everyone).
+    Setting {
+        label: Tr.share-visibility;
+        Dropdown {
+            options: [Tr.share-channel-only, Tr.share-everyone];
+            current <=> SettingsState.stream-visibility-index;
+            selected(i) => { SettingsLogic.stream-visibility-selected(i); }
+        }
+    }
+    CheckRow {
+        text: Tr.stream-pointer;
+        hint: Tr.stream-pointer-hint;
+        checked <=> SettingsState.stream-pointer;
+        toggled(on) => { SettingsLogic.stream-pointer-changed(on); }
+    }
+
+    // Windows' GPU scheduler has the knob; macOS and Linux do not, and
+    // a switch that does nothing is worse than none.
+    if SettingsState.stream-gpu-priority-available : VerticalLayout {
+        spacing: Theme.gap-lg;
+        Sep { }
+        SectionHeader { text: Tr.stream-gpu-header; }
+        CheckRow {
+            text: Tr.stream-gpu-priority;
+            hint: Tr.stream-gpu-priority-hint;
+            checked <=> SettingsState.stream-gpu-priority;
+            toggled(on) => { SettingsLogic.stream-gpu-priority-changed(on); }
         }
     }
 }
@@ -1524,6 +1628,8 @@ component SettingsNav inherits VerticalLayout {
     NavItem { text: Tr.sounds-header; icon: IconSet.Bell;              tall: root.narrow; active: !root.narrow && root.tab == 3; clicked => { root.picked(3); } }
     // Shortcuts need a keyboard the OS lets us watch: not on a phone.
     if !State.touch-host : NavItem { text: Tr.tab-keyboard;  icon: IconSet.Keyboard; tall: root.narrow; active: !root.narrow && root.tab == 4; clicked => { root.picked(4); } }
+    // A phone watches streams and does not send one (1.4.0).
+    if !State.touch-host : NavItem { text: Tr.tab-stream;    icon: IconSet.MonitorUp; tall: root.narrow; active: !root.narrow && root.tab == 10; clicked => { root.picked(10); } }
     NavItem { text: Tr.tab-servers;   icon: IconSet.Server;            tall: root.narrow; active: !root.narrow && root.tab == 5; clicked => { root.picked(5); } }
     NavItem { text: Tr.tab-debug;     icon: IconSet.Bug;               tall: root.narrow; active: !root.narrow && root.tab == 8; clicked => { root.picked(8); } }
     // Credits and About: their own group. The wide column puts it
@@ -1598,6 +1704,7 @@ component SettingsContent inherits ScrollView {
                 if root.tab == 6 : CreditsPanel { }
                 if root.tab == 7 : AboutPanel { }
                 if root.tab == 8 : DebugPanel { }
+                if root.tab == 10 : StreamPanel { }
             }
             Rectangle { horizontal-stretch: 1; }
         }
@@ -1662,7 +1769,8 @@ component SettingsFooter inherits Rectangle {
 
 export component SettingsPanel inherits FocusScope {
     /// 0 profile, 1 general, 2 audio, 3 sounds, 4 keyboard, 5 servers,
-    /// 6 credits, 7 about, 8 debug, 9 open-source licenses. Mirrored by
+    /// 6 credits, 7 about, 8 debug, 9 open-source licenses, 10 stream
+    /// (numbered as added; the nav orders them). Mirrored by
     /// `settingsui::TAB_*`.
     in-out property <int> tab: 0;
     changed tab => { SettingsLogic.tab-shown(); }

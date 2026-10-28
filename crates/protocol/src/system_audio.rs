@@ -33,6 +33,7 @@ pub const SYSTEM_AUDIO_MTU_BUDGET: usize = 1024;
 /// Parsed system audio packet header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SystemAudioHeader {
+    /// The header version; parsers refuse any other.
     pub version: u8,
     /// Number of audio channels (1 = mono, 2 = stereo).
     pub channels: u8,

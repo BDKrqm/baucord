@@ -32,6 +32,7 @@ pub(super) const RETIRED_DIR: &str = "retired";
 /// vouches for the current key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetiredKey {
+    /// The retired key's fingerprint.
     pub fingerprint: Fingerprint,
     /// Seconds since the Unix epoch.
     pub retired_at: u64,
@@ -162,17 +163,20 @@ impl ServerIdentity {
         Ok(Self::load_or_create(dir)?.0)
     }
 
+    /// The current key's fingerprint: what clients pin.
     #[must_use]
     pub fn fingerprint(&self) -> Fingerprint {
         self.fingerprint
     }
 
+    /// The certificate's DER bytes, for the tests' pinning checks.
     #[cfg(test)]
     #[must_use]
     pub fn cert_der(&self) -> &[u8] {
         &self.cert_der
     }
 
+    /// The certificate as PEM text, for a human or a config file.
     #[must_use]
     pub fn cert_pem(&self) -> String {
         let mut out = String::from("-----BEGIN CERTIFICATE-----\n");

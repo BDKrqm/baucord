@@ -314,6 +314,14 @@ impl Viewer {
         match &self.surface {
             Surface::Window(win) => {
                 let _ = win.hide();
+                // A window closed while minimized: the stream is not
+                // hidden any more, it is gone. Told to the network
+                // thread alone (the screen thread forgets on its own
+                // when the watch or the share ends); its reveal hook
+                // may still fire and finds nothing to do (review
+                // 2026-10-27, P1-2).
+                self.minimized.told.set(false);
+                client::network::set_stream_hidden(self.minimized.client_id, false);
             }
             Surface::Page(main) => {
                 let s = main.global::<State>();

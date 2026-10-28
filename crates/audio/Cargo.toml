@@ -140,7 +140,16 @@ windows = { workspace = true, features = [
 [dev-dependencies]
 # examples only — the library itself never initializes a logger
 env_logger.workspace = true
+# benches/dsp.rs. No plotters/rayon: the numbers go to the terminal and
+# the hot paths are single-threaded anyway.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
 [[example]]
 name = "latency_profile"
 path = "examples/latency.rs"
+
+# `cargo bench -p audio`: the resampler and the jitter buffer, the two
+# per-sample paths a regression would turn into dropouts.
+[[bench]]
+name = "dsp"
+harness = false

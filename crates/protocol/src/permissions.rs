@@ -96,22 +96,34 @@ pub type RoleId = u32;
 /// Orders roles for `min_role` gates. Higher outranks lower.
 pub type Rank = u16;
 
+/// The built-in `guest` role's id.
 pub const ROLE_GUEST: RoleId = 1;
+/// The built-in `member` role's id.
 pub const ROLE_MEMBER: RoleId = 2;
+/// The built-in `organizer` role's id.
 pub const ROLE_ORGANIZER: RoleId = 3;
+/// The built-in `admin` role's id.
 pub const ROLE_ADMIN: RoleId = 4;
 
+/// Where guests stand for `min_role` gates: the floor.
 pub const RANK_GUEST: Rank = 0;
+/// Where members stand.
 pub const RANK_MEMBER: Rank = 10;
+/// Where organizers stand.
 pub const RANK_ORGANIZER: Rank = 20;
+/// Where admins stand: the ceiling; no custom role reaches it.
 pub const RANK_ADMIN: Rank = 30;
 
 /// One of the four undeletable roles every server has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuiltinRole {
+    /// The role's id, fixed for all time.
     pub id: RoleId,
+    /// Its name, fixed for all time.
     pub name: &'static str,
+    /// The permission bits it grants.
     pub permissions: u64,
+    /// Where it stands for `min_role` gates.
     pub rank: Rank,
 }
 

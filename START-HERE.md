@@ -4,9 +4,11 @@ baucord is a voice, text and screen-sharing app in Rust: a self-hosted
 relay server (QUIC, no media mixing), a desktop client for Windows,
 macOS and Linux, and clients for Android and iPhone that run the same
 Rust engine and the same Slint UI. It is in daily use: 1.2.1 is the
-latest release (2026-10-13; 1.3.0, with the 2026-10 review's fixes, is
-next, CHANGELOG.md), desktop users on the in-app updater, Android as a
-sideloaded APK and on Play's internal test, iPhone as an Ad Hoc build,
+latest release (2026-10-13; 1.4.0, with the 2026-10 review's fixes,
+Settings → Stream, the bot gateway and the rest of the bot/plugin
+framework to come, is next, CHANGELOG.md), desktop users on the in-app updater (macOS as
+`baucord.app` in a disk image from the next release), Android as a
+sideloaded APK and on Play's internal test, iPhone on TestFlight,
 the official server in Docker.
 
 This file is the way in. Read it first, then follow the reading order
@@ -87,6 +89,7 @@ for the work at hand (§3). Everything else is linked from here.
 | `ANDROID-SPEC.md` | the Android client as it is (§0–§13); decisions D1…D9 in §1, from D10 on in §14 (from D23 on, newest first) | before Android work |
 | `IOS-SPEC.md` | the iPhone client as it is (§0–§13); decisions D1…D13 in §1, from D14 on in §14 (in order) | before iOS work |
 | `android/README.md`, `ios/README.md` | building, running and releasing each phone app | when the user builds |
+| `macos/README.md` | the Mac app: `baucord.app` in a disk image, signing and notarizing, how its updates work | before touching macOS packaging or the updater |
 | `DEVICE-CHECKLIST.md` | what has to be seen on a real Windows machine, Android phone and iPhone before a release: every change the sandbox could not run, as *do this → expect that* | when the user tests; add a line for every platform change made unrun |
 | `licenses/README.md` | the third-party notices: what writes them, what CI does | before adding a native library |
 | `tools/chat-scroll-sim/` | the chat pane's scrolling harness (ANDROID-SPEC D66); CI runs it on every pull request | before touching the chat's scrolling |
@@ -146,24 +149,31 @@ The full list is SESSION-GUIDE §4; these break things when forgotten:
 - **The server's identity folder must survive every deploy** — it is
   what every client has pinned.
 
-## 5. Where things stand (2026-10-09)
+## 5. Where things stand (2026-10-27)
 
-- **Version 1.3.0** in the crates (released: 1.2.1, 2026-10-13, with
-  the fixes of the 2026-10-10 review; 1.3.0 carries Settings and the
-  admin panel as pages and the 2026-10 review's fixes, PRODUCTION-PLAN.md
-  §2a, CHANGELOG.md); the crate map is
+- **Version 1.4.0** in the crates (released: 1.2.1, 2026-10-13, with
+  the fixes of the 2026-10-10 review; 1.4.0 — the 1.3.0 that was next,
+  renumbered for the bot and plugin framework — carries Settings and
+  the admin panel as pages, the 2026-10 review's fixes and Settings →
+  Stream, PRODUCTION-PLAN.md §2a, CHANGELOG.md); the crate map is
   SESSION-GUIDE §2, the list of what it carries SESSION-GUIDE §3. 1.2
   adds what the stores require of a chat app — block, report, delete
   my account, the terms on the connect card (PERSISTENCE-SPEC §12 S1),
   Android's foreground service typed for Play (ANDROID-SPEC D63), the
   third-party notices (Settings → Licenses) — and the chat's
   stickiness by input (D66) and General's Activity view (D65).
-- **Desktop**: in production (Windows mostly), self-updating.
+- **Desktop**: in production (Windows mostly), self-updating. macOS
+  ships as a universal `baucord.app` in a disk image, Developer ID
+  signed and notarized when the secrets are set (macos/README.md).
 - **Android**: voice with the platform echo canceller, chat, DMs,
   files, stream viewing (MediaCodec), Settings → Debug, notifications
-  while connected. Sideloaded.
+  while connected. Sideloaded; the release workflow uploads the bundle
+  to Play's internal track once a service account is set up
+  (android/README.md §6a).
 - **iPhone**: the same, with VPIO echo cancellation written but not yet
-  confirmed on a device. Ad Hoc builds.
+  confirmed on a device. TestFlight from CI (IOS-SPEC D67, D68):
+  internal testers now, external ones after Beta App Review; Ad Hoc
+  builds still possible.
 - **Vocabulary**: an *invite code* is what the server mints and a new
   device key needs to get in; an *invite string* (`host:port#SHA256:…`)
   is an address plus the server's fingerprint, which the client still

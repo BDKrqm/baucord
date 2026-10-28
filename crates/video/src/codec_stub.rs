@@ -8,7 +8,7 @@
 //! decodes with `mediacodec.rs`, iOS with `videotoolbox.rs` (the
 //! client's `create_decoder` picks them).
 
-use crate::{CodecError, EncodedFrame, Frame, Quality, VideoEncoder};
+use crate::{CodecError, EncodedFrame, EncoderPreference, Frame, Quality, VideoEncoder};
 
 const UNSUPPORTED: &str = "no video codec backend on this platform";
 
@@ -22,7 +22,11 @@ impl FfmpegEncoder {
         Err(CodecError::EncoderInit(UNSUPPORTED.into()))
     }
 
-    pub fn new_without(_quality: Quality, _skip: &[&str]) -> Result<Self, CodecError> {
+    pub fn new_with(
+        _quality: Quality,
+        _preference: EncoderPreference,
+        _skip: &[&str],
+    ) -> Result<Self, CodecError> {
         Err(CodecError::EncoderInit(UNSUPPORTED.into()))
     }
 

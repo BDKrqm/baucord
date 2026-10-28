@@ -582,9 +582,10 @@ impl Default for WindowSettings {
     }
 }
 
-/// Last-used screen-share choices. The share dialog opens pre-filled
-/// with these, and the global share hotkey starts a stream with them
-/// directly when Baucord is not the focused window.
+/// The screen share's settings: Settings → Stream on the desktop
+/// (1.4.0), and what the share dialog and the global share hotkey
+/// start with. The dialog's own picks (quality, monitor, visibility)
+/// are written back here, so the two agree.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 // A key missing from the file takes its default, not the whole file
 // with it (review 2026-10, P3-43).
@@ -602,10 +603,20 @@ pub struct ShareSettings {
     /// current voice channel only.
     pub everyone: bool,
     /// Show the mouse pointer in the share (Windows draws it into the
-    /// picture itself, `video/src/dxgi.rs`). No switch in the app: on,
-    /// unless this file says `false`.
+    /// picture itself, `video/src/dxgi.rs`). A switch on the Stream
+    /// tab since 1.4.0; on, unless this file says `false`.
     #[serde(default = "default_true")]
     pub pointer: bool,
+    /// Which encoder a share opens (`video::EncoderPreference::key()`:
+    /// "auto", "gpu", "cpu"). A key this version does not know is
+    /// "auto".
+    pub encoder: String,
+    /// Windows: ask the GPU scheduler to run the share's capture and
+    /// encode ahead of a game's work while sharing
+    /// (`video::gpu_priority`). On by default: the stream of a sharer
+    /// whose game keeps the GPU full was the thing that broke.
+    #[serde(default = "default_true")]
+    pub gpu_priority: bool,
     /// The last share was a camera's (the dialog's Monitor/Camera
     /// switch): the dialog opens on Camera, and the share hotkey starts
     /// the camera.
@@ -622,6 +633,8 @@ impl Default for ShareSettings {
             monitor: None,
             everyone: false,
             pointer: true,
+            encoder: "auto".to_string(),
+            gpu_priority: true,
             use_camera: false,
             camera: None,
         }
@@ -762,7 +775,7 @@ impl Default for Settings {
 }
 
 impl Settings {
-    fn get_settings_path() -> PathBuf {
+    fn path() -> PathBuf {
         config_base_dir().join("settings.json")
     }
 
@@ -849,7 +862,7 @@ impl Settings {
         .into_iter()
         .flatten()
         .collect();
-        Self::load_at(&Self::get_settings_path(), &old_paths)
+        Self::load_at(&Self::path(), &old_paths)
     }
 
     /// [`Self::load`] for the file at `path`, migrating from the first
@@ -917,7 +930,7 @@ impl Settings {
     }
 
     pub fn save(&self) {
-        self.save_at(&Self::get_settings_path());
+        self.save_at(&Self::path());
     }
 
     /// Write the settings to `path` without ever leaving a torn file
@@ -995,13 +1008,13 @@ impl Settings {
             if entry.address == OFFICIAL_ADDRESS_OLD_PORT {
                 entry.address = OFFICIAL_ADDRESS.to_string();
             }
-            let blank = |v: &Option<String>| v.as_deref().is_some_and(|s| s.trim().is_empty());
+            let blank = |v: Option<&str>| v.is_some_and(|s| s.trim().is_empty());
             // Codes are stored canonical; anything else is not a code.
             entry.invite_code = entry
                 .invite_code
                 .as_deref()
                 .and_then(protocol::invite::normalize_code);
-            if blank(&entry.fingerprint)
+            if blank(entry.fingerprint.as_deref())
                 || entry
                     .fingerprint
                     .as_deref()
@@ -1059,8 +1072,8 @@ impl Settings {
 /// Release builds prefer the executable's directory so users can find
 /// their config next to the app (baucord installs are portable-style;
 /// the platform config dir is invisible to most users). When the exe
-/// directory isn't writable — Program Files, /usr/bin, a macOS app
-/// bundle — fall back to the platform config dir (`%APPDATA%\baucord`,
+/// directory isn't writable — Program Files, /usr/bin — or is inside
+/// a macOS app bundle, fall back to the platform config dir (`%APPDATA%\baucord`,
 /// `~/.config/baucord`, `~/Library/Application Support/baucord`) so
 /// settings still persist instead of erroring on every save. Debug
 /// builds always use the platform config dir, keeping state out of
@@ -1132,6 +1145,13 @@ fn writable_exe_dir() -> Option<PathBuf> {
     WRITABLE
         .get_or_init(|| {
             let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+            // Never inside baucord.app, writable or not: the bundle is
+            // signed as one piece, and an update replaces it whole
+            // (macos/README.md) — settings and the identity key kept in
+            // it would go with the old one.
+            if inside_app_bundle(&dir) {
+                return None;
+            }
             let probe = dir.join(".baucord-write-probe");
             fs::write(&probe, b"").ok()?;
             let _ = fs::remove_file(&probe);
@@ -1140,11 +1160,27 @@ fn writable_exe_dir() -> Option<PathBuf> {
         .clone()
 }
 
+/// Whether `exe_dir` is a macOS app bundle's `Contents/MacOS`
+/// (`…/baucord.app/Contents/MacOS`). A plain path test, so it is the
+/// same on every platform and in tests.
+#[cfg_attr(debug_assertions, allow(dead_code))] // only release builds ask
+fn inside_app_bundle(exe_dir: &Path) -> bool {
+    let Some(contents) = exe_dir.parent() else {
+        return false;
+    };
+    exe_dir.file_name().is_some_and(|name| name == "MacOS")
+        && contents.file_name().is_some_and(|name| name == "Contents")
+        && contents
+            .parent()
+            .and_then(Path::extension)
+            .is_some_and(|ext| ext == "app")
+}
+
 /// Absolute path of the live settings file (shown on the About tab;
 /// its folder is what "open config location" opens).
 #[must_use]
 pub fn settings_file_path() -> PathBuf {
-    Settings::get_settings_path()
+    Settings::path()
 }
 
 /// Where the client's Ed25519 identity key lives: next to settings.json.
@@ -1334,6 +1370,22 @@ mod tests {
         ));
         fs::create_dir_all(&dir).expect("dir");
         dir
+    }
+
+    #[test]
+    fn an_app_bundle_is_never_the_config_dir() {
+        // The app, wherever it was put and whatever it is called.
+        assert!(inside_app_bundle(Path::new(
+            "/Applications/baucord.app/Contents/MacOS"
+        )));
+        assert!(inside_app_bundle(Path::new(
+            "/Users/a/Apps/Baucord 2.app/Contents/MacOS"
+        )));
+        // A zip install's folder: portable, its own config folder.
+        assert!(!inside_app_bundle(Path::new("/Users/a/apps/baucord")));
+        // Looks like a bundle, is not one.
+        assert!(!inside_app_bundle(Path::new("/opt/x/Contents/MacOS")));
+        assert!(!inside_app_bundle(Path::new("MacOS")));
     }
 
     fn named(name: &str) -> Settings {
@@ -1528,6 +1580,25 @@ mod tests {
         let back = parse(&json);
         assert_eq!(back.server, "baucord");
         assert_eq!(back.servers, s.servers);
+    }
+
+    /// A 1.3 file has no Stream tab fields: the share keeps its old
+    /// choices and takes the new defaults; a 1.4 file round-trips.
+    #[test]
+    fn stream_tab_fields_default_and_round_trip() {
+        let s = parse(r#"{ "share": { "quality": "hd60", "everyone": true, "pointer": false } }"#);
+        assert_eq!(s.share.quality, "hd60");
+        assert!(s.share.everyone);
+        assert!(!s.share.pointer);
+        assert_eq!(s.share.encoder, "auto");
+        assert!(s.share.gpu_priority);
+
+        let mut s = s;
+        s.share.encoder = "cpu".to_string();
+        s.share.gpu_priority = false;
+        let json = serde_json::to_string(&s).expect("serialize");
+        let back = parse(&json);
+        assert_eq!(back.share, s.share);
     }
 
     #[test]

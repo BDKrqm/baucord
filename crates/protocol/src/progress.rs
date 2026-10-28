@@ -7,6 +7,8 @@
 /// and talking) level 10 is about four hours of ordinary use, level 20
 /// about a day; tune here.
 pub const LEVEL_COST_BASE: f64 = 13.0;
+/// The curve's exponent (see [`LEVEL_COST_BASE`]): how much steeper each
+/// level is than the last.
 pub const LEVEL_COST_EXPONENT: f64 = 1.5;
 
 /// The xp needed to go from `level` to `level + 1`.

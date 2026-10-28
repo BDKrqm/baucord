@@ -69,7 +69,8 @@ use ffmpeg::util::frame::video::Video as VideoFrame;
 use ffmpeg::{Dictionary, Rational};
 
 use crate::{
-    CodecError, DecodedFrame, EncodedFrame, Frame, PixelFormat, Quality, VideoDecoder, VideoEncoder,
+    CodecError, DecodedFrame, EncodedFrame, EncoderPreference, Frame, PixelFormat, Quality,
+    VideoDecoder, VideoEncoder,
 };
 
 /// Time between IDR keyframes, in milliseconds of *capture time*.
@@ -271,21 +272,31 @@ impl FfmpegEncoder {
     /// preset's nominal resolution so "no usable encoder" is reported
     /// here, up front, rather than mid-stream.
     pub fn new(quality: Quality) -> Result<Self, CodecError> {
-        Self::new_without(quality, &[])
+        Self::new_with(quality, EncoderPreference::Auto, &[])
     }
 
-    /// [`Self::new`], passing over the encoders in `skip`: the one that
-    /// kept failing mid-share is not taken again (review 2026-10,
-    /// P2-11).
+    /// [`Self::new`] under a preference (Settings → Stream, 1.4.0:
+    /// hardware only, software only, or either), passing over the
+    /// encoders in `skip`: the one that kept failing mid-share is not
+    /// taken again (review 2026-10, P2-11).
     ///
     /// # Errors
-    /// As [`Self::new`].
-    pub fn new_without(quality: Quality, skip: &[&str]) -> Result<Self, CodecError> {
+    /// As [`Self::new`]; with [`EncoderPreference::Hardware`], also
+    /// when no hardware encoder opens — the share does not fall back
+    /// to the CPU the sharer said not to use.
+    pub fn new_with(
+        quality: Quality,
+        preference: EncoderPreference,
+        skip: &[&str],
+    ) -> Result<Self, CodecError> {
         ffmpeg::init().map_err(|e| CodecError::EncoderInit(e.to_string()))?;
 
         let mut errors: Vec<String> = Vec::new();
 
-        for &name in ENCODER_PRIORITY.iter().filter(|n| !skip.contains(n)) {
+        for &name in ENCODER_PRIORITY
+            .iter()
+            .filter(|n| preference.allows(n) && !skip.contains(n))
+        {
             let Some(codec) = encoder::find_by_name(name) else {
                 errors.push(format!("{name}: not in FFmpeg build"));
                 continue;
@@ -336,7 +347,12 @@ impl FfmpegEncoder {
             }
         }
 
-        Err(CodecError::NoEncoder(errors.join("; ")))
+        let tried = errors.join("; ");
+        Err(CodecError::NoEncoder(match preference {
+            EncoderPreference::Auto => tried,
+            EncoderPreference::Hardware => format!("hardware only, Settings → Stream: {tried}"),
+            EncoderPreference::Software => format!("software only, Settings → Stream: {tried}"),
+        }))
     }
 
     /// Ensure the session matches the input frame's geometry and the
@@ -817,6 +833,8 @@ fn qp_floor_relaxed(floor: u32, peak_keyframe: usize, limit: usize) -> Option<Fl
 // silently become unsound. Re-audit the field list when changing either
 // struct.
 unsafe impl Send for FfmpegEncoder {}
+// SAFETY: as for `FfmpegEncoder` just above: the same kinds of raw FFmpeg
+// pointers, used only through `&mut self`.
 unsafe impl Send for FfmpegDecoder {}
 
 // ---------------------------------------------------------------------------
@@ -1151,6 +1169,8 @@ fn open_session(
 
     // Signal BT.709 limited-range in the bitstream VUI so any decoder —
     // not just ours — converts colors correctly.
+    // SAFETY: `ctx` owns a live `AVCodecContext` not yet opened; these are
+    // plain fields the open reads.
     unsafe {
         let p = ctx.as_mut_ptr();
         (*p).colorspace = ffmpeg::ffi::AVColorSpace::AVCOL_SPC_BT709;
@@ -1182,6 +1202,8 @@ fn open_session(
         .map_err(|e| CodecError::ColorConversion(e.to_string()))?;
     set_sws_colorspace(
         &mut sws,
+        // SAFETY: returns a pointer to a static table inside libswscale; no
+        // arguments but a constant.
         unsafe { ffmpeg::ffi::sws_getCoefficients(ffmpeg::ffi::SWS_CS_ITU709) },
         1, // RGB input is full range
         0, // YUV output is limited range
@@ -1189,6 +1211,8 @@ fn open_session(
 
     let mut yuv_frame = VideoFrame::new(pix_fmt, out_w, out_h);
     // Tag the frames we hand to the encoder with the same colorimetry.
+    // SAFETY: `yuv_frame` owns a live `AVFrame`; these are plain fields the
+    // encoder reads.
     unsafe {
         let f = yuv_frame.as_mut_ptr();
         (*f).colorspace = ffmpeg::ffi::AVColorSpace::AVCOL_SPC_BT709;
@@ -1419,6 +1443,8 @@ fn sws_coefficients_for(space: ffmpeg::color::Space, height: u32) -> *const i32 
         _ if height >= 720 => ffmpeg::ffi::SWS_CS_ITU709,
         _ => ffmpeg::ffi::SWS_CS_ITU601,
     };
+    // SAFETY: returns a pointer to a static table inside libswscale, chosen
+    // by a constant.
     unsafe { ffmpeg::ffi::sws_getCoefficients(cs) }
 }
 
@@ -1426,6 +1452,9 @@ fn sws_coefficients_for(space: ffmpeg::color::Space, height: u32) -> *const i32 
 ///
 /// `src_range`/`dst_range`: 0 = limited (MPEG), 1 = full (JPEG/RGB).
 fn set_sws_colorspace(sws: &mut SwsContext, coeffs: *const i32, src_range: i32, dst_range: i32) {
+    // SAFETY: `sws` owns a live `SwsContext`; `coeffs` points at one of
+    // libswscale's static tables (`sws_getCoefficients`), which it reads
+    // during the call.
     unsafe {
         let ret = ffmpeg::ffi::sws_setColorspaceDetails(
             sws.as_mut_ptr(),

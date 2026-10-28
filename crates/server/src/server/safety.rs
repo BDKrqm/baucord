@@ -102,7 +102,7 @@ impl ChatServer {
                 });
                 info!(
                     "{} ({client:#x}) {} {}",
-                    self.get_username(client),
+                    self.username_of(client),
                     if block { "blocked" } else { "unblocked" },
                     hex(&user[..8])
                 );
@@ -401,7 +401,7 @@ impl ChatServer {
         };
         info!(
             "{} ({client:#x}) reported {} ({}{})",
-            self.get_username(client),
+            self.username_of(client),
             report.target_name,
             report.reason.name(),
             if report.in_dm {
@@ -599,7 +599,7 @@ impl ChatServer {
         }
         info!(
             "{} ({client:#x}) deleted their account ({})",
-            self.get_username(client),
+            self.username_of(client),
             hex(&me[..8])
         );
         self.send_msg(client, &ServerMessage::AccountDeleted);

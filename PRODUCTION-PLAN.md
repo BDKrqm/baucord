@@ -48,8 +48,9 @@ What stands between this and "production for strangers":
 6. **Phones in the stores.** What Google Play's review asks of the app
    shipped in 1.2 (§7); what is left for Play is mostly Play Console
    work (PLAY-STORE.md) plus MOB-16 and MOB-17. The App Store is not
-   decided; it would need MOB-2, MOB-3, MOB-6, the iOS half of MOB-5,
-   and MOB-19.
+   decided; it would need MOB-19 (TestFlight from CI, with the privacy
+   manifest, an opaque icon and the encryption answer, came
+   2026-10-23/24, §7).
 
 ## 2. Milestone A — safe to expose (do first)
 
@@ -248,7 +249,8 @@ What stands between this and "production for strangers":
   job uploads with a bucket-wide key through an unpinned third-party
   action (`release.yml` ~443, `web.yaml` ~26). Sign a manifest
   (version + SHA-256 per zip) with an offline ed25519/minisign key,
-  embed the public key, verify before extracting, `https_only`;
+  embed the public key, verify before extracting, `https_only` (the
+  macOS bundle zip too, `baucord-v<v>-macos.zip`, 2026-10-24);
   scope the bucket token to release objects; replace the action with
   a pinned `aws s3 cp`.
 - [ ] **UPD-2 [P1][S] Downloads longer than 30 s always fail**
@@ -340,8 +342,12 @@ was fixed on 2026-10-16 (§7), with what only a device can confirm in
   (`nightly-2026-10-10`); `tools/chat-scroll-sim` and a Windows
   type-check from Linux (MinGW, eight crates) as jobs of their own.
   The release guard reads the workspace version every shipped crate
-  inherits. Left: clippy does not yet deny warnings (the crates carry
-  pedantic ones); the release jobs do not `needs:` the check.
+  inherits. *2026-10-27 (review 2026-10-27, P1-4):* `pr-check.yaml`
+  is callable (`workflow_call`, with a `ref`), and every release
+  workflow runs it on the tagged commit as a `check` job that the
+  publishing jobs `needs:` — `release`, the Android `publish` job,
+  the iOS build, the image push. Left: clippy does not yet deny
+  warnings (the crates carry pedantic ones).
 - [ ] **REL-2 [P1][M] Code signing**: Windows (Azure Trusted Signing or an
   OV certificate) and macOS (Developer ID, a real `.app` with an
   `Info.plist` — which is also how macOS attributes the microphone and
@@ -363,6 +369,12 @@ was fixed on 2026-10-16 (§7), with what only a device can confirm in
   its SHA-256 (LEG-1); the Windows zip's builder
   (`build-ffmpeg-windows.yml.disabled`, kept disabled — the owner's
   decision) now names the object `release.yml` downloads.
+  *2026-10-27 (review 2026-10-27, P1-5):* the Windows zip is checked
+  against `FFMPEG_WIN_SHA256` before it is unpacked; a push's build
+  prints the digest and warns while the pin is empty, a release
+  refuses. The zip's provenance is unrecorded (a past builder run or a
+  hand upload): the first pin is the digest of what is in the bucket
+  today, and the builder prints the digest to pin when it next runs.
 - [ ] **REL-5 [P1][S] The website can advertise versions that do not
   exist yet**: `web.yaml` runs after any successful "Build and
   Release", including the cache-seeding pushes to `chunk`, and stamps
@@ -374,7 +386,12 @@ was fixed on 2026-10-16 (§7), with what only a device can confirm in
   *Since:* the page deploys after a release run only (1.2.1, review
   P2-50), and only for the newest stable tag (2026-10-16, review
   2026-10 P2-27: a rebuilt older tag or a backport moved it, the
-  `version` file and Docker's `latest` backwards). Left: the APK link.
+  `version` file and Docker's `latest` backwards). *2026-10-27 (review
+  2026-10-27, P1-3):* a push's deploy (the `web/` path, and
+  `Cargo.lock`, which a version bump rewrites) stamps the version the
+  `version` file names — what is downloadable — or the newest stable
+  tag, never `main`'s `Cargo.toml`; and the page hides a download row
+  whose `HEAD` answers 404, which also covers the APK's minutes.
 - [ ] **REL-6 [P2] Supply chain and release hygiene**: no
   cargo-deny/audit; `serde_yaml` is deprecated; Dependabot PRs merge with no
   CI; no Gradle wrapper checksum; floating NDK, cargo-ndk and runner
@@ -412,32 +429,17 @@ was fixed on 2026-10-16 (§7), with what only a device can confirm in
 ## 4. Milestone C — phones in the stores
 
 Today's builds are a sideloaded APK (ANDROID-SPEC D4) and Ad Hoc builds
-(IOS-SPEC D37; D10 planned TestFlight). **Google Play is the goal**
-(§6, 2): **PLAY-STORE.md** is the process — account, signing, forms,
+(IOS-SPEC D37), with TestFlight from CI since 2026-10-23 (D67).
+**Google Play is the goal** (§6, 2): **PLAY-STORE.md** is the process — account, signing, forms,
 the 14-day closed test. What the app itself had to do for it shipped
 in 1.2 (§7); left here: MOB-5's Play side, MOB-16, MOB-17. The App
 Store is not decided yet.
 
-- [ ] **MOB-2 [P0][S] iOS privacy manifest.** No `PrivacyInfo.xcprivacy`;
-  the binary uses required-reason APIs (file timestamps through
-  `std::fs::metadata`, `mach_absolute_time` through cpal). App Store
-  Connect refuses uploads without it, TestFlight included.
-- [ ] **MOB-3 [P0][S] The iOS icon keeps its alpha channel**
-  (`ios/scripts/render_icon.sh`, on purpose for development); App
-  Store Connect rejects it. Flatten onto #1A1D21 for release builds.
 - [ ] **MOB-5 [P0][M] Store pipelines.** Android is done (§7;
   ANDROID-SPEC D62). Left: on Play's side, give it our release key as
   the app signing key, which is also the upload key (PLAY-STORE.md §4,
   the user); later, upload from CI through the Play Developer API. iOS
-  exports Ad Hoc only (`ios-release.yml` ~148, ~231): add the App
-  Store/TestFlight export and the symbol upload.
-- [ ] **MOB-6 [P1][S] Encryption export compliance.** No
-  `ITSAppUsesNonExemptEncryption` in the Info.plist; rustls/ring are
-  non-Apple cryptography (a BIS self-classification is likely). Play:
-  nothing to file (checked 2026-10-08, PLAY-STORE.md §10). Standard
-  crypto in a free mass-market app is 5D992.c, and since BIS's
-  2021-03-29 rule it needs no report; the email notification is only
-  for non-standard crypto.
+  is done (TestFlight upload with the dSYMs, 2026-10-23, §7).
 - [ ] **MOB-7 [P1][S] Android moves the identity key to a new phone**:
   `allowBackup="false"` no longer covers device-to-device transfer for
   apps targeting 31+. Add `dataExtractionRules` excluding everything
@@ -1696,6 +1698,33 @@ One line each; the spec decision named holds the detail.
     **Not run anywhere real:** Windows DXGI halving and the pointer
     redraw, E16's streams, everything on iOS, the server against a
     live deployment — `DEVICE-CHECKLIST.md` **[10-16]**.
+- **2026-10-23 — MOB-2, MOB-3, MOB-5 (iOS)**: the privacy manifest,
+  checked in CI against the binary's imports; the app icon opaque in
+  every build; `ios-release.yml` uploads to TestFlight with an App Store
+  profile and an App Store Connect API key (IOS-SPEC D67). Not yet run
+  on a Mac (DEVICE-CHECKLIST §3.5); the encryption answer is MOB-6.
+- **2026-10-24 — MOB-6**: the first TestFlight build (run #11) went
+  through; the encryption question is answered in the Info.plist
+  (`ITSAppUsesNonExemptEncryption` = NO: standard algorithms, not on
+  the App Store in France — France needs a French encryption
+  declaration first; IOS-SPEC D68).
+- **2026-10-24 — the Mac app**: `baucord.app`, universal, in a disk
+  image (`baucord-v<v>-macos.dmg`) with an Applications shortcut, built
+  from the two release binaries by `macos/package.sh` in `release.yml`'s
+  `macos-app` job; signed with a Developer ID and notarized on releases
+  when the secrets are there, ad hoc otherwise (macos/README.md). An
+  installed bundle updates whole from `baucord-v<v>-macos.zip`
+  (`frontend/src/bundle.rs`); bare binaries keep their per-architecture
+  zips. Settings never live inside the bundle (`client::config`,
+  `inside_app_bundle`: a writable `/Applications` made the bundle a
+  "portable" config folder, which the swap would have thrown away);
+  moving from a zip install is by hand (macos/README.md §1) — an
+  importer that offers to bring a zip install's settings over is the
+  natural follow-up. The website offers the disk image. Considered and set aside: a
+  Mac App Store build — its sandbox is mandatory, and the desktop's
+  video (FFmpeg + x264, GPL-3.0, LEG-1) and keybinds (Accessibility)
+  would need VideoToolbox encoding and Input Monitoring first. Not yet
+  run on a Mac (DEVICE-CHECKLIST §4.4).
 
 ## 8. Facts this plan rests on
 

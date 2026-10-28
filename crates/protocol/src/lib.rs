@@ -16,6 +16,10 @@
 //!   the TLS handshake instead of misbehaving mid-session. Additive
 //!   changes ride on [`features`] bits (new messages, never new fields).
 
+// A published crate: every public item says what it is for
+// (Google's Rust style guide; SESSION-GUIDE.md §4).
+#![warn(missing_docs)]
+
 pub mod admin;
 pub mod features;
 pub mod frame;

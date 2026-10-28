@@ -15,7 +15,7 @@ use std::sync::atomic::Ordering;
 use crate::aec::{self, AecMode, OutputKind};
 use crate::fake::{Clock, Machine};
 use crate::route::{self, kinds, RouteDevice};
-use crate::{StartOutcome, Traits, VoiceChat, VoiceChatConfig};
+use crate::{Presence, StartOutcome, Traits, VoiceChat, VoiceChatConfig};
 
 /// An engine on a machine, and a clock for its supervision.
 struct Rig {
@@ -49,9 +49,9 @@ impl Rig {
     /// A phone in a voice room, unmuted.
     fn in_a_room(machine: Machine) -> Self {
         let mut rig = Self::on(machine);
-        rig.vc.set_presence(false, false);
+        rig.vc.set_presence(Presence::Lobby);
         let _ = rig.vc.start();
-        rig.vc.set_presence(true, true);
+        rig.vc.set_presence(Presence::Live);
         rig.did();
         rig
     }
@@ -80,6 +80,15 @@ impl Rig {
 
     fn report(&self) -> Option<String> {
         self.vc.aec_report().map(|r| r.summary())
+    }
+
+    /// The engine announces a supervision deadline that is already
+    /// past: its owner's loop would call `service` again at once, and
+    /// again — a core pinned (review 2026-10-27, P1-1).
+    fn due_already(&self) -> bool {
+        self.vc
+            .next_service()
+            .is_some_and(|at| at <= self.clock.now())
     }
 
     fn fail_output(&self) {
@@ -123,9 +132,9 @@ fn desktop_starts_playback_first_then_the_microphone() {
 #[test]
 fn desktop_keeps_its_streams_out_of_a_room_and_through_the_setting() {
     let mut rig = Rig::started(Traits::DESKTOP);
-    rig.vc.set_presence(false, true);
-    rig.vc.set_presence(true, true);
-    rig.vc.set_presence(true, false);
+    rig.vc.set_presence(Presence::Lobby);
+    rig.vc.set_presence(Presence::Live);
+    rig.vc.set_presence(Presence::Muted);
     rig.vc.set_echo_cancellation(AecMode::Always);
     rig.vc.set_echo_cancellation(AecMode::Off);
     assert!(!rig.tick());
@@ -467,7 +476,7 @@ fn windows_on_speakers_takes_the_call_path_and_follows_the_communications_defaul
 #[test]
 fn windows_on_speakers_takes_the_call_path_in_a_room_only() {
     let mut rig = Rig::new(Traits::WINDOWS);
-    rig.vc.set_presence(false, true);
+    rig.vc.set_presence(Presence::Lobby);
     let _ = rig.vc.start();
     let plain = [
         "plan: plain streams",
@@ -482,7 +491,7 @@ fn windows_on_speakers_takes_the_call_path_in_a_room_only() {
     assert_eq!(rig.machine.surveys(), surveys);
     assert_eq!(rig.did(), NOTHING);
 
-    rig.vc.set_presence(true, true);
+    rig.vc.set_presence(Presence::Live);
     assert_eq!(
         rig.did(),
         [
@@ -498,10 +507,10 @@ fn windows_on_speakers_takes_the_call_path_in_a_room_only() {
         Some("platform (speakers) ref=speakers")
     );
     // Muted in the room: the desktop keeps both.
-    rig.vc.set_presence(true, false);
+    rig.vc.set_presence(Presence::Muted);
     assert_eq!(rig.did(), NOTHING);
 
-    rig.vc.set_presence(false, true);
+    rig.vc.set_presence(Presence::Lobby);
     let mut back = vec!["close microphone", "close output"];
     back.extend(plain);
     assert_eq!(rig.did(), back);
@@ -514,13 +523,13 @@ fn windows_on_headphones_joins_without_reopening() {
         w.kinds.insert("speakers".into(), OutputKind::Headphones);
     });
     let mut rig = Rig::on(machine);
-    rig.vc.set_presence(false, true);
+    rig.vc.set_presence(Presence::Lobby);
     let _ = rig.vc.start();
     rig.did();
     assert_eq!(rig.report(), None);
-    rig.vc.set_presence(true, true);
+    rig.vc.set_presence(Presence::Live);
     assert_eq!(rig.report().as_deref(), Some("none (headphones)"));
-    rig.vc.set_presence(false, true);
+    rig.vc.set_presence(Presence::Lobby);
     assert_eq!(rig.did(), NOTHING, "plain streams in a room and out of one");
     assert_eq!(rig.report(), None);
 }
@@ -721,6 +730,36 @@ fn windows_a_default_that_moved_to_a_headset_takes_both_sides_off_the_call_path(
     );
 }
 
+/// Review 2026-10-27, P1-1: Windows' watcher reports every default
+/// move, picked device or not. Under a pick the move is no need, and
+/// the flag it left raised made `next_service` a deadline already due
+/// for the rest of the run — the voice thread spun on `service()`.
+#[test]
+fn windows_a_default_that_moves_under_a_pick_leaves_nothing_due() {
+    let machine = Machine::new(Traits::WINDOWS);
+    machine.set(|w| w.device_events = true);
+    let mut rig = Rig::on(machine);
+    let _ = rig.vc.start();
+    rig.vc.set_output_device(Some("speakers")).expect("opens");
+    rig.did();
+    rig.machine.plug_output("headset", OutputKind::Headphones);
+    rig.machine.set(|w| w.comms_output = Some("headset".into()));
+    rig.vc
+        .stats
+        .default_output_changed
+        .store(true, Ordering::Relaxed);
+    assert!(!rig.tick());
+    assert_eq!(rig.did(), NOTHING, "the pick stands");
+    assert!(!rig.due_already(), "nothing to do, so nothing is due");
+    assert!(
+        !rig.vc.stats.default_output_changed.load(Ordering::Relaxed),
+        "the stale flag is dropped"
+    );
+    assert!(!rig.tick());
+    assert!(!rig.due_already());
+    assert_eq!(rig.vc.next_service(), None, "events, not a poll: nothing");
+}
+
 #[test]
 fn windows_without_events_the_poll_finds_a_plan_gone_stale() {
     let mut rig = Rig::started(Traits::WINDOWS);
@@ -840,7 +879,7 @@ fn phone_routes(headset: bool) -> Vec<RouteDevice> {
 #[test]
 fn android_opens_nothing_in_the_lobby_and_asks_the_system_nothing() {
     let mut rig = Rig::on(phone(false));
-    rig.vc.set_presence(false, false);
+    rig.vc.set_presence(Presence::Lobby);
     assert!(matches!(rig.vc.start(), StartOutcome::Started));
     assert_eq!(rig.did(), ["plan: plain streams"]);
     assert_eq!(rig.open(), (None, None));
@@ -856,10 +895,10 @@ fn android_opens_nothing_in_the_lobby_and_asks_the_system_nothing() {
 #[test]
 fn android_joining_a_room_takes_the_call_path_on_the_loudspeaker() {
     let mut rig = Rig::on(phone(false));
-    rig.vc.set_presence(false, false);
+    rig.vc.set_presence(Presence::Lobby);
     let _ = rig.vc.start();
     rig.did();
-    rig.vc.set_presence(true, true);
+    rig.vc.set_presence(Presence::Live);
     assert_eq!(
         rig.did(),
         [
@@ -877,22 +916,22 @@ fn android_joining_a_room_takes_the_call_path_on_the_loudspeaker() {
 #[test]
 fn android_muted_in_a_room_closes_the_microphone_alone() {
     let mut rig = Rig::in_a_room(phone(false));
-    rig.vc.set_presence(true, false);
+    rig.vc.set_presence(Presence::Muted);
     assert_eq!(rig.did(), ["close microphone"]);
     assert_eq!(rig.report(), None);
     assert!(!rig.tick());
     assert_eq!(rig.did(), NOTHING, "closed on purpose: not retried");
-    rig.vc.set_presence(true, true);
+    rig.vc.set_presence(Presence::Live);
     assert_eq!(rig.did(), ["open microphone mic (call)"]);
 }
 
 #[test]
 fn android_joining_muted_opens_playback_only() {
     let mut rig = Rig::on(phone(false));
-    rig.vc.set_presence(false, false);
+    rig.vc.set_presence(Presence::Lobby);
     let _ = rig.vc.start();
     rig.did();
-    rig.vc.set_presence(true, false);
+    rig.vc.set_presence(Presence::Muted);
     assert_eq!(
         rig.did(),
         [
@@ -905,7 +944,7 @@ fn android_joining_muted_opens_playback_only() {
 #[test]
 fn android_leaving_the_room_closes_everything_and_drops_communication_mode() {
     let mut rig = Rig::in_a_room(phone(false));
-    rig.vc.set_presence(false, false);
+    rig.vc.set_presence(Presence::Lobby);
     assert_eq!(
         rig.did(),
         ["close microphone", "close output", "plan: plain streams"]
@@ -986,7 +1025,7 @@ fn android_a_picked_route_holds_communication_mode_with_cancellation_off() {
 #[test]
 fn android_a_route_picked_in_the_lobby_is_applied_at_the_join() {
     let mut rig = Rig::on(phone(true));
-    rig.vc.set_presence(false, false);
+    rig.vc.set_presence(Presence::Lobby);
     let _ = rig.vc.start();
     rig.did();
     rig.vc
@@ -994,7 +1033,7 @@ fn android_a_route_picked_in_the_lobby_is_applied_at_the_join() {
         .expect("kept");
     rig.vc.set_input_device(None).expect("kept");
     assert_eq!(rig.did(), NOTHING);
-    rig.vc.set_presence(true, true);
+    rig.vc.set_presence(Presence::Live);
     assert_eq!(
         rig.did(),
         [
@@ -1013,9 +1052,9 @@ fn android_a_microphone_not_granted_yet_is_asked_for_while_it_is_wanted() {
         w.default_input = None;
     });
     let mut rig = Rig::on(machine);
-    rig.vc.set_presence(false, false);
+    rig.vc.set_presence(Presence::Lobby);
     let _ = rig.vc.start();
-    rig.vc.set_presence(true, true);
+    rig.vc.set_presence(Presence::Live);
     assert_eq!(
         rig.did(),
         [
@@ -1028,7 +1067,7 @@ fn android_a_microphone_not_granted_yet_is_asked_for_while_it_is_wanted() {
     assert!(!rig.tick());
     assert_eq!(rig.did(), ["microphone refused: no default microphone"]);
     // Muted meanwhile: it should stay closed, and nothing asks.
-    rig.vc.set_presence(true, false);
+    rig.vc.set_presence(Presence::Muted);
     assert!(!rig.tick());
     assert_eq!(rig.did(), NOTHING);
     // The permission came, and the user unmutes.
@@ -1036,7 +1075,7 @@ fn android_a_microphone_not_granted_yet_is_asked_for_while_it_is_wanted() {
         w.inputs.push("mic".into());
         w.default_input = Some("mic".into());
     });
-    rig.vc.set_presence(true, true);
+    rig.vc.set_presence(Presence::Live);
     assert_eq!(rig.did(), ["open microphone mic (call)"]);
 }
 
@@ -1051,14 +1090,14 @@ fn android_a_failed_playback_in_a_room_is_reopened_alone() {
 #[test]
 fn android_the_setting_in_the_lobby_waits_for_the_join() {
     let mut rig = Rig::on(phone(false));
-    rig.vc.set_presence(false, false);
+    rig.vc.set_presence(Presence::Lobby);
     let _ = rig.vc.start();
     rig.did();
     let asked = rig.machine.surveys();
     rig.vc.set_echo_cancellation(AecMode::Off);
     assert_eq!(rig.did(), NOTHING);
     assert_eq!(rig.machine.surveys(), asked, "nothing open: nothing asked");
-    rig.vc.set_presence(true, true);
+    rig.vc.set_presence(Presence::Live);
     assert_eq!(
         rig.did(),
         [
@@ -1074,7 +1113,7 @@ fn android_the_setting_in_the_lobby_waits_for_the_join() {
 #[test]
 fn ios_in_the_lobby_plays_through_a_plain_output_and_records_nothing() {
     let mut rig = Rig::new(Traits::IOS);
-    rig.vc.set_presence(false, false);
+    rig.vc.set_presence(Presence::Lobby);
     assert!(matches!(rig.vc.start(), StartOutcome::Started));
     // An app with no audio running is suspended in the background.
     assert_eq!(
@@ -1084,13 +1123,41 @@ fn ios_in_the_lobby_plays_through_a_plain_output_and_records_nothing() {
     assert_eq!(rig.open(), (None, Some("speakers")));
 }
 
+/// Review 2026-10-27, P1-1: an interruption's end flags both sides
+/// (`avsession.rs`), and in the lobby there is no microphone to
+/// reopen. Playback comes back; the microphone's stale flag must not
+/// keep a deadline due, or the app spins in the background, where iOS
+/// ends it.
+#[test]
+fn ios_an_interruption_in_the_lobby_reopens_playback_and_leaves_nothing_due() {
+    let mut rig = Rig::new(Traits::IOS);
+    rig.vc.set_presence(Presence::Lobby);
+    let _ = rig.vc.start();
+    rig.did();
+    rig.fail_input();
+    rig.fail_output();
+    assert!(rig.tick());
+    assert_eq!(rig.did(), ["close output", "open output speakers (plain)"]);
+    assert_eq!(rig.open(), (None, Some("speakers")));
+    assert!(
+        !rig.vc.stats.input_stream_failed.load(Ordering::Relaxed),
+        "no microphone to reopen: the flag is dropped"
+    );
+    assert!(!rig.tick());
+    assert_eq!(rig.did(), NOTHING);
+    assert!(
+        !rig.due_already(),
+        "a flag nothing consumes must not keep the owner awake"
+    );
+}
+
 #[test]
 fn ios_joining_a_room_moves_both_sides_onto_the_voice_unit() {
     let mut rig = Rig::new(Traits::IOS);
-    rig.vc.set_presence(false, false);
+    rig.vc.set_presence(Presence::Lobby);
     let _ = rig.vc.start();
     rig.did();
-    rig.vc.set_presence(true, true);
+    rig.vc.set_presence(Presence::Live);
     assert_eq!(
         rig.did(),
         [
@@ -1106,10 +1173,10 @@ fn ios_joining_a_room_moves_both_sides_onto_the_voice_unit() {
 #[test]
 fn ios_joining_muted_opens_the_unit_muted_with_both_sides_on_it() {
     let mut rig = Rig::new(Traits::IOS);
-    rig.vc.set_presence(false, false);
+    rig.vc.set_presence(Presence::Lobby);
     let _ = rig.vc.start();
     rig.did();
-    rig.vc.set_presence(true, false);
+    rig.vc.set_presence(Presence::Muted);
     assert_eq!(
         rig.did(),
         [
@@ -1125,10 +1192,10 @@ fn ios_joining_muted_opens_the_unit_muted_with_both_sides_on_it() {
 #[test]
 fn ios_mutes_on_the_unit_without_closing_anything() {
     let mut rig = Rig::in_a_room(Machine::new(Traits::IOS));
-    rig.vc.set_presence(true, false);
+    rig.vc.set_presence(Presence::Muted);
     assert_eq!(rig.did(), ["unit microphone muted"]);
     assert_eq!(rig.open(), (Some("mic"), Some("speakers")));
-    rig.vc.set_presence(true, true);
+    rig.vc.set_presence(Presence::Live);
     assert_eq!(rig.did(), ["unit microphone live"]);
 }
 
@@ -1166,16 +1233,16 @@ fn ios_headphones_take_both_sides_off_the_unit_and_mute_then_closes_the_micropho
         ]
     );
     // No unit to mute on: closed like Android's.
-    rig.vc.set_presence(true, false);
+    rig.vc.set_presence(Presence::Muted);
     assert_eq!(rig.did(), ["close microphone"]);
-    rig.vc.set_presence(true, true);
+    rig.vc.set_presence(Presence::Live);
     assert_eq!(rig.did(), ["open microphone mic (plain)"]);
 }
 
 #[test]
 fn ios_leaving_the_room_goes_back_to_the_plain_output() {
     let mut rig = Rig::in_a_room(Machine::new(Traits::IOS));
-    rig.vc.set_presence(false, false);
+    rig.vc.set_presence(Presence::Lobby);
     assert_eq!(
         rig.did(),
         [
@@ -1192,10 +1259,10 @@ fn ios_a_unit_that_will_not_open_leaves_both_sides_on_plain_streams() {
     let machine = Machine::new(Traits::IOS);
     machine.set(|w| w.unit_refuses = true);
     let mut rig = Rig::on(machine);
-    rig.vc.set_presence(false, false);
+    rig.vc.set_presence(Presence::Lobby);
     let _ = rig.vc.start();
     rig.did();
-    rig.vc.set_presence(true, true);
+    rig.vc.set_presence(Presence::Live);
     assert_eq!(
         rig.did(),
         [

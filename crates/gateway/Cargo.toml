@@ -1,0 +1,56 @@
+[package]
+name = "gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "baucord-gateway: a bot's door to a baucord server — QUIC to the server on one side, a local WebSocket speaking JSON (and raw PCM for voice) on the other, so a bot in any language is a WebSocket client."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "baucord-gateway"
+path = "src/main.rs"
+
+# The code-only music bot (`cargo run -p gateway --example music`);
+# its decode pipeline has tests of its own.
+[[example]]
+name = "music"
+test = true
+
+[dependencies]
+protocol = { path = "../protocol" }
+transport = { path = "../transport" }
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+env_logger.workspace = true
+crossbeam-channel.workspace = true
+clap = { version = "4.6", features = ["derive", "env"] }
+# Ctrl-C closes the session before the process ends, so the server
+# sees a goodbye instead of a 30 s idle timeout.
+ctrlc = { version = "3.5", features = ["termination"] }
+# The local WebSocket (RFC 6455) a bot connects to: a stream-based
+# implementation, one thread per bot connection, no async runtime —
+# the same shape as the rest of the tree.
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+# Opus for the voice a bot plays: the same crate (and libopus) the
+# audio engine encodes with.
+opus = "0.4"
+
+[dev-dependencies]
+# The gateway's session against a real `ChatServer` on the in-process
+# network (the server's own e2e harness).
+server = { path = "../server" }
+transport = { path = "../transport", features = ["sim"] }
+# `examples/music.rs`, the code-only music bot: files and URLs decoded
+# in-process (symphonia is pure Rust: mp3, aac/m4a, flac, ogg/vorbis,
+# wav), resampled to 48 kHz with the same rubato the audio engine uses
+# (and its adapter crate, at the major rubato 5 wants), fetched with
+# the ureq the updater already uses.
+symphonia = { version = "0.6", features = ["mp3", "aac", "isomp4"] }
+rubato = "5.0"
+audioadapter-buffers = "5.1"
+ureq = "3.4"
+# A WAV written for the pipeline's test.
+hound = "3.5"

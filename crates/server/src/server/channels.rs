@@ -194,7 +194,7 @@ impl ChatServer {
         };
         info!(
             "{} ({client:#x}) created channel '{}' (#{stable_id}{})",
-            self.get_username(client),
+            self.username_of(client),
             record.name,
             if record.permanent { ", permanent" } else { "" }
         );
@@ -252,7 +252,7 @@ impl ChatServer {
         if let Some(record) = updated {
             info!(
                 "{} ({client:#x}) edited channel '{}' (#{})",
-                self.get_username(client),
+                self.username_of(client),
                 record.name,
                 record.stable_id
             );
@@ -287,7 +287,7 @@ impl ChatServer {
         }
         info!(
             "{} ({client:#x}) deleted channel '{}' (#{})",
-            self.get_username(client),
+            self.username_of(client),
             existing.name,
             existing.stable_id
         );
@@ -330,7 +330,7 @@ impl ChatServer {
             if self.channel_of.get(&session) == Some(&channel_id) {
                 info!(
                     "{} ({client:#x}) sent {} out of channel {channel_id}",
-                    self.get_username(client),
+                    self.username_of(client),
                     hex(&target[..8])
                 );
                 self.place_in_channel(session, default);
@@ -410,7 +410,7 @@ impl ChatServer {
     fn deny_channel(&mut self, client: ClientId, reason: ChannelUiDenyReason) {
         info!(
             "{} ({client:#x}) channel request refused: {}",
-            self.get_username(client),
+            self.username_of(client),
             reason.describe()
         );
         self.send_msg(client, &ServerMessage::ChannelDenied { reason });
@@ -488,7 +488,7 @@ impl ChatServer {
         for (client, after_min) in idle {
             info!(
                 "{} ({client:#x}) idle for {after_min} min; moved to the AFK channel",
-                self.get_username(client)
+                self.username_of(client)
             );
             self.place_in_channel(client, afk);
             self.note_activity(client);

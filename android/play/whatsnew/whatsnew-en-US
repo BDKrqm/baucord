@@ -1,0 +1,6 @@
+1.4.0
+• A phone in the lobby with the screen off keeps its session.
+• A stream you watch pauses in the background and resumes when you come back.
+• Pictures you send lose their camera and location data and arrive the right way up.
+• Settings fit small screens; Back cancels an edit; Clear chat asks first.
+• A mention plays its own chime; a burst of direct messages makes one sound.

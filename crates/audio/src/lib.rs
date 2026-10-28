@@ -70,7 +70,7 @@ mod native;
 mod output;
 mod platform;
 pub mod processor;
-mod resampler;
+pub mod resampler;
 pub mod route;
 pub mod sounds;
 mod spatial;
@@ -549,6 +549,23 @@ pub struct VoiceChat {
     /// Holds the OS timer at 1 ms resolution for the session (Windows).
     /// Held in a voice room ([`Self::sync_timer`]).
     timer_guard: Option<platform::TimerResolutionGuard>,
+}
+
+/// Where the user is, for the streams: the lobby, or a voice room with
+/// the microphone live or muted ([`VoiceChat::set_presence`]). Two
+/// `bool`s said the same thing and `set_presence(true, true)` said
+/// nothing at the call site (review 2026-10-27).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Presence {
+    /// Not in a voice room: the desktop keeps its streams and drops
+    /// what the microphone hears; a phone keeps playback only.
+    Lobby,
+    /// In a voice room with the microphone wanted: not muted, not
+    /// deafened, not waiting for push-to-talk.
+    Live,
+    /// In a voice room, muted: a phone closes or mutes the microphone,
+    /// the desktop drops its samples.
+    Muted,
 }
 
 /// What [`VoiceChat::start`] opened. Not a `Result`: with playback up
@@ -1455,7 +1472,9 @@ impl VoiceChat {
     ///   is fast and turns the system's recording indicator off, and on
     ///   iOS's plain streams (headphones without echo cancellation) it
     ///   is closed like Android's.
-    pub fn set_presence(&mut self, in_room: bool, mic_wanted: bool) {
+    pub fn set_presence(&mut self, presence: Presence) {
+        let in_room = presence != Presence::Lobby;
+        let mic_wanted = presence == Presence::Live;
         self.stats.in_room.store(in_room, Ordering::Relaxed);
         if !self.traits.releases_mic {
             let moved = in_room != self.in_room;
@@ -1818,7 +1837,7 @@ impl VoiceChat {
     }
 
     pub fn stats_summary(&self) -> String {
-        self.stats.get_summary()
+        self.stats.summary()
     }
 
     /// Names of the devices currently open, `(input, output)`.
@@ -1844,21 +1863,42 @@ impl VoiceChat {
     /// an engine existed.
     #[must_use]
     pub fn next_service(&self) -> Option<Instant> {
-        let stats = &self.stats;
-        let flagged = stats.input_stream_failed.load(Ordering::Relaxed)
-            || stats.output_stream_failed.load(Ordering::Relaxed)
-            || stats.default_input_changed.load(Ordering::Relaxed)
-            || stats.default_output_changed.load(Ordering::Relaxed);
-        let late = (self.input.is_none() && self.input_pending && self.capture_wanted())
-            || (self.output.is_none() && self.output_pending && self.playback_wanted());
-        let retry = (flagged || late || self.aec_replan)
-            .then(|| self.last_restart_attempt + self.retry_after);
+        // The same reading `service_at` acts on: a deadline is announced
+        // only for what it will do. It used to count every raised flag,
+        // and a flag that is no need (a default that moved under a
+        // picked device, a side that failed and is closed) made it a
+        // deadline already due, for ever — the owner's loop spun on
+        // `service()` returning false (review 2026-10-27, P1-1).
+        let seen = self.findings();
+        let retry =
+            (seen.any() || self.aec_replan).then(|| self.last_restart_attempt + self.retry_after);
         let open = self.input.is_some() || self.output.is_some();
         let poll = (open && !self.has_device_events())
             .then(|| self.last_device_poll + DEFAULT_DEVICE_POLL);
         match (retry, poll) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
+        }
+    }
+
+    /// What the raised flags mean for the streams as they stand: the
+    /// one reading [`Self::next_service`] and [`Self::service`] share.
+    fn findings(&self) -> Trouble {
+        let stats = &self.stats;
+        Trouble {
+            input_needs: self.input.is_some()
+                && (stats.input_stream_failed.load(Ordering::Relaxed)
+                    || (self.config.input_device.is_none()
+                        && stats.default_input_changed.load(Ordering::Relaxed))),
+            output_needs: self.output.is_some()
+                && (stats.output_stream_failed.load(Ordering::Relaxed)
+                    || (self.config.output_device.is_none()
+                        && stats.default_output_changed.load(Ordering::Relaxed))),
+            // A side that is not open is not a failed stream (there is
+            // none) — it is a device or permission that may show up
+            // later: one that never opened, or whose reopen failed.
+            input_late: self.input.is_none() && self.input_pending && self.capture_wanted(),
+            output_late: self.output.is_none() && self.output_pending && self.playback_wanted(),
         }
     }
 
@@ -1885,21 +1925,26 @@ impl VoiceChat {
 
         self.poll_devices(now);
 
-        let seen = Trouble {
-            input_needs: self.input.is_some()
-                && (stats.input_stream_failed.load(Ordering::Relaxed)
-                    || (self.config.input_device.is_none()
-                        && stats.default_input_changed.load(Ordering::Relaxed))),
-            output_needs: self.output.is_some()
-                && (stats.output_stream_failed.load(Ordering::Relaxed)
-                    || (self.config.output_device.is_none()
-                        && stats.default_output_changed.load(Ordering::Relaxed))),
-            // A side that is not open is not a failed stream (there is
-            // none) — it is a device or permission that may show up
-            // later: one that never opened, or whose reopen failed.
-            input_late: self.input.is_none() && self.input_pending && self.capture_wanted(),
-            output_late: self.output.is_none() && self.output_pending && self.playback_wanted(),
-        };
+        let seen = self.findings();
+        // Read before the stale ones go: a move is news for a late side
+        // whether or not the open side cares.
+        let moved = stats.default_input_changed.load(Ordering::Relaxed)
+            || stats.default_output_changed.load(Ordering::Relaxed);
+        // A flag that made no need is stale and is dropped here: a
+        // default that moved under a picked device (Windows' watcher
+        // reports every move), a stream that failed and is closed (an
+        // iPhone's interruption ends with both sides flagged while the
+        // lobby has no microphone). Left raised, it reset the retry wait
+        // to its shortest on every tick and, before `findings`, announced
+        // a deadline nothing would meet (P1-1).
+        if !seen.input_needs {
+            stats.input_stream_failed.store(false, Ordering::Relaxed);
+            stats.default_input_changed.store(false, Ordering::Relaxed);
+        }
+        if !seen.output_needs {
+            stats.output_stream_failed.store(false, Ordering::Relaxed);
+            stats.default_output_changed.store(false, Ordering::Relaxed);
+        }
         // Taken whether or not anything waits for a device.
         let arrived = stats.device_arrived.swap(false, Ordering::Relaxed);
         if !seen.any() && !self.aec_replan {
@@ -1907,10 +1952,7 @@ impl VoiceChat {
         }
         // The OS said a device came or a default moved: try soon, not
         // at the end of a long wait.
-        if arrived
-            || stats.default_input_changed.load(Ordering::Relaxed)
-            || stats.default_output_changed.load(Ordering::Relaxed)
-        {
+        if arrived || moved {
             self.retry_after = RESTART_BACKOFF;
         }
         if now.duration_since(self.last_restart_attempt) < self.retry_after {
@@ -2325,14 +2367,14 @@ mod headless_tests {
     fn the_desktop_out_of_a_room_drops_the_microphone_not_the_streams() {
         let mut vc = VoiceChat::new(VoiceChatConfig::default());
         vc.is_speaking.set(true);
-        vc.set_presence(false, true);
+        vc.set_presence(Presence::Lobby);
         assert!(vc.input_config.silenced());
         assert!(!vc.is_speaking(), "nobody speaks from the lobby");
         assert!(
             vc.capture_wanted() && vc.playback_wanted(),
             "the streams stay"
         );
-        vc.set_presence(true, true);
+        vc.set_presence(Presence::Live);
         assert!(!vc.input_config.silenced());
         vc.set_muted(true);
         assert!(vc.input_config.silenced(), "mute is still mute");

@@ -761,7 +761,7 @@ impl NativeCapture {
         let thread = crate::platform::spawn_named("voice-capture-wasapi", move || {
             capture_thread(
                 name.as_deref(),
-                voice.as_ref(),
+                voice.as_ref().map(Option::as_deref),
                 communications,
                 &setup_tx,
                 &parts_rx,
@@ -829,7 +829,7 @@ impl Drop for NativeCapture {
 /// stream. `communications`: what "default" means ([`role_for`]).
 fn capture_thread(
     device_name: Option<&str>,
-    voice: Option<&Option<String>>,
+    voice: Option<Option<&str>>,
     communications: bool,
     setup_tx: &Sender<SetupReport<CaptureSetup>>,
     parts_rx: &crossbeam_channel::Receiver<CaptureParts>,
@@ -865,8 +865,7 @@ fn capture_thread(
                 voice.is_some(),
             )?;
             if let Some(reference) = voice {
-                let (verdict, named) =
-                    engage_platform_aec(&client, &enumerator, reference.as_deref());
+                let (verdict, named) = engage_platform_aec(&client, &enumerator, reference);
                 aec_verdict = Some(verdict);
                 aec_reference_named = named;
             }

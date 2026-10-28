@@ -4,11 +4,51 @@ What changed from one release to the next, for the people who run a
 baucord server and the people who use the apps. Releases before this
 file are summed up in SESSION-GUIDE.md §3 ("Shipped").
 
-## 1.3.0 (unreleased)
+## 1.4.0 (unreleased)
 
-The 2026-10 review, fixed whole: what costs while nothing happens,
-pictures and memory, Windows audio, Settings that save only when asked,
-and the release pipeline.
+Numbered for the bot and plugin framework planned on it (the spec is
+in the 2026-10-27 review document), on top of the 2026-10 review fixed
+whole: what costs while nothing happens, pictures and memory, Windows
+audio, Settings that save only when asked, and the release pipeline.
+The 1.3.0 that was next became this.
+
+### Bots
+
+- **`baucord-gateway`: bots in any language.** A new binary
+  (`crates/gateway`) connects to a server as a user with a key of its
+  own and serves a WebSocket on the loopback where a bot reads JSON
+  events (`READY`, `MESSAGE_CREATE`, `MEMBER_ADD`, `VOICE_STATE`, …),
+  sends JSON actions (`CREATE_MESSAGE`, `CREATE_DM`, `JOIN_CHANNEL`,
+  `SET_NICKNAME`, `FETCH_HISTORY`, …) and streams PCM that the gateway
+  encodes as Opus and plays into the bot's voice channel, one 20 ms
+  frame every 20 ms whatever the bot's pace. Admission is an invite
+  code on the first run and the key alone after; the server's identity
+  is pinned on first use like the app does. A Python echo bot and a
+  `yt-dlp`/`ffmpeg` music bot are in `crates/gateway/examples`, the
+  wire is `crates/gateway/README.md`. Tested against a real server on
+  the in-process network (admission, chat both ways, voice reaching a
+  listener, a refusal) and live on Linux. Slash commands and the `bot`
+  role come with the server's side of the bot work; until then a bot
+  reacts to chat lines and is an ordinary member.
+- **A bot in Rust is one binary.** The gateway is also a library,
+  `gateway::bot::Bot` (`connect`, `events`, `act`, `play`,
+  `stop_playing`), and `crates/gateway/examples/music.rs` is a music
+  bot built on it with nothing to install: `!play <file or url>`,
+  `!skip`, `!stop`, `!queue`, files from a `--library` folder and
+  never outside it, URLs and internet radio fetched as they play,
+  decoded in-process (symphonia, rubato — the audio engine's crates).
+  Run live against a real server: a 6 s file lights the bot's speaking
+  light for 6.2 s, a queued track follows by itself, `!skip` starts
+  the next within 30 ms, `!stop` goes quiet within 0.2 s.
+  A link to a YouTube, Spotify, SoundCloud or Bandcamp page — the
+  page about a track, not the track — gets a line saying so and what
+  the bot does play, instead of a decoder error after a megabyte of
+  HTML (the first live test tried all four).
+- **A bots guide on the website**, `baucord.com/bots.html`, in the
+  hosting guide's shape: the music bot and its commands, a bot of your
+  own in thirty lines of Python, what a bot sees and does, playing
+  audio, keeping it running, the rules, and what is coming. Linked
+  from the front page in all three languages.
 
 ### Before you update a server
 
@@ -70,6 +110,52 @@ and the release pipeline.
 
 ### Desktop
 
+- **Settings → Stream.** A tab for how your screen share starts:
+  resolution and frame rate (the presets, as two pickers), the encoder
+  — Automatic, GPU or CPU — visibility (My channel / Everyone, as in
+  the share dialog) and the mouse pointer. The share dialog opens on
+  these and writes its own picks back, so the two never disagree.
+- **Streams no longer starve behind a game (Windows).** A game that
+  keeps the GPU at 99 % made the share wait its turn — the stream
+  dropped to a few frames a second while the game ran fine, until the
+  game's frame rate was capped. That was not a shortage of GPU (the
+  share needs a few percent) but the GPU scheduler's queue: the share's
+  copies and encodes sat behind the game's work. While sharing, baucord
+  now asks Windows for a higher GPU scheduling priority, as OBS does
+  (`D3DKMTSetProcessSchedulingPriorityClass`: realtime when started as
+  administrator, high otherwise) and sets its capture device's thread
+  priority to the maximum; it goes back to normal when the share stops.
+  The game gives up a frame or two a second to the stream. The switch
+  is Settings → Stream → "Stream encoding priority", on by default,
+  Windows only (macOS and Linux have no such knob).
+- **GPU or CPU encoding is a choice.** Automatic (as before: NVENC,
+  Quick Sync, AMF or VideoToolbox when one opens, x264 otherwise), GPU
+  only (the share refuses to start without a hardware encoder instead
+  of quietly costing the processor) or CPU only (x264 whatever the GPU
+  offers — the way around a driver whose encoder opens but streams
+  badly). A mid-share encoder switch stays within the choice.
+- Settings' switch rows measure a hint that wraps to two or three
+  lines; before, one ran into the row below.
+- **Settings say what they are.** Labels name the setting in a few
+  words and keep at most one line under them: "Connect on launch",
+  "Check for updates on launch", "Message timestamps", "Image upload
+  size"; Audio's "Microphone", "Output", "Gain", "Sensitivity",
+  "Volume" under their headers; a one-line Debug lead. The share
+  dialog's "Visible to" is "Visibility".
+- **macOS: a real app.** The Mac download is now `baucord.app` in a
+  disk image: open it and drag baucord into Applications. One app for
+  Apple silicon and Intel Macs. It opens its window without a Terminal
+  window first, has its icon in the Dock, and asks for the microphone
+  as baucord. Signed with a Developer ID and notarized by Apple once
+  those are set up (macos/README.md).
+- An installed `baucord.app` updates itself whole, and keeps its
+  settings and identity in `~/Library/Application Support/baucord`,
+  never inside the app. Copies still running from the old zip go on
+  updating from it. **Moving from the zip to the app:** before the
+  app's first start, copy `settings.json` and `identity.key` from the
+  zip's folder into `~/Library/Application Support/baucord`; otherwise
+  the app starts as a new user with a new identity (macos/README.md §1).
+
 - **Sharper 1080p streams.** 1080p at 60 fps encodes at 10 Mbit/s (was
   8) and at 30 fps at 7.5 (was 6). A frame too large to send no longer
   costs the share minutes of quality: the encoder's quality floor
@@ -95,6 +181,10 @@ and the release pipeline.
 - A device you picked stays picked while it is unplugged; the system
   default stands in until it returns. Closing Settings or resetting it
   no longer reopens the microphone and speakers mid-call.
+- Windows: with an output or microphone picked, a USB or Bluetooth
+  device that becomes Windows' default no longer sends the app's voice
+  thread spinning at a full core until a re-pick or a restart (a
+  side effect of October's fewer wake-ups).
 - Screen sharing on Windows: a portrait (rotated) monitor is shared
   upright through the screenshot path instead of sideways; locking the
   screen no longer demotes the share to screenshots for good (streaming
@@ -112,7 +202,9 @@ and the release pipeline.
   read and hashed off the UI and network threads, and the size is
   checked first.
 - A minimized or hidden stream viewer keeps its sound and stops
-  decoding video.
+  decoding video. A viewer minimized once no longer blanks that
+  sharer's *next* stream for the rest of the run (it was dropped
+  before decoding: black, silent, nothing in the log).
 - A received program (`.exe`, a script, an installer) is marked as
   coming from the internet (Windows' Mark of the Web, macOS'
   quarantine) and opens its folder instead of running.
@@ -129,6 +221,17 @@ and the release pipeline.
   desktop (the phones no longer carry those decoders).
 
 ### Phones
+
+- **iPhone: a TestFlight beta.** The release workflow uploads each
+  build to TestFlight; testers install it from the TestFlight app, no
+  cable or registered device needed.
+- **Android: a Play internal-testing track.** The release workflow
+  uploads the app bundle to Play's internal track itself once a
+  service account is set up (android/README.md §6a); the release
+  notes it shows live in `android/play/whatsnew/`. Promotion to closed
+  testing and production stays a click in Play Console.
+- iPhone: a phone call taken in the lobby no longer leaves the app
+  spinning in the background afterwards, where iOS ended it.
 
 - A stream you watch stops when the app goes to the background and
   resumes by itself when you come back: no video or sound is downloaded
@@ -148,6 +251,10 @@ and the release pipeline.
   desktop (the three buttons stack on a narrow screen).
 - A stream whose decoder lost its session asks for a fresh picture
   instead of staying frozen.
+- iPhone: builds can go to TestFlight, uploaded by the release workflow
+  (with an App Store profile and an App Store Connect API key). The app
+  carries a privacy manifest, and its icon no longer has transparent
+  corners, which iOS showed as black.
 
 ### Everyone
 
@@ -238,8 +345,29 @@ and the release pipeline.
 - Release builds take `Cargo.lock` as written on every platform;
   signed Android builds come only from release tags, and their
   workflow artifacts are kept for 7 days.
+- Releases wait for the checks: every release workflow runs the
+  format, lint and test gate on the tagged commit and attaches, pushes
+  or uploads nothing until it passed (a tag on a commit whose check
+  the next push had cancelled released untested). The Windows build's
+  prebuilt FFmpeg is checked against a pinned SHA-256 before it is
+  unpacked. The website names the version whose files are there (the
+  `version` file's), not `main`'s `Cargo.toml` — bumping the version
+  before its release advertised downloads that did not exist — and
+  hides a download whose file is missing.
 - CI: one lint pass instead of a check and a lint, a pinned nightly for
   formatting, the chat-scroll harness, and a Windows type-check from
   Linux on every change.
 - The third-party notices list our own crates out (a hand-written list
   had missed `keywatch`) and the website's Alpine.js in.
+- House style, measured against Google's Rust style guide (the
+  "Google's Rust guide vs baucord" doc, SESSION-GUIDE.md §4): every
+  `unsafe` block says why it is sound (65 new `// SAFETY:` comments, and
+  clippy now warns about a missing one); every public item of the
+  `protocol` and `transport` crates is documented (`missing_docs`);
+  `VoiceChat::set_presence` takes a `Presence` (lobby, live, muted)
+  instead of two booleans; `get_`-prefixed getters renamed
+  (`AudioStats::summary`, the server's `username_of`); a few `&String`
+  and `&Option<String>` parameters take `&str` and `Option<&str>`; doc
+  tests on `encode_client_message`, `Driver::new_client` and
+  `Bot::connect`; `cargo bench -p audio` times the resampler and a
+  jitter-buffer tick; imports are one `use` per module.
