@@ -925,6 +925,7 @@ pub fn run() {
         st.push_tr();
         st.push_connect_fields();
         st.apply_text_scale();
+        st.apply_theme();
         st.main.global::<State>().set_phase(Phase::Splash);
         // The composer's counter counts to the cap the send path cuts
         // at; the two were separate copies of 400.

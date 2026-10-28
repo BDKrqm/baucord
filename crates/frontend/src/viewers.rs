@@ -209,6 +209,14 @@ impl Viewer {
         }
     }
 
+    /// The colour theme, pushed to a viewer window; the page inherits
+    /// the main window's.
+    pub fn apply_theme(&self, palette: &crate::theme::Palette) {
+        if let Surface::Window(win) = &self.surface {
+            palette.apply(&win.global::<ui::Theme>());
+        }
+    }
+
     /// The session's mute and deafen, for a window's own buttons. The
     /// page binds `State.muted` / `State.deafened` itself.
     pub fn set_self_audio(&self, muted: bool, deafened: bool) {

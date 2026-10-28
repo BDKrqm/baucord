@@ -18,47 +18,52 @@
 // | amber     | #ECB22E   | caution              |
 // | raspberry | #E01E5A   | errors / live        |
 
+// The colours below are the original dark theme; empecord's colour
+// themes set them from the host (`frontend`'s theme.rs) on every window,
+// like `scale`.
 export global Theme {
     // ── Backgrounds ────────────────────────────────────────────────
-    out property <brush> bg-primary:   #1A1D21;
-    out property <brush> bg-secondary: #222529;
-    out property <brush> bg-tertiary:  #2B2E33;
-    out property <brush> surface:      #15171A;
-    out property <brush> hover:        #272A2F;
-    out property <brush> subtle:       #303338;
-    out property <brush> border:       #3A3D42;
+    in-out property <brush> bg-primary:   #1A1D21;
+    in-out property <brush> bg-secondary: #222529;
+    in-out property <brush> bg-tertiary:  #2B2E33;
+    in-out property <brush> surface:      #15171A;
+    in-out property <brush> hover:        #272A2F;
+    in-out property <brush> subtle:       #303338;
+    in-out property <brush> border:       #3A3D42;
     // What a dialog dims the window with (`Modal` in widgets.slint).
-    out property <brush> scrim:        #000000AA;
+    in-out property <brush> scrim:        #000000AA;
 
     // ── Text ───────────────────────────────────────────────────────
-    out property <color> text-primary:   #D1D2D3;
-    out property <color> text-secondary: #ABADB0;
+    in-out property <color> text-primary:   #D1D2D3;
+    in-out property <color> text-secondary: #ABADB0;
     // Measured, not eyeballed: 5.6:1 on graphite, 5.1:1 on gunmetal,
     // 4.5:1 on the tertiary panels — the old #808386 fell short of
     // AA on all three at the 11–12 px it is used at.
-    out property <color> text-muted:     #929598;
-    out property <color> mono-text:      #86AA90;
-    out property <color> on-accent:      #FFFFFF;
+    in-out property <color> text-muted:     #929598;
+    in-out property <color> mono-text:      #86AA90;
+    in-out property <color> on-accent:      #FFFFFF;
 
     // ── Accents & status ───────────────────────────────────────────
-    out property <color> accent:       #1264A3;   // fills: buttons, selection
-    out property <color> accent-hover: #0E5082;
+    in-out property <color> accent:       #1264A3;   // fills: buttons, selection
+    in-out property <color> accent-hover: #0E5082;
     // Cobalt is a fill, not a text color: 2.7:1 on graphite. This is
     // the same hue lifted until names and links read (5.6:1).
-    out property <color> accent-text:  #4A9AE0;
-    out property <color> success:      #2BAC76;
-    out property <color> warning:      #ECB22E;
-    out property <color> gold:         #ECB22E;   // honors (credits super-testers) — amber hue, celebratory role
-    out property <color> admin:        #2BAC76;   // the admin marker (shield, label, button): green, not gold
-    out property <color> danger:       #E01E5A;
+    in-out property <color> accent-text:  #4A9AE0;
+    in-out property <color> success:      #2BAC76;
+    in-out property <color> warning:      #ECB22E;
+    in-out property <color> gold:         #ECB22E;   // honors (credits super-testers) — amber hue, celebratory role
+    in-out property <color> admin:        #2BAC76;   // the admin marker (shield, label, button): green, not gold
+    in-out property <color> danger:       #E01E5A;
     // Raspberry is a fill too: 2.9:1 on the tertiary panels. The same
     // hue lifted until a destructive menu entry reads (5.0:1).
-    out property <color> danger-text:  #FF6B8E;
-    out property <color> meter:        #ABADB0;
+    in-out property <color> danger-text:  #FF6B8E;
+    in-out property <color> meter:        #ABADB0;
+    // A slider's knob at rest (`HSlider`).
+    in-out property <color> thumb:        #C8C9CA;
 
     // ── Row tints (sidebar) ────────────────────────────────────────
-    out property <brush> row-muted-tint:  #2E1C23;
-    out property <brush> row-volume-tint: #1C232D;
+    in-out property <brush> row-muted-tint:  #2E1C23;
+    in-out property <brush> row-volume-tint: #1C232D;
 
     // ── Radii — "flat but curved" ──────────────────────────────────
     out property <length> radius-lg: 14px;  // cards, panels, popovers

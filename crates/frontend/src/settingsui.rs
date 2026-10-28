@@ -153,6 +153,9 @@ impl OpenedWith {
         restored.audio.space_auto_spread = now.audio.space_auto_spread;
         restored.audio.space_distance = now.audio.space_distance;
         restored.audio.space_width = now.audio.space_width;
+        // The soundboard dialog's, not the page's.
+        restored.audio.soundboard_volume = now.audio.soundboard_volume;
+        restored.audio.soundboard_hear = now.audio.soundboard_hear;
         restored.ui.messages_collapsed = now.ui.messages_collapsed;
         restored.ui.sidebar_width = now.ui.sidebar_width;
         restored.ui.messages_height = now.ui.messages_height;
@@ -695,6 +698,7 @@ pub fn populate(app: &mut AppState) {
         .position(|(_, scale)| (scale - settings.ui.text_scale).abs() < 0.01)
         .unwrap_or(1);
     s.set_text_size_index(i32::try_from(size_index).unwrap_or(1));
+    push_theme(&s, settings);
     let levels: Vec<slint::SharedString> = LOG_LEVELS.iter().map(|(k, _)| t!(k).into()).collect();
     s.set_log_levels(ModelRc::new(VecModel::from(levels)));
     let level_index = LOG_LEVELS
@@ -915,6 +919,46 @@ pub fn populate(app: &mut AppState) {
 /// The Stream tab's frame-rate picker: the rates `quality`'s
 /// resolution has, its own selected. Filled again when the resolution
 /// changes, since 1440p has 30 only.
+/// The theme picker, in `Preset::ALL` order, and the custom theme's
+/// three colours with their swatches.
+fn push_theme(s: &SettingsState, settings: &Settings) {
+    use crate::theme::Preset;
+    let names: Vec<slint::SharedString> = Preset::ALL
+        .iter()
+        .map(|p| {
+            t!(match p {
+                Preset::Dark => "theme-dark",
+                Preset::Midnight => "theme-midnight",
+                Preset::Forest => "theme-forest",
+                Preset::Sunset => "theme-sunset",
+                Preset::Light => "theme-light",
+                Preset::HighContrast => "theme-contrast",
+                Preset::Custom => "theme-custom",
+            })
+            .into()
+        })
+        .collect();
+    s.set_themes(ModelRc::new(VecModel::from(names)));
+    let preset = Preset::from_key(&settings.ui.theme);
+    s.set_theme_index(i32::try_from(preset.index()).unwrap_or(0));
+    s.set_theme_custom(preset == Preset::Custom);
+    let colors = &settings.ui.theme_colors;
+    s.set_theme_background(colors.background.as_str().into());
+    s.set_theme_text(colors.text.as_str().into());
+    s.set_theme_accent(colors.accent.as_str().into());
+    push_theme_swatches(s, settings);
+}
+
+/// What the custom colours read as: the palette's own, so a colour that
+/// does not parse shows the one used instead.
+fn push_theme_swatches(s: &SettingsState, settings: &Settings) {
+    let p = crate::theme::Palette::of(crate::theme::Preset::Custom, &settings.ui.theme_colors);
+    let c = |c: crate::theme::Rgb| slint::Color::from_rgb_u8(c.0, c.1, c.2);
+    s.set_theme_background_swatch(c(p.bg_primary));
+    s.set_theme_text_swatch(c(p.text_primary));
+    s.set_theme_accent_swatch(c(p.accent));
+}
+
 fn push_stream_frame_rates(s: &SettingsState, quality: video::Quality) {
     let rates = stream_frame_rates(quality.height());
     let labels: Vec<slint::SharedString> = rates
@@ -1083,6 +1127,31 @@ fn wire(sf: SettingsSurface<'_>) {
                 .map_or(1.0, |(_, scale)| *scale);
             app.settings.ui.text_scale = scale;
             app.apply_text_scale();
+        });
+    });
+    // The colour theme: seen at once; Close without saving puts the
+    // old one back (`apply_settings_live`).
+    logic.on_theme_selected(|index| {
+        app::with_current(move |app| {
+            let preset = crate::theme::Preset::from_index(usize::try_from(index).unwrap_or(0));
+            app.settings.ui.theme = preset.key().to_string();
+            app.apply_theme();
+            let sf = surface(app);
+            sf.state()
+                .set_theme_custom(preset == crate::theme::Preset::Custom);
+        });
+    });
+    logic.on_theme_color_edited(|which, text| {
+        app::with_current(move |app| {
+            let text = text.trim().to_string();
+            let colors = &mut app.settings.ui.theme_colors;
+            match which {
+                0 => colors.background = text,
+                1 => colors.text = text,
+                _ => colors.accent = text,
+            }
+            app.apply_theme();
+            push_theme_swatches(&surface(app).state(), &app.settings);
         });
     });
     logic.on_log_level_selected(|index| {

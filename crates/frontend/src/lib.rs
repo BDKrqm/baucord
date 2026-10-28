@@ -18,6 +18,8 @@ pub mod notice;
 pub mod pictures;
 pub mod present;
 pub mod settingsui;
+/// empecord's colour themes (Settings → General).
+pub mod theme;
 pub mod viewers;
 
 // Host-only modules have a twin under `stubs/` with the same API and

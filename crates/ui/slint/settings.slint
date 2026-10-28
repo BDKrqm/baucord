@@ -68,6 +68,17 @@ export global SettingsState {
     in-out property <int> language-index: 0;
     in property <[string]> text-sizes;        // Small / Default / Large / Larger
     in-out property <int> text-size-index: 1;
+    /// empecord's colour themes (frontend theme.rs's Preset order), and
+    /// the custom one's three colours as typed, with what each reads as.
+    in property <[string]> themes;
+    in-out property <int> theme-index: 0;
+    in property <bool> theme-custom: false;
+    in-out property <string> theme-background;
+    in-out property <string> theme-text;
+    in-out property <string> theme-accent;
+    in property <color> theme-background-swatch;
+    in property <color> theme-text-swatch;
+    in property <color> theme-accent-swatch;
     in property <[string]> log-levels;        // Errors only … Trace
     in-out property <int> log-level-index: 2;
     in property <string> config-path;
@@ -211,6 +222,9 @@ export global SettingsLogic {
     // General
     callback language-selected(int);
     callback text-size-selected(int);
+    callback theme-selected(int);
+    /// A custom colour typed: 0 background, 1 text, 2 accent.
+    callback theme-color-edited(int, string);
     callback log-level-selected(int);
     callback open-config-folder();
     callback auto-connect-changed(bool);
@@ -696,6 +710,39 @@ component ProfilePanel inherits VerticalLayout {
     Rectangle { }
 }
 
+/// One of a custom theme's three colours: its name, a swatch of what
+/// it reads as, and the `#RRGGBB` field.
+component ThemeColorField inherits HorizontalLayout {
+    in property <string> label;
+    in-out property <string> text;
+    in property <color> swatch;
+    callback edited(string);
+
+    spacing: Theme.gap-sm;
+    FieldLabel {
+        width: 110px;
+        text: root.label;
+        vertical-alignment: center;
+    }
+    VerticalLayout {
+        alignment: center;
+        Rectangle {
+            width: 28px;
+            height: 28px;
+            border-radius: Theme.radius-sm;
+            border-width: 1px;
+            border-color: Theme.border;
+            background: root.swatch;
+        }
+    }
+    Field {
+        horizontal-stretch: 1;
+        placeholder: "#RRGGBB";
+        text <=> root.text;
+        edited => { root.edited(self.text); }
+    }
+}
+
 component GeneralPanel inherits VerticalLayout {
     spacing: Theme.gap-lg;
     PanelHeader { title: Tr.tab-general; lead: Tr.general-lead; }
@@ -716,6 +763,39 @@ component GeneralPanel inherits VerticalLayout {
             current <=> SettingsState.text-size-index;
             selected(i) => { SettingsLogic.text-size-selected(i); }
         }
+    }
+    // empecord: the colour theme. Seen at once; Close without saving
+    // puts the old one back.
+    Setting {
+        label: Tr.theme;
+        hint: Tr.theme-hint;
+        Dropdown {
+            options: SettingsState.themes;
+            current <=> SettingsState.theme-index;
+            selected(i) => { SettingsLogic.theme-selected(i); }
+        }
+    }
+    if SettingsState.theme-custom : VerticalLayout {
+        spacing: Theme.gap-sm;
+        ThemeColorField {
+            label: Tr.theme-background;
+            text <=> SettingsState.theme-background;
+            swatch: SettingsState.theme-background-swatch;
+            edited(t) => { SettingsLogic.theme-color-edited(0, t); }
+        }
+        ThemeColorField {
+            label: Tr.theme-text;
+            text <=> SettingsState.theme-text;
+            swatch: SettingsState.theme-text-swatch;
+            edited(t) => { SettingsLogic.theme-color-edited(1, t); }
+        }
+        ThemeColorField {
+            label: Tr.theme-accent;
+            text <=> SettingsState.theme-accent;
+            swatch: SettingsState.theme-accent-swatch;
+            edited(t) => { SettingsLogic.theme-color-edited(2, t); }
+        }
+        Hint { text: Tr.theme-custom-hint; }
     }
 
     Sep { }

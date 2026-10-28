@@ -267,6 +267,7 @@ impl AppState {
     /// it shows (review 2026-10, P2-2).
     pub(crate) fn apply_settings_live(&mut self, before: &client::config::Settings) {
         self.apply_text_scale();
+        self.apply_theme();
         self.push_ui_prefs();
         self.apply_push_to_talk();
         let (now, was) = (&self.settings.audio, &before.audio);

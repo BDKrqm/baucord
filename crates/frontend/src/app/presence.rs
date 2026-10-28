@@ -675,6 +675,16 @@ impl AppState {
         }
     }
 
+    /// Push the colour theme (Settings → General) to every window's
+    /// Theme, as `apply_text_scale` does the text size.
+    pub fn apply_theme(&self) {
+        let palette = crate::theme::Palette::for_settings(&self.settings);
+        palette.apply(&self.main.global::<ui::Theme>());
+        for viewer in self.viewers.values() {
+            viewer.apply_theme(&palette);
+        }
+    }
+
     /// A session's highest rank across its roles — from the server's
     /// table, so a custom role counts for the rank rule (a rank-29
     /// steward outranks organizers); a guest's until its details

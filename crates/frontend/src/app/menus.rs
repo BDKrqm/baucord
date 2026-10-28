@@ -765,6 +765,7 @@ impl AppState {
                 ) {
                     Ok(viewer) => {
                         viewer.set_self_audio(app.session.is_muted, app.session.is_deafened);
+                        viewer.apply_theme(&crate::theme::Palette::for_settings(&app.settings));
                         app.viewers.insert(client_id, viewer);
                         // The screen thread first, so the stream's
                         // frames are wanted before the server sends any.
