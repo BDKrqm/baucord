@@ -154,7 +154,7 @@ const SCREENSHOT_API: &str = "X11/Wayland";
 pub enum ShareSource {
     /// The monitor at this index of [`list_monitors`].
     Monitor(usize),
-    /// The camera with this id ([`crate::camera::CameraInfo::id`]).
+    /// The camera with this id ([`crate::share_camera::CameraInfo::id`]).
     Camera(String),
 }
 
@@ -172,7 +172,7 @@ pub enum Capturer {
     Screenshot(ScreenCapturer),
     /// A camera instead of a screen (Windows; `crate::camera`).
     #[cfg(target_os = "windows")]
-    Camera(crate::camera::CameraCapturer),
+    Camera(crate::share_camera::CameraCapturer),
 }
 
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
@@ -189,7 +189,7 @@ impl Capturer {
             ShareSource::Monitor(index) => Self::new(*index, quality),
             #[cfg(target_os = "windows")]
             ShareSource::Camera(id) => {
-                let camera = crate::camera::CameraCapturer::new(id, quality)?;
+                let camera = crate::share_camera::CameraCapturer::new(id, quality)?;
                 info!(
                     "video capture backend: CAMERA — '{}' via Media Foundation",
                     camera.name
@@ -198,7 +198,7 @@ impl Capturer {
             }
             #[cfg(not(target_os = "windows"))]
             ShareSource::Camera(id) => {
-                crate::camera::CameraCapturer::new(id, quality)?;
+                crate::share_camera::CameraCapturer::new(id, quality)?;
                 Err(CaptureError::Capture("no cameras on this system".into()))
             }
         }

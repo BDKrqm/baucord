@@ -5,7 +5,8 @@
 > settings and identity key, and adds, on the client only (it works with
 > any baucord server):
 >
-> - **Spatial voice** — a voice space (the radar button beside Deafen)
+> - **Spatial voice** — a voice space (the radar button in the call's
+>   control bar, beside Deafen)
 >   where you drag each person around you and hear them from that
 >   direction, so several people talking at once are easy to tell apart.
 >   *Spread out automatically* re-spreads everyone as people join or
@@ -13,12 +14,13 @@
 > - **A five-band equalizer per person** (*Equalizer…* in their menu) and
 >   a **voice tone** over everyone's voice — Natural, Crisp or Bass
 >   boosted — in Settings → Audio. (`crates/audio/src/processor/eq.rs`)
-> - **Camera sharing** — the share dialog's Monitor | Camera switch
->   (Windows). (`crates/video/src/camera.rs`)
+> - **A camera as a screen share** — the share dialog's Monitor | Camera
+>   switch (Windows), for servers without 1.5's cameras.
+>   (`crates/video/src/share_camera.rs`)
 > - **A soundboard** — the files in a folder as buttons, played into the
 >   call through the microphone. (`crates/audio/src/soundboard.rs`)
 > - **Colour themes** — six built in and a custom one from three
->   colours. (`crates/frontend/src/theme.rs`)
+>   colours, 1.5's Channel view and chat bubbles included. (`crates/frontend/src/theme.rs`)
 >
 > empecord does not look for updates: baucord's would replace it.
 >
@@ -258,7 +260,23 @@ channels:
   - name: Gaming
     password: "hunter2"                 # optional
     user_limit: 8                       # optional
+recording:                              # voice channel recording (1.5)
+  enabled: true                         # needs persistence on
+  sample_rate_hz: 48000                 # 48000, 24000 or 16000 (mono WAV)
+  max_minutes: 240                      # a recording ends itself here (≤ 720)
+  max_concurrent: 2                     # recordings at once on the server
+  total_cap_gb: 10                      # a start is refused at this much on disk
+  retain_days: 30                       # 0 = keep recordings forever
 ```
+
+A recording is started by someone with the `record` permission (the
+built-in `recorder` role has it, as admins do) from the channel's
+right-click menu or `/record`, and is one WAV of everyone's voice. It is
+delivered to the people who were in the channel while it ran, by
+"Server" in their DMs, and to nobody else. Its start and stop show in
+the activity and the audit log. The files live with the other files
+in `blobs/`, the running ones in `recordings/` beside it, both in
+`server backup`.
 
 Omit the `channels` key entirely for a single open `General`. The lobby
 is not a channel in this list: the server adds it itself, everyone

@@ -1,650 +1,574 @@
-//! Camera capture: a share can be a camera instead of a screen.
+//! Cameras (1.5): a webcam's pictures as RGBA [`Frame`]s for the
+//! encoder.
 //!
-//! Windows only, on Media Foundation — the system's own camera stack,
-//! nothing to ship. [`list_cameras`] enumerates the video capture
-//! devices; [`CameraCapturer`] opens one by its symbolic link (stable
-//! across replugs, unlike a position in the list) and reads it on a
-//! worker thread of its own. The source reader picks a decoder for
-//! whatever the camera sends (YUY2, NV12, MJPEG…) and hands back RGB32,
-//! which is the encoder's BGRA as it stands: the fourth byte is
-//! undefined and nothing downstream reads it. The capturer exposes the
-//! screen capturers' poll/frame API ([`crate::capture::Capturer`]), so
-//! the share loop, the encoder and the viewers do not know the
-//! difference; the encoder scales the picture into the quality preset
-//! as it does a screen's.
+//! One trait, [`Camera`], over the platform's own capture API. On the
+//! desktops it is [nokhwa]'s native backends — Media Foundation on
+//! Windows, `AVFoundation` on macOS, V4L2 on Linux — opened at the size
+//! closest to the size asked, and this module turns whatever the device
+//! hands out (YUYV, NV12, MJPEG, RGB, BGR, grey) into RGBA. The phones
+//! capture in their hosts and get a backend of their own here later;
+//! until then [`open`] refuses there.
 //!
-//! Of the formats the camera offers, the one nearest the preset is
-//! chosen: smooth first (at least 24 fps, or the preset's rate if
-//! lower), then the most pixels that fit inside the preset, then the
-//! highest rate up to the preset's. Elsewhere there are no cameras yet:
-//! [`list_cameras`] is empty and [`CameraCapturer::new`] fails.
+//! [`Camera::frame`] blocks until the device's next picture: the
+//! caller's thread is paced by the camera, never by a timer.
+//!
+//! [nokhwa]: https://crates.io/crates/nokhwa
 
-#[cfg(target_os = "windows")]
-use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Mutex, PoisonError,
-    },
-    thread::JoinHandle,
-    time::{Duration, Instant},
-};
+use crate::{Frame, PixelFormat};
 
-#[cfg(target_os = "windows")]
-use crate::{capture::CaptureStatus, Frame};
-use crate::{CaptureError, Quality};
+/// The frame rate asked of a camera; one without it gives its closest.
+pub const WANTED_FPS: u32 = 30;
 
-/// A camera the system knows.
+/// A camera the system knows of.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CameraInfo {
-    /// What the system calls it ("Integrated Webcam").
-    pub name: String,
-    /// Its symbolic link: what [`CameraCapturer::new`] opens it by.
-    pub id: String,
-}
-
-/// The cameras connected now, in the system's order.
-///
-/// # Errors
-///
-/// [`CaptureError::Capture`] if the system could not be asked.
-#[cfg(target_os = "windows")]
-pub fn list_cameras() -> Result<Vec<CameraInfo>, CaptureError> {
-    // COM on a thread of our own: the caller's (the UI thread) may
-    // already be in an apartment that is not the one wanted here.
-    std::thread::Builder::new()
-        .name("camera-list".into())
-        // SAFETY: `enumerate` needs COM and Media Foundation up on the
-        // calling thread, which `with_mf` does around it.
-        .spawn(|| mf::with_mf(|| unsafe { mf::enumerate() }))
-        .map_err(|e| CaptureError::Capture(format!("camera list: {e}")))?
-        .join()
-        .map_err(|_| CaptureError::Capture("camera list: the thread panicked".into()))?
-}
-
-/// No cameras off Windows (yet).
-///
-/// # Errors
-///
-/// Never.
-#[cfg(not(target_os = "windows"))]
-pub fn list_cameras() -> Result<Vec<CameraInfo>, CaptureError> {
-    Ok(Vec::new())
-}
-
-/// How long dropping a capturer waits for its worker: one read of a
-/// camera that stopped sending could block longer, and the share must
-/// stop at once all the same (the worker then ends on its own).
-#[cfg(target_os = "windows")]
-const STOP_WAIT: Duration = Duration::from_secs(1);
-
-/// What the worker and the capturer share.
-#[cfg(target_os = "windows")]
-#[derive(Default)]
-struct Shared {
-    /// The newest picture, not yet taken by [`CameraCapturer::poll`].
-    latest: Mutex<Option<Frame>>,
-    /// A picture's buffer to fill again (the one the capturer let go).
-    spare: Mutex<Option<Vec<u8>>>,
-    /// Why the camera stopped, once it has.
-    failed: Mutex<Option<String>>,
-    stop: AtomicBool,
-}
-
-#[cfg(target_os = "windows")]
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// A camera, read on a worker thread; the share loop polls it like a
-/// screen ([`crate::capture::Capturer::Camera`]).
-#[cfg(target_os = "windows")]
-pub struct CameraCapturer {
-    shared: Arc<Shared>,
-    worker: Option<JoinHandle<()>>,
-    /// The worker says here that it is finished.
-    done_rx: mpsc::Receiver<()>,
-    /// The picture held for the poll/frame API.
-    last: Option<Frame>,
-    start: Instant,
-    /// What the system calls the camera, for the log.
+    /// What [`open`] takes.
+    pub index: u32,
+    /// The name the system gives it.
     pub name: String,
 }
 
-#[cfg(target_os = "windows")]
-impl CameraCapturer {
-    /// Open the camera `id` ([`CameraInfo::id`]) in the format nearest
-    /// `quality`, and start reading it.
-    ///
-    /// # Errors
-    ///
-    /// [`CaptureError::Capture`] if the camera is gone, in use
-    /// elsewhere, blocked by the system's privacy settings, or gives no
-    /// picture the source reader can turn into RGB32.
-    pub fn new(id: &str, quality: Quality) -> Result<Self, CaptureError> {
-        let shared = Arc::new(Shared::default());
-        let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<String, String>>(1);
-        let (done_tx, done_rx) = mpsc::channel::<()>();
-        let worker_shared = shared.clone();
-        let id = id.to_string();
-        let worker = std::thread::Builder::new()
-            .name("camera-capture".into())
-            .spawn(move || {
-                mf::run(&id, quality, &worker_shared, &ready_tx);
-                let _ = done_tx.send(());
-            })
-            .map_err(|e| CaptureError::Capture(format!("camera thread: {e}")))?;
-        match ready_rx.recv() {
-            Ok(Ok(name)) => Ok(Self {
-                shared,
-                worker: Some(worker),
-                done_rx,
-                last: None,
-                start: Instant::now(),
-                name,
-            }),
-            Ok(Err(e)) => {
-                let _ = worker.join();
-                Err(CaptureError::Capture(e))
-            }
-            Err(_) => {
-                let _ = worker.join();
-                Err(CaptureError::Capture("the camera thread ended".into()))
-            }
-        }
-    }
-
-    /// See [`crate::capture::Capturer::poll`]: a picture the camera sent
-    /// since the last poll is [`CaptureStatus::Fresh`].
-    ///
-    /// # Errors
-    ///
-    /// [`CaptureError::Capture`] once the camera stopped (unplugged,
-    /// taken by the system).
-    pub fn poll(&mut self) -> Result<CaptureStatus, CaptureError> {
-        if let Some(e) = lock(&self.shared.failed).take() {
-            return Err(CaptureError::Capture(e));
-        }
-        let fresh = lock(&self.shared.latest).take();
-        match fresh {
-            Some(mut frame) => {
-                frame.timestamp_ms = self.start.elapsed().as_millis() as u64;
-                // The picture let go is the worker's next buffer.
-                if let Some(old) = self.last.replace(frame) {
-                    *lock(&self.shared.spare) = Some(old.data);
-                }
-                Ok(CaptureStatus::Fresh)
-            }
-            None if self.last.is_some() => Ok(CaptureStatus::Unchanged),
-            None => Ok(CaptureStatus::Empty),
-        }
-    }
-
-    /// See [`crate::capture::Capturer::frame`].
-    pub fn frame(&mut self, advance_timestamp: bool) -> Option<&Frame> {
-        if advance_timestamp && let Some(f) = &mut self.last {
-            f.timestamp_ms = self.start.elapsed().as_millis() as u64;
-        }
-        self.last.as_ref()
-    }
+#[derive(Debug, thiserror::Error)]
+pub enum CameraError {
+    #[error("no camera found")]
+    NoCamera,
+    #[error("camera access was not allowed")]
+    NotAllowed,
+    #[error("cameras are not supported on this platform yet")]
+    Unsupported,
+    #[error("camera: {0}")]
+    Backend(String),
+    #[error("camera frame: {0}")]
+    Decode(String),
 }
 
-#[cfg(target_os = "windows")]
-impl Drop for CameraCapturer {
-    fn drop(&mut self) {
-        self.shared.stop.store(true, Ordering::Relaxed);
-        if let Some(worker) = self.worker.take() {
-            if self.done_rx.recv_timeout(STOP_WAIT).is_ok() {
-                let _ = worker.join();
-            } else {
-                log::warn!("camera: the reader did not stop in time; leaving it to end on its own");
-            }
-        }
-    }
-}
-
-/// No cameras off Windows (yet): there is nothing to open.
-#[cfg(not(target_os = "windows"))]
-pub struct CameraCapturer;
-
-#[cfg(not(target_os = "windows"))]
-impl CameraCapturer {
-    /// Always fails: cameras are Windows-only for now.
+/// An open camera. Not `Send`: some backends (`AVFoundation`, Media
+/// Foundation) belong to the thread that opened them, so the thread
+/// that reads a camera opens it.
+pub trait Camera {
+    /// The next picture, waiting for it. Timestamps are milliseconds
+    /// since the camera opened.
     ///
     /// # Errors
-    ///
-    /// Always [`CaptureError::Capture`].
-    pub fn new(_id: &str, _quality: Quality) -> Result<Self, CaptureError> {
-        Err(CaptureError::Capture(
-            "camera sharing is not available on this system".into(),
+    /// The device went away or sent something undecodable.
+    fn frame(&mut self) -> Result<Frame, CameraError>;
+    /// The size the device delivers.
+    fn size(&self) -> (u32, u32);
+    /// The device's name, for the log.
+    fn name(&self) -> &str;
+    /// The heights the device can deliver, tallest first (empty when it
+    /// will not say).
+    fn heights(&mut self) -> Vec<u32>;
+    /// How it was opened, for the log and telemetry ("1280x720 30 fps
+    /// Nv12").
+    fn mode(&self) -> String;
+}
+
+// ── Pixel formats ───────────────────────────────────────────────────────
+
+/// What a camera's buffer holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RawFormat {
+    /// Packed 4:2:2, `Y0 U Y1 V`.
+    Yuyv,
+    /// 4:2:0, a Y plane then interleaved `U V`.
+    Nv12,
+    /// One JPEG a frame.
+    Mjpeg,
+    Rgb,
+    Bgr,
+    Gray,
+}
+
+/// BT.601 limited range, as webcams send it, in fixed point.
+#[inline]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::many_single_char_names
+)]
+fn yuv_to_rgba(y: u8, u: u8, v: u8) -> [u8; 4] {
+    let c = (i32::from(y) - 16) * 298;
+    let d = i32::from(u) - 128;
+    let e = i32::from(v) - 128;
+    let r = (c + 409 * e + 128) >> 8;
+    let g = (c - 100 * d - 208 * e + 128) >> 8;
+    let b = (c + 516 * d + 128) >> 8;
+    [
+        r.clamp(0, 255) as u8,
+        g.clamp(0, 255) as u8,
+        b.clamp(0, 255) as u8,
+        255,
+    ]
+}
+
+/// One camera buffer as tightly packed RGBA, `width × height × 4`.
+/// An MJPEG frame carries its own size, which wins over the one given.
+///
+/// # Errors
+/// The buffer is shorter than its format and size need, or its JPEG
+/// does not decode.
+pub fn to_rgba(
+    format: RawFormat,
+    width: u32,
+    height: u32,
+    data: &[u8],
+) -> Result<(Vec<u8>, u32, u32), CameraError> {
+    let (w, h) = (width as usize, height as usize);
+    let short = |need: usize| {
+        CameraError::Decode(format!(
+            "{format:?} {width}x{height}: {} bytes, {need} needed",
+            data.len()
         ))
+    };
+    let mut out = Vec::with_capacity(w * h * 4);
+    match format {
+        RawFormat::Yuyv => {
+            let need = w * h * 2;
+            if data.len() < need || w % 2 != 0 {
+                return Err(short(need));
+            }
+            for px in data[..need].chunks_exact(4) {
+                out.extend_from_slice(&yuv_to_rgba(px[0], px[1], px[3]));
+                out.extend_from_slice(&yuv_to_rgba(px[2], px[1], px[3]));
+            }
+        }
+        RawFormat::Nv12 => {
+            let need = w * h + w.div_ceil(2) * 2 * h.div_ceil(2);
+            if data.len() < need {
+                return Err(short(need));
+            }
+            let (luma, chroma) = data.split_at(w * h);
+            let stride = w.div_ceil(2) * 2;
+            for row in 0..h {
+                let uv = &chroma[(row / 2) * stride..];
+                for col in 0..w {
+                    let i = (col / 2) * 2;
+                    out.extend_from_slice(&yuv_to_rgba(luma[row * w + col], uv[i], uv[i + 1]));
+                }
+            }
+        }
+        RawFormat::Rgb | RawFormat::Bgr => {
+            let need = w * h * 3;
+            if data.len() < need {
+                return Err(short(need));
+            }
+            for px in data[..need].chunks_exact(3) {
+                if format == RawFormat::Rgb {
+                    out.extend_from_slice(&[px[0], px[1], px[2], 255]);
+                } else {
+                    out.extend_from_slice(&[px[2], px[1], px[0], 255]);
+                }
+            }
+        }
+        RawFormat::Gray => {
+            let need = w * h;
+            if data.len() < need {
+                return Err(short(need));
+            }
+            for &g in &data[..need] {
+                out.extend_from_slice(&[g, g, g, 255]);
+            }
+        }
+        RawFormat::Mjpeg => return decode_mjpeg(data),
     }
+    Ok((out, width, height))
 }
 
-/// The formats a camera offers, scored for `quality` (higher is
-/// better): smooth, then the most pixels that fit, then the rate.
-/// Pure arithmetic, tested below; `fps` may be fractional (29.97).
-#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
-fn format_score(width: u32, height: u32, fps: f32, quality: Quality) -> (bool, bool, i64, u32) {
-    let fits = width <= quality.width() && height <= quality.height();
-    let wanted = quality.fps() as f32;
-    let capped = fps.min(wanted);
-    let smooth = capped + 0.5 >= wanted.min(24.0);
-    let area = i64::from(width) * i64::from(height);
-    // Fitting: more is better. Too big: the smallest of those is.
-    let size = if fits { area } else { -area };
-    (fits, smooth, size, (capped * 100.0) as u32)
+fn decode_mjpeg(data: &[u8]) -> Result<(Vec<u8>, u32, u32), CameraError> {
+    use zune_jpeg::zune_core::bytestream::ZCursor;
+    use zune_jpeg::zune_core::colorspace::ColorSpace;
+    use zune_jpeg::zune_core::options::DecoderOptions;
+    use zune_jpeg::JpegDecoder;
+
+    let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGBA);
+    let mut decoder = JpegDecoder::new_with_options(ZCursor::new(data), options);
+    let pixels = decoder
+        .decode()
+        .map_err(|e| CameraError::Decode(format!("MJPEG: {e:?}")))?;
+    let info = decoder
+        .info()
+        .ok_or_else(|| CameraError::Decode("MJPEG: no header".into()))?;
+    Ok((pixels, u32::from(info.width), u32::from(info.height)))
 }
 
-#[cfg(target_os = "windows")]
-mod mf {
-    use windows::core::{Interface, GUID, PWSTR};
-    use windows::Win32::Media::MediaFoundation::{
-        IMF2DBuffer, IMFActivate, IMFAttributes, IMFMediaSource, IMFMediaType, IMFSample,
-        IMFSourceReader, MFCreateAttributes, MFCreateMediaType,
-        MFCreateSourceReaderFromMediaSource, MFEnumDeviceSources, MFMediaType_Video, MFShutdown,
-        MFStartup, MFVideoFormat_RGB32, MFSTARTUP_LITE, MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
-        MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
-        MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, MF_MT_DEFAULT_STRIDE,
-        MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
-        MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED, MF_SOURCE_READERF_ENDOFSTREAM,
-        MF_SOURCE_READERF_ERROR, MF_SOURCE_READER_ALL_STREAMS,
-        MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_VERSION,
+// ── Picking a format ────────────────────────────────────────────────────
+
+/// One size, rate and pixel format a device lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Offer {
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub format: RawFormat,
+}
+
+/// The offer to open for `height` at `fps`: the first of
+/// [`rank_formats`]. `None` when nothing is listed.
+#[must_use]
+pub fn choose_format(offers: &[Offer], height: u32, fps: u32) -> Option<usize> {
+    rank_formats(offers, height, fps).first().copied()
+}
+
+/// Every offer, best first, for `height` at `fps`: a smooth rate first
+/// (a USB 2 camera gives 720p uncompressed at ~10 fps, MJPEG at 30),
+/// then the smallest size at least as tall as asked (else the tallest
+/// there is), then 16:9, then the rate nearest `fps`, then the
+/// cheapest pixels to turn into RGBA (NV12 and YUYV before MJPEG). The
+/// next one is the one to try when a device refuses the first.
+#[must_use]
+pub fn rank_formats(offers: &[Offer], height: u32, fps: u32) -> Vec<usize> {
+    let smooth = |o: &Offer| o.fps >= 24;
+    let cost = |f: RawFormat| match f {
+        RawFormat::Nv12 => 0,
+        RawFormat::Yuyv => 1,
+        RawFormat::Mjpeg => 2,
+        RawFormat::Rgb | RawFormat::Bgr => 3,
+        RawFormat::Gray => 4,
     };
-    use windows::Win32::System::Com::{
-        CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED,
+    let mut order: Vec<usize> = (0..offers.len()).collect();
+    order.sort_by_key(|&i| {
+        let o = &offers[i];
+        let size = if o.height >= height {
+            (0, o.height - height)
+        } else {
+            (1, height - o.height)
+        };
+        // How far from 16:9, in thousandths.
+        let aspect = (i64::from(o.width) * 9_000 / i64::from(o.height.max(1)) - 16_000).abs();
+        (
+            !smooth(o),
+            size,
+            aspect,
+            o.fps.abs_diff(fps),
+            cost(o.format),
+        )
+    });
+    order
+}
+
+// ── The desktops: nokhwa ────────────────────────────────────────────────
+
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+mod desktop {
+    use std::time::Instant;
+
+    use nokhwa::pixel_format::RgbAFormat;
+    use nokhwa::utils::{
+        ApiBackend, CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType,
     };
 
-    use super::{format_score, lock, CameraInfo, Shared};
-    use crate::{CaptureError, Frame, PixelFormat, Quality};
+    use super::{to_rgba, CameraError, CameraInfo, RawFormat, WANTED_FPS};
+    use crate::{Frame, PixelFormat};
 
-    // The constants are negative i32 sentinels in the API; the methods
-    // take them as u32.
-    const VIDEO: u32 = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
-    const ALL: u32 = MF_SOURCE_READER_ALL_STREAMS.0 as u32;
-
-    /// COM and Media Foundation up for `f` on this thread, down after.
-    pub(super) fn with_mf<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, CaptureError> {
-        // SAFETY: plain init/teardown calls with no pointers; each
-        // successful init (COM, Media Foundation) is paired with its
-        // teardown on this same thread, after `f` is done with both.
-        unsafe {
-            let com = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
-            let result = match MFStartup(MF_VERSION, MFSTARTUP_LITE) {
-                Ok(()) => {
-                    let r = f();
-                    let _ = MFShutdown();
-                    r
-                }
-                Err(e) => Err(format!("Media Foundation: {e}")),
-            };
-            if com {
-                CoUninitialize();
-            }
-            result.map_err(CaptureError::Capture)
+    fn backend_error(e: &nokhwa::NokhwaError) -> CameraError {
+        let text = e.to_string();
+        let lower = text.to_lowercase();
+        if lower.contains("permission") || lower.contains("denied") || lower.contains("authoriz") {
+            CameraError::NotAllowed
+        } else {
+            CameraError::Backend(text)
         }
     }
 
-    /// Every video capture device, as activation objects.
-    unsafe fn devices() -> Result<Vec<IMFActivate>, String> {
-        // SAFETY: the out-pointers are live locals. `MFEnumDeviceSources`
-        // returns an array of `count` owned entries allocated with
-        // CoTaskMemAlloc: each is read out exactly once (taking its
-        // reference), and the array is freed once, with CoTaskMemFree.
-        unsafe {
-            let mut attrs: Option<IMFAttributes> = None;
-            MFCreateAttributes(&raw mut attrs, 1).map_err(|e| format!("attributes: {e}"))?;
-            let attrs = attrs.ok_or("attributes: none")?;
-            attrs
-                .SetGUID(
-                    &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
-                    &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
-                )
-                .map_err(|e| format!("attributes: {e}"))?;
-            let mut list: *mut Option<IMFActivate> = std::ptr::null_mut();
-            let mut count = 0u32;
-            MFEnumDeviceSources(&attrs, &raw mut list, &raw mut count)
-                .map_err(|e| format!("camera list: {e}"))?;
-            let mut out = Vec::with_capacity(count as usize);
-            if !list.is_null() {
-                for i in 0..count as usize {
-                    // Each entry's reference moves into `out`; the array
-                    // itself is the system's, freed below.
-                    if let Some(activate) = list.add(i).read() {
-                        out.push(activate);
-                    }
-                }
-                CoTaskMemFree(Some(list.cast_const().cast()));
-            }
-            Ok(out)
-        }
-    }
-
-    /// A string attribute, if it is there.
-    unsafe fn string(attrs: &IMFAttributes, key: &GUID) -> Option<String> {
-        // SAFETY: `GetAllocatedString` writes a NUL-terminated string it
-        // allocated (CoTaskMemAlloc) into the live locals; it is read
-        // while alive and freed once, with CoTaskMemFree.
-        unsafe {
-            let mut value = PWSTR::null();
-            let mut len = 0u32;
-            attrs
-                .GetAllocatedString(key, &raw mut value, &raw mut len)
-                .ok()?;
-            let s = value.to_string().ok();
-            CoTaskMemFree(Some(value.0.cast_const().cast()));
-            s
-        }
-    }
-
-    pub(super) unsafe fn enumerate() -> Result<Vec<CameraInfo>, String> {
-        // SAFETY: the caller has COM and Media Foundation up (this fn's
-        // contract, `with_mf`), which is all `devices` and `string` need.
-        unsafe {
-            Ok(devices()?
-                .iter()
-                .enumerate()
-                .map(|(i, a)| CameraInfo {
-                    name: string(a, &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME)
-                        .unwrap_or_else(|| format!("Camera {}", i + 1)),
-                    id: string(a, &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK)
-                        .unwrap_or_default(),
-                })
-                .collect())
-        }
-    }
-
-    /// A packed `(hi, lo)` pair attribute (frame size, frame rate).
-    unsafe fn pair(attrs: &IMFAttributes, key: &GUID) -> Option<(u32, u32)> {
-        // SAFETY: a COM call on a live interface, with a key that lives
-        // for the call.
-        let v = unsafe { attrs.GetUINT64(key) }.ok()?;
-        Some(((v >> 32) as u32, v as u32))
-    }
-
-    /// The native format nearest `quality` ([`format_score`]).
-    unsafe fn best_native(reader: &IMFSourceReader, quality: Quality) -> Option<IMFMediaType> {
-        let mut best: Option<((bool, bool, i64, u32), IMFMediaType)> = None;
-        for i in 0.. {
-            // SAFETY: a COM call on the live reader; an index past the
-            // last type is an error, not undefined behaviour.
-            let Ok(t) = (unsafe { reader.GetNativeMediaType(VIDEO, i) }) else {
-                break;
-            };
-            // SAFETY: `t` is a live media type (see `pair`).
-            let Some((w, h)) = (unsafe { pair(&t, &MF_MT_FRAME_SIZE) }) else {
-                continue;
-            };
-            // SAFETY: as above.
-            let fps = unsafe { pair(&t, &MF_MT_FRAME_RATE) }
-                .filter(|&(_, den)| den > 0)
-                .map_or(30.0, |(num, den)| num as f32 / den as f32);
-            let score = format_score(w, h, fps, quality);
-            if best.as_ref().is_none_or(|(b, _)| score > *b) {
-                best = Some((score, t));
-            }
-        }
-        best.map(|(_, t)| t)
-    }
-
-    /// An open camera.
-    struct Opened {
-        reader: IMFSourceReader,
-        source: IMFMediaSource,
-        name: String,
-        width: u32,
-        height: u32,
-        /// Bytes from one row to the next in a plain buffer; negative
-        /// when the picture is stored bottom-up.
-        stride: i32,
-    }
-
-    unsafe fn open(id: &str, quality: Quality) -> Result<Opened, String> {
-        // SAFETY: COM calls on interfaces this function owns, with live
-        // locals as out-pointers, on a thread with COM and Media
-        // Foundation up (this fn's contract). A source that opened is
-        // shut down on every failure after it.
-        unsafe {
-            let devices = devices()?;
-            let activate = devices
-                .iter()
-                .find(|a| {
-                    string(a, &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK).as_deref()
-                        == Some(id)
-                })
-                .ok_or("the camera is not connected")?;
-            let name = string(activate, &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME)
-                .unwrap_or_else(|| "camera".into());
-            let source: IMFMediaSource = activate.ActivateObject().map_err(|e| {
-                format!(
-                    "{name} would not open ({e}) — in use by another app, or blocked in \
-                     Windows' camera privacy settings?"
-                )
-            })?;
-            let opened = (|| {
-                let mut attrs: Option<IMFAttributes> = None;
-                MFCreateAttributes(&raw mut attrs, 1).map_err(|e| format!("attributes: {e}"))?;
-                let attrs = attrs.ok_or("attributes: none")?;
-                // The reader inserts the decoder and the colour converter.
-                attrs
-                    .SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)
-                    .map_err(|e| format!("attributes: {e}"))?;
-                let reader = MFCreateSourceReaderFromMediaSource(&source, &attrs)
-                    .map_err(|e| format!("{name}: no reader ({e})"))?;
-                let _ = reader.SetStreamSelection(ALL, false);
-                reader
-                    .SetStreamSelection(VIDEO, true)
-                    .map_err(|e| format!("{name}: no video stream ({e})"))?;
-                if let Some(native) = best_native(&reader, quality)
-                    && let Err(e) = reader.SetCurrentMediaType(VIDEO, None, &native)
-                {
-                    log::debug!("camera: keeping the default format ({e})");
-                }
-                let current = reader
-                    .GetCurrentMediaType(VIDEO)
-                    .map_err(|e| format!("{name}: no format ({e})"))?;
-                let size = current
-                    .GetUINT64(&MF_MT_FRAME_SIZE)
-                    .map_err(|e| format!("{name}: no frame size ({e})"))?;
-                let want: IMFMediaType =
-                    MFCreateMediaType().map_err(|e| format!("media type: {e}"))?;
-                want.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
-                    .map_err(|e| format!("media type: {e}"))?;
-                want.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32)
-                    .map_err(|e| format!("media type: {e}"))?;
-                want.SetUINT64(&MF_MT_FRAME_SIZE, size)
-                    .map_err(|e| format!("media type: {e}"))?;
-                reader
-                    .SetCurrentMediaType(VIDEO, None, &want)
-                    .map_err(|e| format!("{name} gives no picture the app can convert ({e})"))?;
-                let (width, height, stride) = layout(&reader)?;
-                Ok::<_, String>((reader, width, height, stride))
-            })();
-            match opened {
-                Ok((reader, width, height, stride)) => Ok(Opened {
-                    reader,
-                    source,
-                    name,
-                    width,
-                    height,
-                    stride,
+    pub fn list() -> Result<Vec<CameraInfo>, CameraError> {
+        let found = nokhwa::query(ApiBackend::Auto).map_err(|e| backend_error(&e))?;
+        Ok(found
+            .into_iter()
+            .filter_map(|c| match c.index() {
+                CameraIndex::Index(i) => Some(CameraInfo {
+                    index: *i,
+                    name: c.human_name(),
                 }),
-                Err(e) => {
-                    let _ = source.Shutdown();
-                    Err(e)
-                }
-            }
-        }
+                CameraIndex::String(_) => None,
+            })
+            .collect())
     }
 
-    /// The RGB32 output's size and row stride, as the reader has it now.
-    unsafe fn layout(reader: &IMFSourceReader) -> Result<(u32, u32, i32), String> {
-        // SAFETY: COM calls on the live reader and the media type it
-        // returns; no pointers of ours.
-        unsafe {
-            let actual = reader
-                .GetCurrentMediaType(VIDEO)
-                .map_err(|e| format!("output format: {e}"))?;
-            let (width, height) =
-                pair(&actual, &MF_MT_FRAME_SIZE).ok_or("output format: no frame size")?;
-            if width == 0 || height == 0 {
-                return Err("output format: an empty picture".into());
-            }
-            // Uncompressed RGB is bottom-up unless the type says.
-            let stride = actual
-                .GetUINT32(&MF_MT_DEFAULT_STRIDE)
-                .map_or_else(|_| -(width as i32 * 4), |s| s as i32);
-            Ok((width, height, stride))
+    /// macOS asks the user once, the first time any camera is opened;
+    /// the answer comes on a callback. Elsewhere there is nothing to ask.
+    #[cfg(target_os = "macos")]
+    fn ask_access() -> Result<(), CameraError> {
+        if nokhwa::nokhwa_check() {
+            return Ok(());
         }
-    }
-
-    /// The worker: open, say so on `ready`, read until told to stop.
-    pub(super) fn run(
-        id: &str,
-        quality: Quality,
-        shared: &Shared,
-        ready: &std::sync::mpsc::SyncSender<Result<String, String>>,
-    ) {
-        let outcome = with_mf(|| {
-            // SAFETY: inside `with_mf`: COM and Media Foundation are up.
-            let cam = match unsafe { open(id, quality) } {
-                Ok(cam) => cam,
-                Err(e) => {
-                    let _ = ready.send(Err(e));
-                    return Ok(());
-                }
-            };
-            log::info!(
-                "camera: '{}' at {}x{} (RGB32 via the source reader), target={quality}",
-                cam.name,
-                cam.width,
-                cam.height
-            );
-            let _ = ready.send(Ok(cam.name.clone()));
-            // SAFETY: as for `open`, on the same thread.
-            let result = unsafe { read(cam, shared) };
-            if let Err(e) = result {
-                log::warn!("camera: {e}");
-                *lock(&shared.failed) = Some(e);
-            }
-            Ok(())
+        let (tx, rx) = std::sync::mpsc::channel();
+        nokhwa::nokhwa_initialize(move |granted| {
+            let _ = tx.send(granted);
         });
-        if let Err(e) = outcome {
-            // Before the camera opened: the opener is waiting for this.
-            let _ = ready.send(Err(e.to_string()));
+        // The prompt waits on the person: a minute is plenty.
+        match rx.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok(true) => Ok(()),
+            _ => Err(CameraError::NotAllowed),
         }
     }
 
-    unsafe fn read(mut cam: Opened, shared: &Shared) -> Result<(), String> {
-        let result = (|| {
-            while !shared.stop.load(std::sync::atomic::Ordering::Relaxed) {
-                let mut flags = 0u32;
-                let mut sample: Option<IMFSample> = None;
-                // SAFETY: a synchronous read on the live reader; the out-
-                // pointers are live locals it fills before returning.
-                unsafe {
-                    cam.reader.ReadSample(
-                        VIDEO,
-                        0,
-                        None,
-                        Some(&raw mut flags),
-                        None,
-                        Some(&raw mut sample),
-                    )
-                }
-                .map_err(|e| format!("{} stopped: {e}", cam.name))?;
-                let flags = flags as i32;
-                if flags & MF_SOURCE_READERF_ERROR.0 != 0 {
-                    return Err(format!("{} reported an error", cam.name));
-                }
-                if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 != 0 {
-                    return Err(format!("{} ended (unplugged?)", cam.name));
-                }
-                if flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED.0 != 0 {
-                    // SAFETY: the live reader (see `layout`).
-                    (cam.width, cam.height, cam.stride) = unsafe { layout(&cam.reader) }?;
-                }
-                let Some(sample) = sample else {
-                    continue;
-                };
-                let data = shared_buffer(shared, cam.width, cam.height);
-                // SAFETY: a live sample from this reader, and `cam`'s
-                // size and stride as the reader reports them now.
-                let data = unsafe { copy_picture(&sample, &cam, data) }?;
-                *lock(&shared.latest) = Some(Frame {
-                    data,
-                    width: cam.width,
-                    height: cam.height,
-                    timestamp_ms: 0,
-                    format: PixelFormat::Bgra,
-                });
-            }
-            Ok(())
-        })();
-        // The light goes off.
-        // SAFETY: shutting down the source this function owns, once,
-        // after its last read.
-        let _ = unsafe { cam.source.Shutdown() };
-        result
+    #[cfg(not(target_os = "macos"))]
+    #[allow(clippy::unnecessary_wraps)]
+    fn ask_access() -> Result<(), CameraError> {
+        Ok(())
     }
 
-    /// A buffer for the next picture: the spare one back from the
-    /// capturer, or a new one.
-    fn shared_buffer(shared: &Shared, width: u32, height: u32) -> Vec<u8> {
-        let mut data = lock(&shared.spare).take().unwrap_or_default();
-        data.resize(width as usize * height as usize * 4, 0);
-        data
+    pub struct NokhwaCamera {
+        camera: nokhwa::Camera,
+        name: String,
+        mode: String,
+        size: (u32, u32),
+        format: RawFormat,
+        opened: Instant,
     }
 
-    /// The sample's picture into `data`, top row first, rows packed.
-    unsafe fn copy_picture(
-        sample: &IMFSample,
-        cam: &Opened,
-        mut data: Vec<u8>,
-    ) -> Result<Vec<u8>, String> {
-        // SAFETY: the buffer is locked while it is read and unlocked
-        // after. Rows are copied only when the lock gave a non-null
-        // pointer and a pitch (2-D) or a length (plain) covering every
-        // row: `rows` rows of `row` bytes, `|pitch| >= row` apart, inside
-        // the locked memory; `data` holds `rows * row` bytes, and the
-        // two never overlap (the system's buffer and our Vec).
-        unsafe {
-            let buffer = sample
-                .ConvertToContiguousBuffer()
-                .map_err(|e| format!("picture: {e}"))?;
-            let row = cam.width as usize * 4;
-            let rows = cam.height as usize;
-            // A 2-D buffer knows its own pitch (and which way up it is).
-            if let Ok(b2) = buffer.cast::<IMF2DBuffer>() {
-                let mut first: *mut u8 = std::ptr::null_mut();
-                let mut pitch = 0i32;
-                b2.Lock2D(&raw mut first, &raw mut pitch)
-                    .map_err(|e| format!("picture: {e}"))?;
-                if !first.is_null() && pitch.unsigned_abs() as usize >= row {
-                    for (y, dst) in data.chunks_exact_mut(row).take(rows).enumerate() {
-                        let src = first.offset(y as isize * pitch as isize);
-                        std::ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), row);
-                    }
-                }
-                let _ = b2.Unlock2D();
-                return Ok(data);
+    /// Every size the device lists, tallest first, without opening a
+    /// stream (Settings → Camera's sizes).
+    pub fn heights_of(index: u32) -> Result<Vec<u32>, CameraError> {
+        ask_access()?;
+        let request = RequestedFormat::new::<RgbAFormat>(RequestedFormatType::None);
+        let mut camera = nokhwa::Camera::new(CameraIndex::Index(index), request)
+            .map_err(|e| backend_error(&e))?;
+        Ok(heights(&mut camera))
+    }
+
+    fn heights(camera: &mut nokhwa::Camera) -> Vec<u32> {
+        let mut out: Vec<u32> = listed(camera).iter().map(CameraFormat::height).collect();
+        out.sort_unstable_by(|a, b| b.cmp(a));
+        out.dedup();
+        out
+    }
+
+    /// What the device lists, every size and rate.
+    fn listed(camera: &mut nokhwa::Camera) -> Vec<CameraFormat> {
+        let formats = camera.compatible_camera_formats().unwrap_or_default();
+        #[cfg(target_os = "macos")]
+        let formats = mac_formats(camera, formats);
+        formats
+    }
+
+    /// nokhwa 0.10's `AVFoundation` backend lists, under each pixel
+    /// format, the sizes of the *other* formats (its
+    /// `compatible_list_by_resolution` filters with `!=`): a camera with
+    /// one format — a C920 on a Mac — lists nothing, and the camera
+    /// opened at whatever came first (160×90). Asked for a format that
+    /// no camera there has (BGR), the same filter hands back every size
+    /// and rate. `AVFoundation` converts frames to the pixel format the
+    /// output asks, so each is offered as YUYV, which is what the
+    /// output is then set to; a fixed nokhwa lists them properly and
+    /// these only repeat them.
+    #[cfg(target_os = "macos")]
+    fn mac_formats(camera: &mut nokhwa::Camera, listed: Vec<CameraFormat>) -> Vec<CameraFormat> {
+        let mut all: Vec<CameraFormat> = listed
+            .into_iter()
+            .map(|f| CameraFormat::new(f.resolution(), FrameFormat::YUYV, f.frame_rate()))
+            .collect();
+        if let Ok(map) = camera.compatible_list_by_resolution(FrameFormat::RAWBGR) {
+            for (res, rates) in map {
+                all.extend(
+                    rates
+                        .into_iter()
+                        .map(|fps| CameraFormat::new(res, FrameFormat::YUYV, fps)),
+                );
             }
-            let mut base: *mut u8 = std::ptr::null_mut();
-            let mut len = 0u32;
-            buffer
-                .Lock(&raw mut base, None, Some(&raw mut len))
-                .map_err(|e| format!("picture: {e}"))?;
-            let pitch = cam.stride.unsigned_abs() as usize;
-            if !base.is_null() && pitch >= row && len as usize >= pitch * rows {
-                for (y, dst) in data.chunks_exact_mut(row).take(rows).enumerate() {
-                    // Bottom-up: the first row in memory is the last.
-                    let line = if cam.stride < 0 { rows - 1 - y } else { y };
-                    std::ptr::copy_nonoverlapping(base.add(line * pitch), dst.as_mut_ptr(), row);
-                }
-            }
-            let _ = buffer.Unlock();
-            Ok(data)
+        }
+        all.sort_by_key(|f| (f.width(), f.height(), f.frame_rate()));
+        all.dedup_by_key(|f| (f.width(), f.height(), f.frame_rate()));
+        all
+    }
+
+    fn raw_of(format: FrameFormat) -> RawFormat {
+        match format {
+            FrameFormat::MJPEG => RawFormat::Mjpeg,
+            FrameFormat::YUYV => RawFormat::Yuyv,
+            FrameFormat::NV12 => RawFormat::Nv12,
+            FrameFormat::GRAY => RawFormat::Gray,
+            FrameFormat::RAWRGB => RawFormat::Rgb,
+            FrameFormat::RAWBGR => RawFormat::Bgr,
         }
     }
+
+    pub fn open(index: u32, height: u32) -> Result<NokhwaCamera, CameraError> {
+        ask_access()?;
+        // The device's own list, and our pick from it (`choose_format`).
+        // nokhwa's `Closest` wants the pixel format and the exact size
+        // it was given, which a Mac camera's list (NV12/YUYV, no MJPEG)
+        // never has: 1.5's first 720p build could not open one.
+        let listed = {
+            let probe = RequestedFormat::new::<RgbAFormat>(RequestedFormatType::None);
+            let mut camera = nokhwa::Camera::new(CameraIndex::Index(index), probe)
+                .map_err(|e| backend_error(&e))?;
+            listed(&mut camera)
+        };
+        let offers: Vec<super::Offer> = listed
+            .iter()
+            .map(|f| super::Offer {
+                width: f.width(),
+                height: f.height(),
+                fps: f.frame_rate(),
+                format: raw_of(f.format()),
+            })
+            .collect();
+        // Best first; a device may refuse one it listed (a rate it
+        // rounds), so the next is tried, a few at most. A device that
+        // lists nothing opens at whatever it starts with.
+        let mut camera = None;
+        let mut last_error = None;
+        for i in super::rank_formats(&offers, height, WANTED_FPS)
+            .into_iter()
+            .take(6)
+        {
+            let request = RequestedFormat::new::<RgbAFormat>(RequestedFormatType::Exact(listed[i]));
+            match nokhwa::Camera::new(CameraIndex::Index(index), request) {
+                Ok(c) => {
+                    camera = Some(c);
+                    break;
+                }
+                Err(e) => {
+                    log::info!("camera: {} refused: {e}", listed[i]);
+                    last_error = Some(e);
+                }
+            }
+        }
+        let mut camera = match (camera, last_error) {
+            (Some(c), _) => c,
+            (None, Some(e)) => return Err(backend_error(&e)),
+            (None, None) => {
+                let request = RequestedFormat::new::<RgbAFormat>(RequestedFormatType::None);
+                nokhwa::Camera::new(CameraIndex::Index(index), request)
+                    .map_err(|e| backend_error(&e))?
+            }
+        };
+        camera.open_stream().map_err(|e| backend_error(&e))?;
+        let format = camera.camera_format();
+        let raw = raw_of(format.format());
+        let name = camera.info().human_name();
+        let mode = format!(
+            "{}x{} {} fps {:?}",
+            format.width(),
+            format.height(),
+            format.frame_rate(),
+            raw
+        );
+        log::info!("camera: {name} opened at {mode}");
+        Ok(NokhwaCamera {
+            mode,
+            size: (format.width(), format.height()),
+            camera,
+            name,
+            format: raw,
+            opened: Instant::now(),
+        })
+    }
+
+    impl super::Camera for NokhwaCamera {
+        fn frame(&mut self) -> Result<Frame, CameraError> {
+            let buffer = self.camera.frame().map_err(|e| backend_error(&e))?;
+            let res = buffer.resolution();
+            let (data, width, height) =
+                to_rgba(self.format, res.width(), res.height(), buffer.buffer())?;
+            self.size = (width, height);
+            Ok(Frame {
+                data,
+                width,
+                height,
+                timestamp_ms: u64::try_from(self.opened.elapsed().as_millis()).unwrap_or(u64::MAX),
+                format: PixelFormat::Rgba,
+            })
+        }
+
+        fn size(&self) -> (u32, u32) {
+            self.size
+        }
+
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn heights(&mut self) -> Vec<u32> {
+            heights(&mut self.camera)
+        }
+
+        fn mode(&self) -> String {
+            self.mode.clone()
+        }
+    }
+
+    impl Drop for NokhwaCamera {
+        fn drop(&mut self) {
+            let _ = self.camera.stop_stream();
+        }
+    }
+}
+
+/// The cameras the system knows of, in its order.
+///
+/// # Errors
+/// The platform's camera API failed, or there is none here yet.
+pub fn list_cameras() -> Result<Vec<CameraInfo>, CameraError> {
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        desktop::list()
+    }
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    {
+        Err(CameraError::Unsupported)
+    }
+}
+
+/// Open camera `index` (a [`CameraInfo::index`]) at the size closest
+/// to `height` (16:9, 30 fps); on macOS this may show the system's
+/// permission prompt and wait for the answer.
+///
+/// # Errors
+/// No such camera, access refused, or the device would not start.
+pub fn open(index: u32, height: u32) -> Result<Box<dyn Camera>, CameraError> {
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        Ok(Box::new(desktop::open(index, height)?))
+    }
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    {
+        let _ = (index, height);
+        Err(CameraError::Unsupported)
+    }
+}
+
+/// The heights camera `index` can deliver, tallest first.
+///
+/// # Errors
+/// No such camera, or access refused.
+pub fn heights(index: u32) -> Result<Vec<u32>, CameraError> {
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        desktop::heights_of(index)
+    }
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    {
+        let _ = index;
+        Err(CameraError::Unsupported)
+    }
+}
+
+/// Shrink an RGBA frame by whole steps until it fits `max_w × max_h`,
+/// for the self-view: a 640×360 picture costs the UI a quarter of the
+/// copy at 320×180. Nearest-neighbour; the tile is small.
+#[must_use]
+pub fn downscale_rgba(frame: &Frame, max_w: u32, max_h: u32) -> (Vec<u8>, u32, u32) {
+    let step = (frame.width.div_ceil(max_w.max(1)))
+        .max(frame.height.div_ceil(max_h.max(1)))
+        .max(1);
+    let (w, h) = (frame.width / step, frame.height / step);
+    let src_w = frame.width as usize;
+    let mut out = Vec::with_capacity(w as usize * h as usize * 4);
+    for y in 0..h as usize {
+        let row = y * step as usize * src_w;
+        for x in 0..w as usize {
+            let i = (row + x * step as usize) * 4;
+            match frame.data.get(i..i + 4) {
+                Some(px) if frame.format == PixelFormat::Rgba => out.extend_from_slice(px),
+                Some(px) => out.extend_from_slice(&[px[2], px[1], px[0], px[3]]),
+                None => out.extend_from_slice(&[0, 0, 0, 255]),
+            }
+        }
+    }
+    (out, w, h)
 }
 
 #[cfg(test)]
@@ -652,58 +576,115 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_smooth_format_beats_a_bigger_slow_one() {
-        // A USB 2 webcam: 1080p raw at 5 fps, or 720p at 30.
-        let slow = format_score(1920, 1080, 5.0, Quality::FHD30);
-        let smooth = format_score(1280, 720, 30.0, Quality::FHD30);
-        assert!(smooth > slow);
-        // 1080p MJPEG at 30 beats both.
-        assert!(format_score(1920, 1080, 30.0, Quality::FHD30) > smooth);
+    fn yuyv_grey_and_colours_land_where_bt601_puts_them() {
+        // Two pixels of mid grey (Y 126, no colour), as a camera sends
+        // a blank wall.
+        let (rgba, w, h) = to_rgba(RawFormat::Yuyv, 2, 1, &[126, 128, 126, 128]).unwrap();
+        assert_eq!((w, h), (2, 1));
+        assert_eq!(&rgba[..4], &[128, 128, 128, 255]);
+        assert_eq!(&rgba[4..], &[128, 128, 128, 255]);
+        // Studio white and black.
+        let (white, ..) = to_rgba(RawFormat::Yuyv, 2, 1, &[235, 128, 16, 128]).unwrap();
+        assert_eq!(&white[..4], &[255, 255, 255, 255]);
+        assert_eq!(&white[4..], &[0, 0, 0, 255]);
+        // Strong V: red.
+        let (red, ..) = to_rgba(RawFormat::Yuyv, 2, 1, &[81, 90, 81, 240]).unwrap();
+        assert!(red[0] > 240 && red[1] < 10 && red[2] < 10, "{red:?}");
     }
 
     #[test]
-    fn a_format_inside_the_preset_beats_one_past_it() {
-        let inside = format_score(1280, 720, 30.0, Quality::HD30);
-        let past = format_score(1920, 1080, 30.0, Quality::HD30);
-        assert!(inside > past);
-        // Past it, the smaller of two is nearer.
-        assert!(
-            format_score(1920, 1080, 30.0, Quality::HD30)
-                > format_score(3840, 2160, 30.0, Quality::HD30)
-        );
+    fn nv12_shares_one_chroma_pair_per_two_by_two() {
+        // 2x2: four luma, one U/V pair.
+        let data = [235, 235, 16, 16, 128, 128];
+        let (rgba, ..) = to_rgba(RawFormat::Nv12, 2, 2, &data).unwrap();
+        assert_eq!(&rgba[0..4], &[255, 255, 255, 255]);
+        assert_eq!(&rgba[8..12], &[0, 0, 0, 255]);
     }
 
     #[test]
-    fn the_rate_counts_up_to_the_presets_only() {
-        let at_preset = format_score(1280, 720, 30.0, Quality::HD30);
-        let faster = format_score(1280, 720, 60.0, Quality::HD30);
-        assert_eq!(at_preset, faster);
-        assert!(
-            format_score(1280, 720, 60.0, Quality::HD60)
-                > format_score(1280, 720, 30.0, Quality::HD60)
-        );
-        // 29.97 is as smooth as 30.
-        assert!(format_score(1280, 720, 29.97, Quality::HD30).1);
+    fn rgb_bgr_and_grey_expand_to_rgba() {
+        let (rgb, ..) = to_rgba(RawFormat::Rgb, 1, 1, &[1, 2, 3]).unwrap();
+        assert_eq!(rgb, [1, 2, 3, 255]);
+        let (bgr, ..) = to_rgba(RawFormat::Bgr, 1, 1, &[1, 2, 3]).unwrap();
+        assert_eq!(bgr, [3, 2, 1, 255]);
+        let (g, ..) = to_rgba(RawFormat::Gray, 1, 1, &[9]).unwrap();
+        assert_eq!(g, [9, 9, 9, 255]);
     }
 
-    /// The machine's real cameras (enumeration only: nothing is opened).
-    /// `cargo test -p video lists_this_machines_cameras -- --ignored --nocapture`
-    #[cfg(target_os = "windows")]
     #[test]
-    #[ignore = "needs the machine's devices"]
-    fn lists_this_machines_cameras() {
-        let cameras = list_cameras().expect("the camera list");
-        for c in &cameras {
-            println!("camera: {} [{}]", c.name, c.id);
-            assert!(!c.id.is_empty(), "{} has no id to open it by", c.name);
+    fn a_short_buffer_is_an_error_not_a_panic() {
+        assert!(to_rgba(RawFormat::Yuyv, 4, 4, &[0; 10]).is_err());
+        assert!(to_rgba(RawFormat::Nv12, 4, 4, &[0; 10]).is_err());
+        assert!(to_rgba(RawFormat::Mjpeg, 4, 4, &[0; 10]).is_err());
+    }
+
+    fn offer(width: u32, height: u32, fps: u32, format: RawFormat) -> Offer {
+        Offer {
+            width,
+            height,
+            fps,
+            format,
         }
-        println!("{} camera(s)", cameras.len());
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
-    fn no_cameras_off_windows() {
-        assert!(list_cameras().unwrap().is_empty());
-        assert!(CameraCapturer::new("x", Quality::HD30).is_err());
+    fn a_mac_camera_without_mjpeg_opens_at_the_size_asked() {
+        // What a C920 lists on macOS: no MJPEG, 16:9 and 4:3 sizes.
+        let offers = [
+            offer(640, 480, 30, RawFormat::Yuyv),
+            offer(640, 360, 30, RawFormat::Yuyv),
+            offer(1280, 720, 30, RawFormat::Nv12),
+            offer(1280, 720, 30, RawFormat::Yuyv),
+            offer(1920, 1080, 30, RawFormat::Nv12),
+        ];
+        assert_eq!(choose_format(&offers, 720, 30), Some(2));
+        assert_eq!(choose_format(&offers, 1080, 30), Some(4));
+        // 480p: 640x480 is exactly as tall; the shape only breaks ties.
+        assert_eq!(choose_format(&offers, 480, 30), Some(0));
+    }
+
+    #[test]
+    fn usb_2_takes_mjpeg_for_a_smooth_720p_and_a_small_camera_its_tallest() {
+        let offers = [
+            offer(1280, 720, 10, RawFormat::Yuyv),
+            offer(1280, 720, 30, RawFormat::Mjpeg),
+            offer(640, 360, 30, RawFormat::Yuyv),
+        ];
+        assert_eq!(choose_format(&offers, 720, 30), Some(1));
+        let small = [
+            offer(320, 240, 30, RawFormat::Yuyv),
+            offer(160, 120, 30, RawFormat::Yuyv),
+        ];
+        assert_eq!(choose_format(&small, 720, 30), Some(0));
+        // Only slow offers: still one.
+        let slow = [offer(1280, 720, 10, RawFormat::Yuyv)];
+        assert_eq!(choose_format(&slow, 720, 30), Some(0));
+        assert_eq!(choose_format(&[], 720, 30), None);
+    }
+
+    #[test]
+    fn the_ranking_puts_smooth_rates_first_and_keeps_every_offer() {
+        let offers = [
+            offer(160, 90, 30, RawFormat::Yuyv),
+            offer(1280, 720, 30, RawFormat::Yuyv),
+            offer(1280, 720, 5, RawFormat::Yuyv),
+            offer(1920, 1080, 30, RawFormat::Yuyv),
+        ];
+        let order = rank_formats(&offers, 720, 30);
+        assert_eq!(order, vec![1, 3, 0, 2]);
+    }
+
+    #[test]
+    fn the_self_view_is_shrunk_by_whole_steps() {
+        let frame = Frame {
+            data: vec![7; 640 * 360 * 4],
+            width: 640,
+            height: 360,
+            timestamp_ms: 0,
+            format: PixelFormat::Rgba,
+        };
+        let (px, w, h) = downscale_rgba(&frame, 320, 180);
+        assert_eq!((w, h), (320, 180));
+        assert_eq!(px.len(), 320 * 180 * 4);
     }
 }

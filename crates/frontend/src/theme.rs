@@ -40,6 +40,12 @@ pub struct Palette {
     pub hover: Rgb,
     pub subtle: Rgb,
     pub border: Rgb,
+    /// 1.5: the chat panel beside Channel view, its edge's grip and
+    /// our own conversation bubbles (with their time and ticks).
+    pub bg_panel: Rgb,
+    pub grip: Rgb,
+    pub bubble_own: Rgb,
+    pub bubble_own_meta: Rgb,
     pub scrim: Rgba,
     pub text_primary: Rgb,
     pub text_secondary: Rgb,
@@ -248,6 +254,10 @@ impl Palette {
             hover: Rgb(0x27, 0x2A, 0x2F),
             subtle: Rgb(0x30, 0x33, 0x38),
             border: Rgb(0x3A, 0x3D, 0x42),
+            bg_panel: Rgb(0x26, 0x29, 0x2E),
+            grip: Rgb(0x6B, 0x6E, 0x73),
+            bubble_own: Rgb(0x16, 0x4E, 0x7A),
+            bubble_own_meta: Rgb(0xA9, 0xC9, 0xE6),
             scrim: Rgba(0, 0, 0, 0xAA),
             text_primary: Rgb(0xD1, 0xD2, 0xD3),
             text_secondary: Rgb(0xAB, 0xAD, 0xB0),
@@ -315,6 +325,14 @@ impl Palette {
             background,
             3.0,
         );
+        // Our bubbles take the accent, as far as the text on them
+        // stays readable.
+        let mut tint = if dark { 0.55 } else { 0.18 };
+        let mut bubble_own = mix(background, accent, tint);
+        while tint > 0.0 && contrast(text_primary, bubble_own) < 4.5 {
+            tint -= 0.05;
+            bubble_own = mix(background, accent, tint.max(0.0));
+        }
         Self {
             bg_primary: background,
             bg_secondary: step(0.04),
@@ -323,6 +341,10 @@ impl Palette {
             hover: step(0.065),
             subtle: step(0.12),
             border: step(0.17),
+            bg_panel: step(0.055),
+            grip: mix(text_primary, background, 0.55),
+            bubble_own,
+            bubble_own_meta: readable_text(mix(accent, text_primary, 0.6), bubble_own, 4.5),
             scrim: if dark {
                 Rgba(0, 0, 0, 0xAA)
             } else {
@@ -396,6 +418,10 @@ impl Palette {
         theme.set_hover(brush(self.hover));
         theme.set_subtle(brush(self.subtle));
         theme.set_border(brush(self.border));
+        theme.set_bg_panel(brush(self.bg_panel));
+        theme.set_grip(brush(self.grip));
+        theme.set_bubble_own(brush(self.bubble_own));
+        theme.set_bubble_own_meta(color(self.bubble_own_meta));
         let Rgba(red, green, blue, alpha) = self.scrim;
         theme.set_scrim(slint::Brush::from(slint::Color::from_argb_u8(
             alpha, red, green, blue,
@@ -477,6 +503,10 @@ mod tests {
             ("hover", d.hover),
             ("subtle", d.subtle),
             ("border", d.border),
+            ("bg-panel", d.bg_panel),
+            ("grip", d.grip),
+            ("bubble-own", d.bubble_own),
+            ("bubble-own-meta", d.bubble_own_meta),
             ("text-primary", d.text_primary),
             ("text-secondary", d.text_secondary),
             ("text-muted", d.text_muted),
@@ -536,6 +566,14 @@ mod tests {
             assert!(
                 contrast(p.text_primary, p.bg_tertiary) >= 4.0,
                 "{name}: text on cards"
+            );
+            assert!(
+                contrast(p.text_primary, p.bubble_own) >= 4.5,
+                "{name}: text in our own bubbles"
+            );
+            assert!(
+                contrast(p.bubble_own_meta, p.bubble_own) >= 4.5,
+                "{name}: a bubble's time"
             );
         }
     }
