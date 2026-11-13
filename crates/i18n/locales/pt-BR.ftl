@@ -674,24 +674,6 @@ audio-voice-tone-hint = Vale para a voz de todos; notificações e transmissões
 audio-tone-natural = Natural
 audio-tone-crisp = Nítido
 audio-tone-bass = Graves reforçados
-# empecord: o buffer de replay. Os últimos cinco minutos da chamada
-# ficam na memória; o botão os grava, um arquivo por pessoa e uma
-# mixagem. Ninguém é avisado. Só neste dispositivo.
-replay-save = Salvar os últimos 5 minutos
-replay-header = Buffer de replay
-replay-toggle = Manter na memória os últimos 5 minutos da chamada
-replay-toggle-hint = Só na memória, para o botão Salvar ao lado do microfone (ou a tecla dele). Nada é gravado até você apertar, e ninguém é avisado.
-replay-folder-line = Salvos em:
-replay-open-folder = Abrir a pasta de gravações
-replay-off = O buffer de replay está desligado. Ligue em Configurações → Áudio.
-replay-nothing = Ninguém falou nos últimos 5 minutos.
-replay-me = eu
-replay-saved = { $seconds } s salvos ({ $people ->
-    [one] 1 pessoa
-   *[other] { $people } pessoas
-}) em { $folder }
-replay-failed = Não foi possível salvar a gravação: { $error }
-action-save-replay = Salvar os últimos 5 minutos
 # empecord: a mesa de sons. Os arquivos da pasta dela, tocados na
 # chamada pelo seu microfone.
 soundboard-title = Mesa de sons
@@ -723,7 +705,7 @@ theme-background = Fundo
 theme-text = Texto
 theme-accent = Destaque
 theme-custom-hint = Cores no formato #RRGGBB. O resto da paleta sai destas três; texto parecido demais com o fundo é afastado até dar para ler.
-about-fork-of = Um fork do baucord, com voz espacial, equalizador por pessoa, transmissão da câmera, buffer de replay, mesa de sons e temas de cores. Funciona com qualquer servidor do baucord.
+about-fork-of = Um fork do baucord, com voz espacial, equalizador por pessoa, transmissão da câmera, mesa de sons e temas de cores. Funciona com qualquer servidor do baucord.
 card-offline = Desconectado
 invite-dialog-title = Convidar usuários
 invite-role = Entra como

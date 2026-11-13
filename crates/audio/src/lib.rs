@@ -70,7 +70,6 @@ mod native;
 mod output;
 mod platform;
 pub mod processor;
-pub mod replay;
 pub mod resampler;
 pub mod route;
 pub mod soundboard;
@@ -96,7 +95,6 @@ use log::{debug, error, info};
 pub use loopback::LOOPBACK_DELAY;
 pub use platform::TimerResolutionGuard;
 pub use processor::eq::{VoiceTone, EQ_BANDS, EQ_BAND_HZ, EQ_MAX_DB};
-pub use replay::{ClipInfo, ReplayError, SaveJob};
 pub use soundboard::{Clip, ClipCmd, ClipError};
 pub use sounds::SoundType;
 pub use stats::AudioStats;
@@ -460,8 +458,6 @@ pub struct VoiceChat {
     clip_mic_rx: Receiver<soundboard::ClipCmd>,
     clip_ear_tx: Sender<soundboard::ClipCmd>,
     clip_ear_rx: Receiver<soundboard::ClipCmd>,
-    /// The last five minutes of the call (`replay.rs`).
-    replay: replay::Replay,
 
     // ── Thread handles ───────────────────────────────────────────────
     encoder_thread: Option<std::thread::JoinHandle<()>>,
@@ -733,7 +729,6 @@ impl VoiceChat {
             clip_mic_rx,
             clip_ear_tx,
             clip_ear_rx,
-            replay: replay::Replay::new(config.replay),
             encoder_thread: Some(encoder_thread),
             peers: {
                 let table = transport::jitter_buffer::PeerTable::with_spatial(config.spatial_voice);
@@ -1139,7 +1134,6 @@ impl VoiceChat {
             self.is_speaking.clone(),
             self.voice_streams,
             input::MicTaps {
-                replay: self.replay.tap(replay::INPUT_RING),
                 clips: self.clip_mic_rx.clone(),
             },
         )?;
@@ -1216,7 +1210,6 @@ impl VoiceChat {
             self.config.output_gain,
             self.voice_streams,
             output::EarTaps {
-                replay: self.replay.tap(replay::OUTPUT_RING),
                 clips: self.clip_ear_rx.clone(),
             },
         )?;
@@ -1750,19 +1743,6 @@ impl VoiceChat {
     /// The colour over everyone's voice (`processor::eq`).
     pub fn set_voice_tone(&self, tone: VoiceTone) {
         self.peers.set_tone(tone);
-    }
-
-    /// Keep the last five minutes of the call in memory (`true`), or
-    /// stop and forget them (`replay.rs`).
-    pub fn set_replay(&self, on: bool) {
-        self.replay.set_enabled(on);
-    }
-
-    /// Write the last five minutes of the call: one file per person and
-    /// a mix, in `job.dir`. Returns at once; `job.done` runs when the
-    /// files are written (or it failed), on the thread that wrote them.
-    pub fn save_replay(&self, job: SaveJob) {
-        self.replay.save(job);
     }
 
     /// Play a soundboard clip into the call (what the others hear) and,

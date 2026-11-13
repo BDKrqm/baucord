@@ -609,8 +609,6 @@ export global Logic {
     callback eq-released(band: int, db: float);
     callback eq-reset();
     callback eq-close();
-    // The replay buffer: write the last five minutes (the bar's button).
-    callback replay-save();
     // The soundboard: open and close it, play a button (index into
     // State.soundboard-clips), stop them all, read the folder again,
     // open the folder, the volume let go, hearing them ourselves.

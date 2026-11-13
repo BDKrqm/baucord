@@ -23,7 +23,6 @@ use rubato::{Async, Resampler};
 use crate::latch::{Ring, Wait};
 use crate::loopback::{LoopbackDelay, LOOPBACK_DELAY};
 use crate::processor::limiter::Limiter;
-use crate::replay::ReplayTap;
 use crate::resampler::build_output_resampler;
 use crate::soundboard::{ClipCmd, ClipMixer};
 use crate::sounds::{SoundBank, SoundType};
@@ -51,11 +50,8 @@ const ADAPT_TICK: Duration = Duration::from_millis(10);
 /// device that stopped calling back for longer) the cadence restarts.
 const MAX_CATCH_UP_TICKS: u32 = 20;
 
-/// What the output worker does besides playing: the soundboard's clips
-/// the listener asked to hear themselves, and the replay buffer's copy of
-/// every peer's voice.
+/// The soundboard's clips the listener asked to hear themselves.
 pub struct EarTaps {
-    pub replay: ReplayTap,
     pub clips: Receiver<ClipCmd>,
 }
 
@@ -608,11 +604,7 @@ fn worker_loop(parts: WorkerParts) {
 
     let mut jitter_buffer = AdaptiveJitterBuffer::new(OPUS_SAMPLE_RATE as usize, 10, peers);
     jitter_buffer.set_stereo(stereo);
-    let EarTaps {
-        replay,
-        clips: clip_rx,
-    } = taps;
-    jitter_buffer.set_replay(replay);
+    let EarTaps { clips: clip_rx } = taps;
     // The clips the listener hears themselves: one mono hop, into both
     // ears with the notification sounds.
     let mut clips = ClipMixer::new();

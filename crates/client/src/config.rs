@@ -40,10 +40,6 @@ pub enum BindableAction {
     ToggleDeafen,
     ToggleScreenShare,
     PushToTalk,
-    /// Write the replay buffer's last five minutes (`audio::replay`).
-    /// Kept in [`Settings::more_keybinds`], not `keybinds`: a baucord
-    /// that does not know it would refuse the whole file.
-    SaveReplay,
 }
 
 impl BindableAction {
@@ -54,7 +50,6 @@ impl BindableAction {
         BindableAction::ToggleDeafen,
         BindableAction::ToggleScreenShare,
         BindableAction::PushToTalk,
-        BindableAction::SaveReplay,
     ];
 
     #[must_use]
@@ -64,15 +59,7 @@ impl BindableAction {
             BindableAction::ToggleDeafen => "Toggle Deafen",
             BindableAction::ToggleScreenShare => "Toggle Screen Share",
             BindableAction::PushToTalk => "Push to talk",
-            BindableAction::SaveReplay => "Save the last 5 minutes",
         }
-    }
-
-    /// An action of empecord's own, saved apart from baucord's
-    /// ([`Settings::more_keybinds`]).
-    #[must_use]
-    pub fn is_ours(self) -> bool {
-        matches!(self, BindableAction::SaveReplay)
     }
 }
 
@@ -589,11 +576,6 @@ pub struct AudioSettings {
     /// `"crisp"`, `"bass_boost"` (`audio::VoiceTone`).
     #[serde(default)]
     pub voice_tone: audio::VoiceTone,
-    /// Keep the last five minutes of the call in memory, for the Save
-    /// button (`audio::replay`). Nothing reaches the disk until it is
-    /// pressed.
-    #[serde(default = "default_true")]
-    pub replay_buffer: bool,
     /// The soundboard's volume, 0…1 (what the others hear; our own
     /// copy follows the output volume as well).
     #[serde(default = "default_soundboard_volume")]
@@ -621,7 +603,6 @@ impl Default for AudioSettings {
             space_distance: DEFAULT_SPACE_DISTANCE,
             space_width: audio::DEFAULT_SPATIAL_WIDTH,
             voice_tone: audio::VoiceTone::Natural,
-            replay_buffer: true,
             soundboard_volume: default_soundboard_volume(),
             soundboard_hear: true,
         }
@@ -748,12 +729,6 @@ pub struct Settings {
     pub window: WindowSettings,
     #[serde(default = "default_keybinds")]
     pub keybinds: Vec<KeybindEntry>,
-    /// The keybinds of empecord's own actions
-    /// ([`BindableAction::is_ours`]). Apart from `keybinds` because
-    /// baucord, sharing this file, ignores a key it does not know but
-    /// fails on an action it does not know.
-    #[serde(default)]
-    pub more_keybinds: Vec<KeybindEntry>,
     #[serde(default)]
     pub peer_settings: HashMap<String, PeerAudioSettings>,
     /// UI language as a BCP-47 code (e.g. "es-AR"). `None` = follow the
@@ -839,7 +814,6 @@ impl Default for Settings {
             audio: AudioSettings::default(),
             window: WindowSettings::default(),
             keybinds: default_keybinds(),
-            more_keybinds: Vec::new(),
             peer_settings: HashMap::new(),
             language: None,
             share: ShareSettings::default(),
@@ -1135,11 +1109,7 @@ impl Settings {
     }
 
     pub fn set_bind(&mut self, action: BindableAction, bind: String) {
-        let binds = if action.is_ours() {
-            &mut self.more_keybinds
-        } else {
-            &mut self.keybinds
-        };
+        let binds = &mut self.keybinds;
         if let Some(entry) = binds.iter_mut().find(|e| e.action == action) {
             entry.bind = bind;
         } else {
@@ -1147,9 +1117,9 @@ impl Settings {
         }
     }
 
-    /// Every keybind: baucord's and empecord's own.
+    /// Every currently supported keybind.
     pub fn all_keybinds(&self) -> impl Iterator<Item = &KeybindEntry> {
-        self.keybinds.iter().chain(&self.more_keybinds)
+        self.keybinds.iter()
     }
 
     /// Where the soundboard's clips are: the files dropped in it are
@@ -1157,13 +1127,6 @@ impl Settings {
     #[must_use]
     pub fn soundboard_dir() -> PathBuf {
         config_base_dir().join("soundboard")
-    }
-
-    /// Where the replay buffer's saves go, one folder each (`replays/`
-    /// next to settings.json).
-    #[must_use]
-    pub fn replays_dir() -> PathBuf {
-        config_base_dir().join("replays")
     }
 }
 
@@ -1720,32 +1683,38 @@ mod tests {
         assert_eq!(s.servers, vec![ServerEntry::official()]);
     }
 
-    /// The replay hotkey goes to `more_keybinds`: baucord, reading the
-    /// same file, would fail on an action in `keybinds` it does not know.
+    /// Old files may still contain the removed recorder and its shortcut.
+    /// Loading them must preserve the user's identity, devices and keybinds.
     #[test]
-    fn our_keybinds_stay_out_of_baucords_list() {
-        let mut s = Settings::default();
-        s.set_bind(BindableAction::SaveReplay, "F10".into());
-        s.set_bind(BindableAction::ToggleMute, "F6".into());
-        assert_eq!(s.bind_for(BindableAction::SaveReplay), "F10");
-        assert_eq!(s.bind_for(BindableAction::ToggleMute), "F6");
-        let json = serde_json::to_value(&s).expect("serialize");
-        let theirs = json["keybinds"].to_string();
-        assert!(!theirs.contains("save_replay"), "{theirs}");
-        assert!(json["more_keybinds"].to_string().contains("save_replay"));
-        let back = parse(&json.to_string());
-        assert_eq!(back.bind_for(BindableAction::SaveReplay), "F10");
+    fn removed_recorder_settings_are_ignored_without_resetting_preferences() {
+        let mut settings = Settings::default();
+        settings.user.nickname = "Existing user".into();
+        settings.audio.input.device = Some("Existing microphone".into());
+        settings.set_bind(BindableAction::ToggleMute, "F6".into());
+        let mut json = serde_json::to_value(&settings).expect("serialize");
+        json["audio"]["replay_buffer"] = serde_json::json!(true);
+        json["more_keybinds"] = serde_json::json!([
+            {"action": "save_replay", "bind": "F10"}
+        ]);
+
+        let back: Settings = serde_json::from_value(json).expect("old settings load");
+        assert_eq!(back.user.nickname, "Existing user");
         assert_eq!(
-            back.all_keybinds().filter(|e| !e.bind.is_empty()).count(),
-            4,
-            "mute, deafen, share and save"
+            back.audio.input.device.as_deref(),
+            Some("Existing microphone")
         );
+        assert_eq!(back.bind_for(BindableAction::ToggleMute), "F6");
+        assert!(back.all_keybinds().all(|entry| entry.bind != "F10"));
+        assert_eq!(BindableAction::ALL.len(), 4);
+
+        let saved = serde_json::to_value(&back).expect("save cleaned settings");
+        assert!(saved["audio"].get("replay_buffer").is_none());
+        assert!(saved.get("more_keybinds").is_none());
     }
 
     #[test]
     fn empecords_own_settings_have_their_defaults() {
         let s = parse("{}");
-        assert!(s.audio.replay_buffer);
         assert!(s.audio.soundboard_hear);
         assert_eq!(s.ui.theme, "dark");
         assert_eq!(s.ui.theme_colors, ThemeColors::default());

@@ -44,18 +44,14 @@ use crate::processor::compressor::Compressor;
 use crate::processor::gate::NoiseGate;
 use crate::processor::speaking::{SpeakingFlag, SpeakingIndicator};
 use crate::processor::{FrameContext, InputChain};
-use crate::replay::{self, Hangover, ReplayTap};
 use crate::resampler::build_input_resampler;
 use crate::soundboard::{ClipCmd, ClipMixer};
 use crate::stats::AudioStats;
 use crate::{PcmFrame, FRAME_SIZE, OPUS_SAMPLE_RATE};
 
-/// What the capture worker does with the frame after the chain: the
-/// soundboard's clips added to it (the others hear them; the gate,
-/// denoiser and compressor do not touch them), and the replay buffer's
-/// copy of it, as it goes out.
+/// The soundboard's clips added to the frame after the input chain.
+/// The others hear them; the gate, denoiser and compressor do not touch them.
 pub struct MicTaps {
-    pub replay: ReplayTap,
     pub clips: ChannelReceiver<ClipCmd>,
 }
 
@@ -101,8 +97,7 @@ pub struct AudioInput {
     aec_verdict: Option<Result<(), &'static str>>,
     encoder_tx: Sender<PcmFrame>,
     loopback_tx: Sender<PcmFrame>,
-    /// The soundboard and replay taps, handed to the worker when it
-    /// starts.
+    /// The soundboard clips, handed to the worker when it starts.
     taps: Option<MicTaps>,
 
     ring_producer: Option<Producer<f32>>,
@@ -544,7 +539,7 @@ fn worker_loop(
     mut chain: InputChain,
     is_speaking: Arc<SpeakingFlag>,
     device_sample_rate: u32,
-    mut taps: MicTaps,
+    taps: MicTaps,
 ) {
     // ── Resampler setup ─────────────────────────────────────
     let needs_resample = device_sample_rate != OPUS_SAMPLE_RATE;
@@ -576,9 +571,6 @@ fn worker_loop(
     let mut accumulator: Vec<f32> = Vec::with_capacity(FRAME_SIZE * 4);
     let mut frame: PcmFrame = [0.0; FRAME_SIZE];
     let mut clips = ClipMixer::new();
-    let mut rec_hang = Hangover::default();
-    // Samples processed so far: the replay tap's own clock.
-    let mut rec_local: u64 = 0;
 
     // Ask the OS for audio-class scheduling. Keeps small buffers glitch-
     // free under load.
@@ -731,13 +723,9 @@ fn worker_loop(
                 // Frames are `Copy`: no clone, no allocation.
                 let _ = loopback_tx.try_send(frame);
             }
-            let local = rec_local;
-            rec_local += FRAME_SIZE as u64;
             if !config.transmit.load(Ordering::Relaxed) {
                 continue;
             }
-            // What the others hear of this side, for the replay buffer.
-            taps.replay.push(replay::ME, local, &frame, &mut rec_hang);
 
             // Every frame goes to the encoder: the gate has already
             // zeroed non-speech, and Opus DTX (in the encoder thread)
@@ -863,7 +851,6 @@ mod tests {
                     speaking,
                     OPUS_SAMPLE_RATE,
                     MicTaps {
-                        replay: crate::replay::Replay::new(false).tap(crate::replay::INPUT_RING),
                         clips: bounded(1).1,
                     },
                 );

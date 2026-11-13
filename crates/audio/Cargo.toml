@@ -17,7 +17,7 @@ workspace = true
 cpal = "0.18.2"
 dasp_sample = "0.11"
 
-# Wav reading and writing (the replay buffer's tracks)
+# WAV notification sounds and soundboard test fixtures
 hound = "3.5"
 
 # The soundboard's clips (soundboard.rs): wav, mp3, aac/m4a, flac,

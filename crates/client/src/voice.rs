@@ -19,8 +19,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use audio::{
-    AecMode, AecReport, AudioStats, Clip, ClipError, ClipInfo, PeerAudioSettings, Presence,
-    ReplayError, SaveJob, SoundType, VoiceChat, VoiceChatConfig,
+    AecMode, AecReport, AudioStats, Clip, ClipError, PeerAudioSettings, Presence, SoundType,
+    VoiceChat, VoiceChatConfig,
 };
 use crossbeam_channel::{select, unbounded, Receiver, Sender};
 use log::info;
@@ -94,16 +94,6 @@ pub enum VoiceControl {
     /// encoder's rate controller (congestion vs random loss).
     SetLinkRtt(u32),
     PlaySound(SoundType),
-    /// Keep the last five minutes in memory, or stop and forget them
-    /// (`VoiceChat::set_replay`).
-    SetReplay(bool),
-    /// Write them to `dir`: one file per person (named from `labels`;
-    /// `audio::replay::ME` is ours) and a mix. Answered with
-    /// [`VoiceEvent::ReplaySaved`].
-    SaveReplay {
-        dir: PathBuf,
-        labels: HashMap<u64, String>,
-    },
     /// Play a soundboard file into the call at `gain` (0–1), and into
     /// our ears with `hear_it`. Decoded once, then kept.
     PlayClip {
@@ -121,8 +111,6 @@ pub enum VoiceEvent {
     Started,
     Error(String),
     SpeakingChanged(bool),
-    /// A [`VoiceControl::SaveReplay`] finished.
-    ReplaySaved(Result<ClipInfo, ReplayError>),
     /// A soundboard file could not be played.
     ClipFailed {
         path: PathBuf,
@@ -206,7 +194,6 @@ pub fn engine_config(s: &Settings) -> VoiceChatConfig {
         spatial_voice: s.audio.spatial_voice,
         spatial_width: s.audio.space_width,
         voice_tone: s.audio.voice_tone,
-        replay: s.audio.replay_buffer,
     }
 }
 
@@ -665,29 +652,6 @@ impl VoiceLoopState {
                 if let Some(v) = &self.vc {
                     v.play_sound(sound);
                 }
-            }
-            VoiceControl::SetReplay(on) => {
-                if let Some(v) = &self.vc {
-                    v.set_replay(on);
-                }
-            }
-            VoiceControl::SaveReplay { dir, labels } => {
-                let Some(v) = &self.vc else {
-                    event_tx
-                        .send(VoiceEvent::ReplaySaved(Err(ReplayError::Nothing)))
-                        .ok();
-                    wake();
-                    return;
-                };
-                let (tx, wake) = (event_tx.clone(), wake.clone());
-                v.save_replay(SaveJob {
-                    dir,
-                    labels,
-                    done: Box::new(move |result| {
-                        tx.send(VoiceEvent::ReplaySaved(result)).ok();
-                        wake();
-                    }),
-                });
             }
             VoiceControl::PlayClip {
                 path,

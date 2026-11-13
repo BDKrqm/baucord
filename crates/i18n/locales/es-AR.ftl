@@ -674,24 +674,6 @@ audio-voice-tone-hint = Se aplica a la voz de todos; las notificaciones y las tr
 audio-tone-natural = Natural
 audio-tone-crisp = Nítido
 audio-tone-bass = Graves realzados
-# empecord: el búfer de repetición. Los últimos cinco minutos de la
-# llamada quedan en memoria; el botón los guarda, un archivo por
-# persona y una mezcla. No se le avisa a nadie. Solo en este equipo.
-replay-save = Guardar los últimos 5 minutos
-replay-header = Búfer de repetición
-replay-toggle = Guardar en memoria los últimos 5 minutos de la llamada
-replay-toggle-hint = Solo en memoria, para el botón Guardar al lado del micrófono (o su tecla). No se escribe nada hasta que lo apretás, y no se le avisa a nadie.
-replay-folder-line = Se guardan en:
-replay-open-folder = Abrir la carpeta de grabaciones
-replay-off = El búfer de repetición está apagado. Prendelo en Ajustes → Audio.
-replay-nothing = Nadie habló en los últimos 5 minutos.
-replay-me = yo
-replay-saved = Se guardaron { $seconds } s ({ $people ->
-    [one] 1 persona
-   *[other] { $people } personas
-}) en { $folder }
-replay-failed = No se pudo guardar la grabación: { $error }
-action-save-replay = Guardar los últimos 5 minutos
 # empecord: la botonera de sonidos. Los archivos de su carpeta, que
 # suenan en la llamada a través de tu micrófono.
 soundboard-title = Botonera
@@ -723,7 +705,7 @@ theme-background = Fondo
 theme-text = Texto
 theme-accent = Acento
 theme-custom-hint = Colores como #RRGGBB. El resto de la paleta sale de estos tres; si el texto queda muy parecido al fondo, se lo separa hasta que se pueda leer.
-about-fork-of = Una versión derivada de baucord, con voz espacial, ecualizador por persona, transmisión de cámara, búfer de repetición, botonera y temas de colores. Funciona con cualquier servidor de baucord.
+about-fork-of = Una versión derivada de baucord, con voz espacial, ecualizador por persona, transmisión de cámara, botonera y temas de colores. Funciona con cualquier servidor de baucord.
 card-offline = Desconectado
 invite-dialog-title = Invitar usuarios
 invite-role = Entra como

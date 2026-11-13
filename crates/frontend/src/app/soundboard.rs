@@ -1,12 +1,6 @@
-//! The replay buffer's Save button and the soundboard (empecord).
-//!
-//! Save writes the last five minutes of the call — one WAV per person
-//! and a mix — into a folder of its own under `replays/` next to the
-//! settings (`audio`'s replay.rs keeps them in memory; nothing is sent
-//! to anyone, and nobody is told). The soundboard is the files in the
-//! `soundboard/` folder, one button each, played into the call through
-//! the microphone path (`audio`'s soundboard.rs) and, if wanted, into
-//! our own ears. Both are local only: they work on any server.
+//! The soundboard: files in the `soundboard/` folder, played into the
+//! call through the microphone path and, if wanted, into our own ears.
+//! It works with any server.
 //!
 //! A child of `app`: everything private to `AppState` is in reach
 //! through `super::*`, so these are the same methods, only filed.
@@ -24,75 +18,6 @@ use super::*;
 const CLIP_EXTENSIONS: [&str; 8] = ["wav", "mp3", "ogg", "oga", "flac", "m4a", "aac", "mp4"];
 
 impl AppState {
-    // ── The replay buffer ───────────────────────────────────────────
-
-    /// Save the last five minutes (the bar's button, its hotkey).
-    pub(crate) fn save_replay(&mut self) {
-        if !self.settings.audio.replay_buffer {
-            self.show_toast(ToastKind::Warning, &t!("replay-off"));
-            return;
-        }
-        if self.session.our_client_id.is_none() {
-            self.show_toast(ToastKind::Info, &t!("replay-nothing"));
-            return;
-        }
-        let stamp = chrono::Local::now().format("%Y-%m-%d %H-%M-%S").to_string();
-        let dir = Settings::replays_dir().join(stamp);
-        // Each file is named after its person, as the roster shows them
-        // now; ours after our nickname.
-        let mut labels: HashMap<u64, String> = self
-            .session
-            .users
-            .iter()
-            .map(|(id, user)| (*id, user.username.clone()))
-            .collect();
-        if let Some(id) = self.session.our_client_id {
-            labels.remove(&id);
-        }
-        let me = if self.settings.user.nickname.trim().is_empty() {
-            t!("replay-me")
-        } else {
-            self.settings.user.nickname.clone()
-        };
-        labels.insert(audio::replay::ME, me);
-        self.voice
-            .tx
-            .send(VoiceControl::SaveReplay { dir, labels })
-            .ok();
-    }
-
-    /// A save finished (`VoiceEvent::ReplaySaved`).
-    pub(super) fn replay_saved(&mut self, result: Result<audio::ClipInfo, audio::ReplayError>) {
-        match result {
-            Ok(info) => {
-                let text = t!("replay-saved",
-                    "seconds" => i64::from(info.seconds),
-                    "people" => i64::try_from(info.tracks).unwrap_or(i64::MAX),
-                    "folder" => info.dir.display().to_string());
-                self.push_activity(&text);
-                self.show_toast(ToastKind::Success, &text);
-            }
-            Err(audio::ReplayError::Nothing) => {
-                self.show_toast(ToastKind::Info, &t!("replay-nothing"));
-            }
-            Err(audio::ReplayError::Io(e)) => {
-                self.show_error(&t!("replay-failed", "error" => e.as_str()));
-            }
-        }
-    }
-
-    /// The replay buffer switched on or off (Settings → Audio): heard
-    /// at once; off forgets what it had.
-    pub(crate) fn set_replay_buffer(&mut self, on: bool) {
-        self.settings.audio.replay_buffer = on;
-        self.voice.tx.send(VoiceControl::SetReplay(on)).ok();
-    }
-
-    /// Open the folder the saves go to (made if it is not there yet).
-    pub(crate) fn open_replays_folder() {
-        open_folder(&Settings::replays_dir());
-    }
-
     // ── The soundboard ─────────────────────────────────────────────
 
     pub(super) fn open_soundboard(&mut self) {

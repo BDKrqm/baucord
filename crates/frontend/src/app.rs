@@ -1361,9 +1361,7 @@ fn wire_logic(state: &Rc<RefCell<AppState>>) {
     let w = Rc::downgrade(state);
     logic.on_eq_close(move || with_app(&w, AppState::close_peer_eq));
 
-    // ── The replay buffer and the soundboard ────────────────────
-    let w = Rc::downgrade(state);
-    logic.on_replay_save(move || with_app(&w, AppState::save_replay));
+    // ── The soundboard ─────────────────────────────────────────
     let w = Rc::downgrade(state);
     logic.on_soundboard_open(move || with_app(&w, AppState::open_soundboard));
     let w = Rc::downgrade(state);

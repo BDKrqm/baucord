@@ -60,7 +60,6 @@ impl AppState {
                 (BindableAction::ToggleMute, true) => st.handle_toggle_mute(),
                 (BindableAction::ToggleDeafen, true) => st.handle_toggle_deafen(),
                 (BindableAction::ToggleScreenShare, true) => st.handle_toggle_screenshare(),
-                (BindableAction::SaveReplay, true) => st.save_replay(),
             }
         }
 
@@ -134,7 +133,6 @@ impl AppState {
                     self.refresh_voice_row(id);
                 }
             }
-            VoiceEvent::ReplaySaved(result) => self.replay_saved(result),
             VoiceEvent::ClipFailed { path, error } => self.clip_failed(&path, &error),
         }
     }

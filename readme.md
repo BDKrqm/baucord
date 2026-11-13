@@ -15,9 +15,6 @@
 >   boosted — in Settings → Audio. (`crates/audio/src/processor/eq.rs`)
 > - **Camera sharing** — the share dialog's Monitor | Camera switch
 >   (Windows). (`crates/video/src/camera.rs`)
-> - **Save the last 5 minutes** — the call's last five minutes kept in
->   memory and written on a button press, one WAV per person and a mix;
->   nobody else is told. (`crates/audio/src/replay.rs`)
 > - **A soundboard** — the files in a folder as buttons, played into the
 >   call through the microphone. (`crates/audio/src/soundboard.rs`)
 > - **Colour themes** — six built in and a custom one from three

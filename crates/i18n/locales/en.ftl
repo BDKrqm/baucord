@@ -674,24 +674,6 @@ audio-voice-tone-hint = Applies to everyone's voice; notifications and streams a
 audio-tone-natural = Natural
 audio-tone-crisp = Crisp
 audio-tone-bass = Bass boosted
-# empecord: the replay buffer. The last five minutes of the call stay
-# in memory; the button writes them, one file per person and a mix.
-# Nobody else is told. Local only.
-replay-save = Save the last 5 minutes
-replay-header = Replay buffer
-replay-toggle = Keep the last 5 minutes of the call
-replay-toggle-hint = Held in memory only, for the Save button next to the microphone (or its key). Nothing is written until you press it, and nobody else is told.
-replay-folder-line = Saved in:
-replay-open-folder = Open recordings folder
-replay-off = The replay buffer is off. Turn it on in Settings → Audio.
-replay-nothing = Nothing was said in the last 5 minutes.
-replay-me = me
-replay-saved = Saved { $seconds } s ({ $people ->
-    [one] 1 person
-   *[other] { $people } people
-}) to { $folder }
-replay-failed = Unable to save the recording: { $error }
-action-save-replay = Save the last 5 minutes
 # empecord: the soundboard. The files in its folder, played into the
 # call through your microphone.
 soundboard-title = Soundboard
@@ -723,7 +705,7 @@ theme-background = Background
 theme-text = Text
 theme-accent = Accent
 theme-custom-hint = Colours as #RRGGBB. The rest of the palette is made from these three; text too close to the background is moved apart until it can be read.
-about-fork-of = A fork of baucord, with spatial voice, per-person equalizers, camera sharing, a replay buffer, a soundboard and colour themes. Works with any baucord server.
+about-fork-of = A fork of baucord, with spatial voice, per-person equalizers, camera sharing, a soundboard and colour themes. Works with any baucord server.
 card-offline = Offline
 invite-dialog-title = Invite users
 invite-role = Joins as

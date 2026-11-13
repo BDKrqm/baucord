@@ -6,6 +6,12 @@ file are summed up in SESSION-GUIDE.md §3 ("Shipped").
 
 ## 1.4.0 (unreleased)
 
+### empecord
+
+- Removed the five-minute audio replay recorder, including the in-memory
+  voice copies, WAV export, Save button, settings and keyboard shortcut.
+  Settings from earlier builds still load; obsolete recorder keys are ignored.
+
 Numbered for the bot and plugin framework planned on it (the spec is
 in the 2026-10-27 review document), on top of the 2026-10 review fixed
 whole: what costs while nothing happens, pictures and memory, Windows
